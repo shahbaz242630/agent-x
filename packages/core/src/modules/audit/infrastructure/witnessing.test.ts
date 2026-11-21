@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   chainWitness,
   headWrittenIn,
+  noteAgainOnCommit,
   noteCommitted,
   nowChainsOf,
   waitWitnessed,
@@ -72,6 +73,19 @@ describe('TR-1 each transaction’s chain heads to the witness log', () => {
     witnessedWrite(soon, ORG, 'soon');
     expect(nowChainsOf(soon)).toEqual([]);
     expect(nowChainsOf({})).toEqual([]);
+  });
+
+  it('TR-3 notes a head again on commit only where a witness log is given and the transaction wrote there', async () => {
+    // A stand-in for a transaction on another driver: afterCommit keeps no hook there (the DB test runs the real one).
+    const tx = { isTransaction: false } as unknown as Parameters<typeof noteAgainOnCommit>[0];
+    await expect(noteAgainOnCommit(tx, ORG)).resolves.toBeUndefined();
+    const { witness, notes } = recording();
+    witnessWith(witness);
+    await noteAgainOnCommit(tx, ORG);
+    witnessedWrite(tx, ORG, 'now');
+    wroteTo(tx, ORG, head(4n));
+    await noteAgainOnCommit(tx, ORG);
+    expect(notes).toEqual([]);
   });
 
   it('waits for the chains given, and for none without a witness log or chains', async () => {

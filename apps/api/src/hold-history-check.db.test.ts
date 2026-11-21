@@ -8,12 +8,20 @@
 // that can't be read is logged as an error (Phase 2 E2c).
 import { readFileSync } from 'node:fs';
 
-import { type CheckedTable, holdHistoryDue, markHoldsWith, withSignedStates } from '@agentx/core/modules/audit';
+import {
+  type CheckedTable,
+  holdHistoryDue,
+  markHoldsWith,
+  withSignedStates,
+  witnessWith,
+} from '@agentx/core/modules/audit';
 import { markOrgWork, markOrgWorkNow } from '@agentx/core/modules/directory';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import { createWitnessLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
+  createFakeWriteOnceStore,
   createTestDatabase,
   LogCapture,
   type OwnerTamper,
@@ -445,14 +453,34 @@ describe(`the hold history on its marks (4D2e D10, Postgres ${server.version})`,
       `insert into directory.org_work (org_id, job, due_at) values ($1, 'hold_history', pg_catalog.now())`,
       [org],
     );
+    // TR-3: the hold's own head witnessed all the same, though the mark's rollback dropped its first note.
+    const witness = createWitnessLog({
+      store: createFakeWriteOnceStore().store,
+      keys,
+      logger: testLogger(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    witnessWith(witness);
     try {
       await within(10_000, held(false), 'the hold');
     } finally {
+      witnessWith(undefined);
       await holder.query('rollback');
       await holder.end();
     }
 
     expect((await holdNow()).outcome).toBe('held');
+    const [head] = await admin().query<{ seq: string; hash: Buffer }>(
+      'select seq::text as seq, hash from audit.heads where org_id = $1',
+      [org],
+    );
+    const pending = witness.pending({ kind: 'organisation', orgId: org });
+    expect(
+      pending.some(({ seq, hash }) => seq === BigInt(head?.seq ?? '0') && hash.equals(head?.hash ?? Buffer.alloc(0))),
+    ).toBe(true);
     expect(lines('org_work.hold_mark_skipped')).toEqual([expect.objectContaining({ level: 'warn', orgId: org })]);
     expect(lines('audit.integrity_failed').filter((line) => line.check === 'hold')).toEqual([]);
     expect(await markOf()).toBeUndefined();
