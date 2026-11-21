@@ -39,6 +39,7 @@ export {
   keptClientMetadata,
   retireClientMetadata,
   sweepClientMetadata,
+  type UnsealedDocument,
 } from './infrastructure/client-metadata-cache.ts';
 export {
   type AllowedFields,
@@ -52,6 +53,7 @@ export {
   openSealed,
   pendingFlowSound,
 } from './infrastructure/flow-seals.ts';
+export { type ClientJudged } from './infrastructure/client-seals.ts';
 export { challengeOf, isCodeChallenge, PKCE_METHOD, pkceMatches } from './infrastructure/pkce.ts';
 export { isLoopback, isRegisteredRedirect, redirectMatches, redirectProblems } from './domain/redirects.ts';
 export {
@@ -63,6 +65,7 @@ export {
 } from './infrastructure/scopes.ts';
 export {
   type Client,
+  type ClientRead,
   CLIENT_KEPT_DAYS,
   clientOf,
   clientSeen,

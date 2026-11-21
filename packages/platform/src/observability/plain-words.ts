@@ -587,6 +587,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet: the app still connects. Past 7 days without a fresh copy, it would be refused.',
     next: 'The reason says why: if the site stays down or refuses for days, tell the app maker.',
   },
+  'oauth.client_unsealed': {
+    happened: "An MCP app's kept record had no seal, so it was not used.",
+    broke: 'An app with its own document is fetched again; an app that registered itself must register again.',
+    next: 'Old records or a key change explain it. Otherwise treat it as tampering.',
+  },
   'oauth.client_metadata_sweep_failed': {
     happened: 'The clean-up of MCP apps’ metadata documents past their day failed.',
     broke: 'Those documents stay a little longer; an app in use is fetched again anyway, so nothing is affected.',
@@ -960,6 +965,16 @@ export const PLAIN_WORDS = {
     broke: "No organisation's spend requests were checked this run.",
     next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database.',
   },
+  'month_totals.cutover_failed': {
+    happened: "Moving an organisation's monthly spending limits onto signed running totals failed.",
+    broke: "That organisation's agents can't spend under a mandate yet: their requests are answered busy.",
+    next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database and the error.',
+  },
+  'month_totals.cutover_held': {
+    happened: "An organisation's monthly limits were not moved onto signed totals: a record can't be trusted.",
+    broke: 'The organisation is on hold and its agents are answered busy.',
+    next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
+  },
   'http.framework_log': {
     happened: 'The web server reported a problem of its own while handling a request.',
     broke: 'That request may not have been answered properly.',
@@ -1041,6 +1056,16 @@ export const PLAIN_WORDS = {
       "An organisation's contacts or sign-in resets passed half of what a list reads, or a hold clearing found over eight thousand of one kind of record.",
     broke: 'Nothing yet. A list past its limit stops working; a hold clearing only gets slower.',
     next: 'Find out why the organisation has so many, and tell the developer.',
+  },
+  'identity.session_last_use_unsealed': {
+    happened: 'A console sign-in from before the last-use seal came back, so it was ended.',
+    broke: 'That person is signed out and signs in again once; nothing else is affected.',
+    next: 'Expected for a while after the release that added the seal. Long after it, treat it as tampering.',
+  },
+  'identity.session_last_use_mismatch': {
+    happened: "A console sign-in's last-use seal did not match, so it was ended.",
+    broke: 'That person signs in again; nothing else is affected.',
+    next: 'Expected during a release or after a rollback (then clear the seals per the incident playbook before rolling forward). Otherwise treat it as tampering.',
   },
   'identity.session_sweep_failed': {
     happened: 'The hourly clean-up of ended sign-in sessions failed.',

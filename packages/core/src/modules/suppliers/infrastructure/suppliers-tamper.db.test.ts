@@ -655,6 +655,44 @@ describe(`FX-TAMPER as the owner on a payee registration: denied by the row chec
     await registrationDenied(id, supplierId, 'pointer');
   });
 
+  it.each([
+    ['started', startedRegistration],
+    ['registered', registeredRegistration],
+  ] as const)('SEC-DB-10 R-15 deleted once %s, which the app role cannot do (S207, GM-2)', async (_, made) => {
+    const { id: supplierId } = await addedSupplier();
+    const id = await made(supplierId);
+    await ownerOfRegistrations.deleteRow(id);
+
+    await registrationDenied(id, supplierId, 'deleted');
+  });
+
+  it('SEC-DB-10 R-15 a registration, once registered, rolled back whole to its saved STARTED state (S207, GM-2)', async () => {
+    const { id: supplierId } = await addedSupplier();
+    const id = await startedRegistration(supplierId);
+    const saved = await ownerOfRegistrations.saveRow(id);
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const found = await registrationOf(tx, states, { orgId: org, id }, supplierId, 'change');
+      if (found.outcome !== 'found') throw new Error(`No registration: ${found.outcome}`);
+      await recordRegistered(tx, states, { orgId: org, id }, found, {
+        beneficiary: {
+          organizationId: org,
+          registrationId: id,
+          beneficiaryRef: `fake-beneficiary-${id}`,
+          payeeIdentity: 'fake-payee-2',
+          nameCheck: 'match',
+          maskedName: 'S****** E***',
+          hint: 'AE…6026',
+          registeredAt: clock.now(),
+        },
+        payee: { key: 'fake-payee-2', keyVersion: null },
+        actor: OPERATOR,
+      });
+    });
+    await ownerOfRegistrations.withoutStatusGuard(() => ownerOfRegistrations.restoreRow(saved));
+
+    await registrationDenied(id, supplierId, 'pointer');
+  });
+
   it('its events stripped of their seals', async () => {
     const { id: supplierId } = await addedSupplier();
     const id = await registeredRegistration(supplierId);

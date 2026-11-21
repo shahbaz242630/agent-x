@@ -71,7 +71,9 @@ export async function createOrganization(
     { orgId: id, id },
     'new',
     { status: ORGANIZATION.initial },
-    { actor, action: 'organization.created', details: {} },
+    // Born counting its agents' months in signed totals (GM-1a): no month held before it to open
+    // (limit-reservations' monthTotalsCutOver reads this detail; the module map keeps it from importing it).
+    { actor, action: 'organization.created', details: { monthTotals: 'signed' } },
   );
   await states.startIntegrityHold(tx, id, actor);
   return recorded;

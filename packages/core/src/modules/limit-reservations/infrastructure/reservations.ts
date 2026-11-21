@@ -8,7 +8,9 @@
 // D2's review; a signed record, 0054, agent-zones.ts), then:
 // - `agentMonthLocking`: its month's period row locked FOR NO KEY UPDATE (level
 //   7), named by the month at `at` in that zone (`periodOf`);
-// - `monthSpentRead`: the agent's month, every reservation but a released one,
+// - `monthSpentRead`: the agent's month, every reservation but a released one
+//   (since GM-1a no decision weighs it: the month's signed total does,
+//   month-totals.ts; this unsealed sum is only compared with it),
 //   read in a statement after the lock, never the locking one, though on the same
 //   trip (4D2e C7), so READ COMMITTED's fresh snapshot sees every reservation the
 //   transaction it waited for committed (§7.2);

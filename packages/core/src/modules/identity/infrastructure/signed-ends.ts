@@ -48,6 +48,49 @@ export const sessionsEndedEvent = (userId: string, endedAt: Date): PlatformEvent
   details: { person: userId.toLowerCase(), at: endedAt.toISOString() },
 });
 
+/**
+ * The platform chain's signed record of one session ended by a sign-out (S207, R-15): its row is deleted, and the
+ * owner could put it back as it was, its MAC still holding. A session this names is never found again (sessions.ts).
+ */
+export const SESSION_ENDED = 'identity.session_ended';
+
+/** The record of one session's end, for the caller to add to the platform chain in the transaction that deleted it, last of its locks. */
+export const sessionEndedEvent = (ended: { readonly userId: string; readonly sessionId: string }, endedAt: Date) =>
+  ({
+    actor: { type: 'system', id: 'api' },
+    action: SESSION_ENDED,
+    // The session by its record ID, never its cookie's, as `record`: audit rows never hold a fact named for a session.
+    details: { person: ended.userId.toLowerCase(), record: ended.sessionId.toLowerCase(), at: endedAt.toISOString() },
+  }) satisfies PlatformEvent;
+
+/**
+ * The platform chain's signed record of a session's row as it was before a step-up gave it a new cookie ID (S207 GM-4,
+ * R-15): the owner could put that row back, its MAC still holding, and the cookie it held before would sign in again.
+ * The row is named by its record ID and the MAC it had (`retired`): a row with that MAC is never found again
+ * (sessions.ts). A MAC is no secret and tells nothing of the cookie.
+ */
+export const SESSION_ROTATED = 'identity.session_rotated';
+
+/** A session's row as a rotation left it behind: its person, record and MAC (sessionRotatedEvent). */
+export interface RetiredSession {
+  readonly userId: string;
+  readonly sessionId: string;
+  readonly mac: Buffer;
+}
+
+/** The record of a rotation, for the caller to add to the platform chain in the transaction that rotated, last of its locks. */
+export const sessionRotatedEvent = (retired: RetiredSession, rotatedAt: Date) =>
+  ({
+    actor: { type: 'system', id: 'api' },
+    action: SESSION_ROTATED,
+    details: {
+      person: retired.userId.toLowerCase(),
+      record: retired.sessionId.toLowerCase(),
+      retired: retired.mac.toString('hex'),
+      at: rotatedAt.toISOString(),
+    },
+  }) satisfies PlatformEvent;
+
 /** How long ends are kept past the newest event checked: a login flow's ten minutes, two for clocks, and spare. */
 const KEPT_MS = 20 * 60 * 1000;
 

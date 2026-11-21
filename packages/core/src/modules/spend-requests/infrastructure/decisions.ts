@@ -13,6 +13,7 @@
 import { sql, type Transaction } from 'kysely';
 
 import {
+  type AlongsideChange,
   type AuditActor,
   type AuditTables,
   type PageAsked,
@@ -100,7 +101,9 @@ export const insertRequestStatement = (tx: RequestsTransaction, request: NewRequ
  * where its decision leads (`spend_request.decided`, with the reasons, and,
  * when it holds capacity, its reservation's month and instant and its payee
  * seal: `held`). The request as its state was sealed and read back: a fresh
- * decision's answer (4D2d P8).
+ * decision's answer (4D2d P8). `total`: the month's total its capacity was
+ * added to, written on the reservation's trip, recorded in the same step of
+ * the chain, first (GM-1a: no trip of its own).
  */
 export async function signRequest(
   tx: RequestsTransaction,
@@ -108,6 +111,7 @@ export async function signRequest(
   request: NewRequest,
   actor: AuditActor,
   held: HeldAs | null,
+  total?: AlongsideChange,
 ): Promise<SpendRequestRecord> {
   const key = { orgId: request.orgId, id: request.id };
   const moved = await states.recordNewAndMove(
@@ -141,6 +145,7 @@ export async function signRequest(
             }),
       },
     },
+    total,
   );
   return recordFrom(request.id, moved.state);
 }

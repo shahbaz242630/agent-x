@@ -1687,7 +1687,7 @@ const settledBy = async (w: World, requestId: string, event: TransactionEvent, f
   const key = { orgId: w.org, id: await transactionIdOf(w, requestId) };
   await withSignedStates(app, w.org, quiet(), async (tx, states) => {
     await transactionOf(tx, states, key, 'change');
-    await lockHoldingsOf(tx, requestId);
+    await lockHoldingsOf(tx, states, { orgId: w.org, requestId });
     const moved = await moveTransaction(
       tx,
       states,
@@ -1697,7 +1697,7 @@ const settledBy = async (w: World, requestId: string, event: TransactionEvent, f
       { actor: { type: 'system', id: 'test' }, details: {} },
     );
     if (moved.outcome !== 'moved') throw new Error(`not moved by ${event}: ${moved.outcome}`);
-    await settleHoldings(tx, { requestId, status: moved.to, at: clock.now() });
+    await settleHoldings(tx, states, { orgId: w.org, requestId, status: moved.to, at: clock.now() });
   });
 };
 
@@ -1727,7 +1727,9 @@ describe('what a handed-off request holds follows its payment (C3; ADR-006 ยง10โ
     await settledBy(w, request.id, 'reverse');
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
 
-    expect(await holdingsChecked(w)).toEqual([expect.objectContaining({ mismatched: 0, tampered: 0 })]);
+    expect(await holdingsChecked(w)).toEqual([
+      expect.objectContaining({ mismatched: 0, tampered: 0, totals: 1, totalsMismatched: 0 }),
+    ]);
   });
 
   it('keeps an unknown one blocked until it is known: then spent on success, given back after a proven failure', async () => {
@@ -1743,7 +1745,35 @@ describe('what a handed-off request holds follows its payment (C3; ADR-006 ยง10โ
 
     expect(await holdingsOf(w, paid.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
     expect(await holdingsOf(w, failed.id)).toEqual(HOLDS_AFTER.FAILED);
-    expect(await holdingsChecked(w)).toEqual([expect.objectContaining({ mismatched: 0, tampered: 0 })]);
+    expect(await holdingsChecked(w)).toEqual([
+      expect.objectContaining({ mismatched: 0, tampered: 0, totals: 1, totalsMismatched: 0 }),
+    ]);
+  });
+
+  it("gives a verified cancellation's amount back to its month's total once (GM-1a), the rest still held", async () => {
+    const { w, acting } = await ready();
+    const cancelled = await ask(acting, w, { amount: SMALL(2n) });
+    const kept = await ask(acting, w, { amount: SMALL(2n) });
+    await handoffOf(w).run();
+    const heldBefore = await spentOf(w, acting);
+
+    await settledBy(w, cancelled.id, 'cancel');
+
+    expect(await holdingsOf(w, cancelled.id)).toEqual({ reservation: 'RELEASED', released: true });
+    expect(await holdingsOf(w, kept.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect(await spentOf(w, acting)).toBe(heldBefore - SMALL(2n).minor);
+    const released = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select('action')
+        .where('subject_type', '=', 'month_total')
+        .where('action', '=', 'month_total.released')
+        .execute(),
+    );
+    expect(released).toHaveLength(1);
+    expect(await holdingsChecked(w)).toEqual([
+      expect.objectContaining({ mismatched: 0, tampered: 0, totals: 1, totalsMismatched: 0, totalsMissing: 0 }),
+    ]);
   });
 
   it('SEC-LIM-02: an unknown payment still uses the month and blocks its order; a failed one gives both back', async () => {

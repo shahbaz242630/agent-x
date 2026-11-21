@@ -69,6 +69,7 @@ export {
   type Voided,
   type VoidingShown,
   voidPendingOf,
+  lockedTotalOf,
   voidedWith,
   voidRequest,
 } from './infrastructure/endings.ts';
@@ -102,7 +103,12 @@ export {
   type OrderWeighed,
   releaseClaim,
 } from './infrastructure/order-claims.ts';
-export { monthLockedAndTotalsWeighed, totalsWeighed } from './infrastructure/weighed-totals.ts';
+export {
+  type DecisionMonthTotal,
+  monthLockedAndTotalsWeighed,
+  totalsWeighed,
+} from './infrastructure/weighed-totals.ts';
+export { type CutoverDone, cutOverMonthTotals } from './infrastructure/month-totals-cutover.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { requestDueNow, SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';

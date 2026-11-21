@@ -286,14 +286,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // Made at the first sign-in and read; a user changed or deleted would
       // move or orphan every membership and event pointing at them. Only when
       // their sessions were last all ended moves on (0098, AG10), which a
-      // sign-in made before it can't get past, and a person made before 0100
-      // is given their MAC, once.
+      // sign-in made before it can't get past. A person's MAC is written once,
+      // as they are added, and never changed (0108, S207).
       appMay: ['SELECT', 'INSERT'],
-      appMayUpdate: ['sessions_ended_at', 'mac', 'mac_key_version'],
+      appMayUpdate: ['sessions_ended_at'],
     },
     'identity.sessions': {
       reason:
-        "The console's server-side sessions (ADR-003 §5-§7): opened at sign-in, before any organisation is known, and a person's sessions are ended together across all of theirs",
+        "The console's server-side sessions (ADR-003 §5-§7): opened at sign-in, before any organisation is known, and a person's sessions are ended together across all of theirs. It keeps the MAC of its last use with its cookie's hash, with a key the database never holds, and that key's version (0111, S207 GM-4): a last use moved by anyone without the app's keys ends the session",
       columns: [
         'id',
         'user_id',
@@ -306,12 +306,22 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'ends_at',
         'mac',
         'mac_key_version',
+        'last_use_mac',
+        'last_use_mac_key_version',
       ],
       // Opened, read and ended; changed only in its cookie ID (rotated, its
-      // MAC made again with it: 0100) and its last-seen time, never moved to
-      // another person, nor what it proved or when it ends.
+      // MAC made again with it: 0100) and its last-seen time (its MAC made
+      // again with it: 0111), never moved to another person, nor what it
+      // proved or when it ends.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['cookie_hash', 'last_seen_at', 'mac', 'mac_key_version'],
+      appMayUpdate: [
+        'cookie_hash',
+        'last_seen_at',
+        'mac',
+        'mac_key_version',
+        'last_use_mac',
+        'last_use_mac_key_version',
+      ],
     },
     'identity.login_flows': {
       reason:
@@ -520,7 +530,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     'oauth.clients': {
       reason:
-        "The MCP clients that registered themselves (0093, RFC 7591; 6E3a): a client registers before anyone is signed in or any organisation is known, and one client connects to many organisations. Its name is what it says it is, never trusted; it grants nothing: a connection is made only by a person's consent, inside their organisation. It keeps the network it registered from (an IPv4 /24, an IPv6 /48), for each network's own day's cap (0096, 6F1 G4), cleared once that day is past (0099, AG8)",
+        "The MCP clients that registered themselves (0093, RFC 7591; 6E3a): a client registers before anyone is signed in or any organisation is known, and one client connects to many organisations. Its name is what it says it is, never trusted; it grants nothing: a connection is made only by a person's consent, inside their organisation. It keeps the network it registered from (an IPv4 /24, an IPv6 /48), for each network's own day's cap (0096, 6F1 G4), cleared once that day is past (0099, AG8). It keeps the MAC of what it registered, with a key the database never holds, and that key's version (0107, S207 H3): one planted or changed by anyone without the app's keys is never believed",
       columns: [
         'client_id',
         'name',
@@ -533,6 +543,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'first_connected_at',
         'last_connected_at',
         'network',
+        'mac',
+        'mac_key_version',
       ],
       // Registered, read, and swept once unused; changed only to note when it connects (0094) and to clear its network a
       // day on (0099), never its addresses.
@@ -595,11 +607,20 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     'oauth.client_metadata': {
       reason:
-        "The client ID metadata documents Agent X fetched for MCP clients on its allowlist (0095, 6E3c; CIMD): a client names itself by an https address before anyone is signed in, and one client connects to many organisations. A public document, fetched by a GET carrying no customer data (ADR-013), kept a day; it grants nothing: a connection is made only by a person's consent, inside their organisation",
-      columns: ['client_id', 'name', 'redirect_uris', 'grant_types', 'fetched_at', 'expires_at'],
-      // Kept, read, fetched again over its own row once its day is past, and swept.
+        "The client ID metadata documents Agent X fetched for MCP clients on its allowlist (0095, 6E3c; CIMD): a client names itself by an https address before anyone is signed in, and one client connects to many organisations. A public document, fetched by a GET carrying no customer data (ADR-013), kept a day; it grants nothing: a connection is made only by a person's consent, inside their organisation. A document keeps the MAC of what it says and how long it is kept, with a key the database never holds, and that key's version (0107, S207 H3): one planted or changed by anyone without the app's keys is never believed",
+      columns: [
+        'client_id',
+        'name',
+        'redirect_uris',
+        'grant_types',
+        'fetched_at',
+        'expires_at',
+        'mac',
+        'mac_key_version',
+      ],
+      // Kept, read, fetched again over its own row (sealed again with it, 0107) once its day is past, and swept.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['name', 'redirect_uris', 'grant_types', 'fetched_at', 'expires_at'],
+      appMayUpdate: ['name', 'redirect_uris', 'grant_types', 'fetched_at', 'expires_at', 'mac', 'mac_key_version'],
     },
     'platform_controls.job_lease': {
       reason:

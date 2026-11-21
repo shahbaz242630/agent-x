@@ -46,6 +46,9 @@ interface SessionsTable {
   /** `session-mac` over every column but last_seen_at (row-macs.ts, 0100), and its key's version. */
   mac: Buffer;
   mac_key_version: number;
+  /** `session-mac` over the cookie hash and last_seen_at (row-macs.ts, 0111), and its key's version; none on a session from before. */
+  last_use_mac: Buffer | null;
+  last_use_mac_key_version: number | null;
 }
 
 interface LoginFlowsTable {
