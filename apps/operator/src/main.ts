@@ -813,11 +813,26 @@ export async function noteHeadsAsTheyStand(
     sealedHead({ kind: 'platform' }, platformHead);
     const orgId = 'orgId' in request && typeof request.orgId === 'string' ? request.orgId : undefined;
     if (orgId !== undefined) {
-      const org = await withTenant(database, orgId, (tx) =>
-        tx.selectFrom('audit.heads').select(columns).where('org_id', '=', orgId).executeTakeFirst(),
-      );
-      // An organisation with no chain yet has nothing to witness: its request was refused before writing.
-      if (org !== undefined) sealedHead({ kind: 'organisation', orgId: orgId.toLowerCase() }, org);
+      // Its events asked first: one written after that read leaves its head row in place for the next, as the app
+      // never deletes one.
+      const { written, org } = await withTenant(database, orgId, async (tx) => ({
+        written: await tx
+          .selectFrom('audit.events')
+          .select('seq')
+          .where('org_id', '=', orgId)
+          .limit(1)
+          .executeTakeFirst(),
+        org: await tx.selectFrom('audit.heads').select(columns).where('org_id', '=', orgId).executeTakeFirst(),
+      }));
+      // A chain with no events yet (an export of a new organisation's) has no head to witness. One with events and no
+      // head row had it taken away past the app: never witnessed as nothing.
+      if (org === undefined && written === undefined) return;
+      if (org === undefined) {
+        throw new Error(
+          "the organisation's audit chain has no head row: it was changed past the app, and is not witnessed",
+        );
+      }
+      sealedHead({ kind: 'organisation', orgId: orgId.toLowerCase() }, org);
     }
   } finally {
     await database.destroy();

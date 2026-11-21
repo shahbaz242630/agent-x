@@ -209,9 +209,17 @@ function resultProblem({ status, resourceId }: IdempotentResult): string | undef
   return undefined;
 }
 
-/** The hash's message: every part of the request's namespace, then its payload, IDs in lower case as Postgres prints them. */
-function requestMessage({ orgId, client, operation, key, payload }: IdempotentRequest): Message {
-  return ['idempotent-request', orgId.toLowerCase(), client.kind, client.id.toLowerCase(), operation, key, payload];
+/**
+ * The hash's message: every part of the request's namespace, then its payload, IDs in lower case as Postgres prints
+ * them. Rows made from TR-1's migration 0115 on hash `v2`, which carries a head seal (headKeptIn); `v1` is a row from
+ * before, which carries none.
+ */
+function requestMessage(
+  { orgId, client, operation, key, payload }: IdempotentRequest,
+  version: 'v1' | 'v2' = 'v2',
+): Message {
+  const parts = [orgId.toLowerCase(), client.kind, client.id.toLowerCase(), operation, key, payload] as const;
+  return version === 'v2' ? ['idempotent-request', 'v2', ...parts] : ['idempotent-request', ...parts];
 }
 
 /**
@@ -226,6 +234,8 @@ interface StoredKey {
   readonly result_id: string | null;
   readonly head_seq: bigint | null;
   readonly head_hash: Buffer | null;
+  readonly platform_head_seq: bigint | null;
+  readonly platform_head_hash: Buffer | null;
   readonly head_mac: Buffer | null;
   readonly head_mac_key_version: number | null;
 }
@@ -248,24 +258,21 @@ interface KeyRow {
  */
 const claimedIn = new WeakSet<object>();
 
-/**
- * The chain head an earlier write left, as its row kept it (TR-1, migration 0115): its place and hash, `none` for a write that
- * recorded no chain event, `legacy` for a row from before migration 0115, `forged` for one whose MAC doesn't hold.
- */
-export type HeadKept =
-  | { readonly kind: 'head'; readonly seq: bigint; readonly hash: Buffer }
-  | { readonly kind: 'none' }
-  | { readonly kind: 'legacy' }
-  | { readonly kind: 'forged'; readonly missing?: true };
+/** A chain head: its place and its event's hash. */
+export interface KeptHead {
+  readonly seq: bigint;
+  readonly hash: Buffer;
+}
 
 /**
- * From when every kept key must carry its write's head seal (TR-1, migration 0115): the later of 28 November 2026 and
- * this code's day (22 November 2026) plus the keys' longest retention (IDEMPOTENCY_RETENTION_DAYS, 30 days) and a day
- * for the daily sweep, so every honest row from before 0115 has been swept by then. Before it, a row with no seal is
- * answered as before (`legacy`); from it, one with none is a seal taken away past the app (`forged`, `missing`).
- * TODO(S209): delete this constant and the `legacy` path once it has passed.
+ * The chain heads an earlier write left, as its row kept them (TR-1, migration 0115): `sealed` with the organisation's
+ * and the platform's, each none where the write recorded no event there; `legacy` for a row from before 0115 (its
+ * request hashed as v1); `forged` for one whose seal fails, or (`missing`) a v2 row with its seal taken away.
  */
-export const HEAD_SEALS_REQUIRED_FROM = new Date('2026-12-23T00:00:00.000Z');
+export type HeadKept =
+  | { readonly kind: 'sealed'; readonly org: KeptHead | undefined; readonly platform: KeptHead | undefined }
+  | { readonly kind: 'legacy' }
+  | { readonly kind: 'forged'; readonly missing?: true };
 
 /**
  * The transactions whose write was answered from an earlier one's stored result (a replay), writing nothing (TR-1),
@@ -277,32 +284,38 @@ const replayedIn = new WeakMap<object, HeadKept>();
 /** The head an earlier write left, where the transaction's idempotent write was answered from its result (TR-1). */
 export const answeredFromEarlier = (tx: object): HeadKept | undefined => replayedIn.get(tx);
 
-/** The highest head each transaction moved each organisation's chain to, as the audit trail tells it (TR-1). */
-const headsWritten = new WeakMap<object, Map<string, { readonly seq: bigint; readonly hash: Buffer }>>();
+/** The highest head each transaction moved each chain to (an organisation's by its ID, the platform's as `platform`). */
+const headsWritten = new WeakMap<object, Map<string, KeptHead>>();
 
-/** The audit trail's word that `tx` moved the organisation's chain to `head`: kept with the write's answer (migration 0115). */
-export function chainHeadWritten(
-  tx: object,
-  orgId: string,
-  head: { readonly seq: bigint; readonly hash: Buffer },
-): void {
-  const byOrg = headsWritten.get(tx) ?? new Map<string, { readonly seq: bigint; readonly hash: Buffer }>();
-  headsWritten.set(tx, byOrg);
-  const held = byOrg.get(orgId.toLowerCase());
-  if (held === undefined || head.seq > held.seq)
-    byOrg.set(orgId.toLowerCase(), { seq: head.seq, hash: Buffer.from(head.hash) });
+/** The platform chain's key among those. */
+const PLATFORM_HEAD = 'platform';
+
+/**
+ * The audit trail's word that `tx` moved a chain to `head` (an organisation's by its ID, or `platform`): kept with the
+ * write's answer (TR-1, migration 0115).
+ */
+export function chainHeadWritten(tx: object, chain: string, head: KeptHead): void {
+  const byChain = headsWritten.get(tx) ?? new Map<string, KeptHead>();
+  headsWritten.set(tx, byChain);
+  const name = chain.toLowerCase();
+  const held = byChain.get(name);
+  if (held === undefined || head.seq > held.seq) byChain.set(name, { seq: head.seq, hash: Buffer.from(head.hash) });
 }
 
-/** What a row's head MAC covers: the key's own names and the head, or none. */
-const headMessage = (row: KeyRow, head: { readonly seq: bigint; readonly hash: Buffer } | undefined): Message => [
+/** A head's parts in a seal: its place and hash, or none. */
+const sealed = (head: KeptHead | undefined): [string, Buffer] =>
+  head === undefined ? ['none', Buffer.alloc(0)] : [head.seq.toString(), head.hash];
+
+/** What a row's head MAC covers: the key's own names, and the organisation's and the platform's heads, or none. */
+const headMessage = (row: KeyRow, org: KeptHead | undefined, platform: KeptHead | undefined): Message => [
   'idempotent-head',
   row.orgId,
   row.kind,
   row.clientId,
   row.operation,
   row.key,
-  head === undefined ? 'none' : head.seq.toString(),
-  head === undefined ? Buffer.alloc(0) : head.hash,
+  ...sealed(org),
+  ...sealed(platform),
 ];
 
 /**
@@ -339,12 +352,9 @@ const notFirst = (): IdempotencyFailed =>
 export function createIdempotentWrites({
   keys,
   logger,
-  now = () => new Date(),
 }: {
   readonly keys: KeyProvider;
   readonly logger: Logger;
-  /** The clock a row with no head seal is judged by (HEAD_SEALS_REQUIRED_FROM): the system's unless a test says. */
-  readonly now?: () => Date;
 }): IdempotentWrites {
   return Object.freeze({
     async run<Schema>(
@@ -406,7 +416,7 @@ export function createIdempotentWrites({
           Object.freeze({ outcome: 'done', result: await doAndRecord(at, keys, work) });
 
         if (claimed.rows.length === 1) return await done();
-        const answer = await answerFromRow(at, keys, message, now);
+        const answer = await answerFromRow(at, keys, request);
         if (answer !== undefined) return answer;
         // No row, though one stood in the claim's way: swept since (B1e-2), so
         // claimed again, once. A row still in the way and still unread is one
@@ -414,7 +424,7 @@ export function createIdempotentWrites({
         log.info('idempotency.claimed_again', facts);
         const again = await orBusy(inserted.execute(tx));
         if (again.rows.length === 1) return await done();
-        const second = await answerFromRow(at, keys, message, now);
+        const second = await answerFromRow(at, keys, request);
         if (second !== undefined) return second;
         log.error('idempotency.unreadable', { ...facts, problem: 'row_hidden' });
         throw new IdempotencyFailed(
@@ -473,13 +483,13 @@ interface Claim<Schema> {
 async function answerFromRow<Schema>(
   { tx, row, log, facts }: Claim<Schema>,
   keys: KeyProvider,
-  message: Message,
-  now: () => Date,
+  request: IdempotentRequest,
 ): Promise<IdempotentWrite | undefined> {
   // READ COMMITTED: this statement sees the row the insert waited for.
   const { rows } = await sql<StoredKey>`
     select request_hash, request_hash_key_version, result_status, result_id,
-           head_seq, head_hash, head_mac, head_mac_key_version from idempotency.keys
+           head_seq, head_hash, platform_head_seq, platform_head_hash, head_mac, head_mac_key_version
+    from idempotency.keys
     where org_id = ${row.orgId} and client_kind = ${row.kind} and client_id = ${row.clientId}
       and operation = ${row.operation} and key = ${row.key}
   `.execute(tx);
@@ -508,32 +518,40 @@ async function answerFromRow<Schema>(
       "The idempotency key's row was made with a request-hash key version this process doesn't hold",
     );
   }
-  if (!keys.verifyMac('request-hash', hashKeyVersion, message, hash)) {
+  // A row made from 0115 on hashes its request as v2 and must carry its head seal; only one hashed as v1 is from before.
+  const v2 = keys.verifyMac('request-hash', hashKeyVersion, requestMessage(request, 'v2'), hash);
+  if (!v2 && !keys.verifyMac('request-hash', hashKeyVersion, requestMessage(request, 'v1'), hash)) {
     log.warn('idempotency.conflict', facts);
     return Object.freeze({ outcome: 'conflict' });
   }
   log.info('idempotency.replayed', { ...facts, resultStatus: result.status });
-  replayedIn.set(tx, headKeptIn(keys, row, stored, now()));
+  replayedIn.set(tx, v2 ? headKeptIn(keys, row, stored) : { kind: 'legacy' });
   return Object.freeze({ outcome: 'replayed', result });
 }
 
-/** The head a row kept (migration 0115), checked by its MAC: a version not held, or a MAC that fails, is `forged`. */
-function headKeptIn(keys: KeyProvider, row: KeyRow, stored: StoredKey, at: Date): HeadKept {
-  const { head_seq: seq, head_hash: hash, head_mac: mac, head_mac_key_version: version } = stored;
-  if (mac === null || version === null) {
-    if (seq !== null || hash !== null) return { kind: 'forged' };
-    // TODO(S209): from HEAD_SEALS_REQUIRED_FROM on, every honest row has its seal: this path goes then.
-    return at < HEAD_SEALS_REQUIRED_FROM ? { kind: 'legacy' } : { kind: 'forged', missing: true };
-  }
-  const head = typeof seq === 'bigint' && hash instanceof Buffer ? { seq, hash } : undefined;
-  if ((seq === null) !== (hash === null)) return { kind: 'forged' };
+/** A head as a row keeps it: both columns or neither, else undefined for a row not ours (`false`). */
+const keptIn = (seq: bigint | null, hash: Buffer | null): KeptHead | undefined | false => {
+  if (seq === null && hash === null) return undefined;
+  return typeof seq === 'bigint' && hash instanceof Buffer ? { seq, hash } : false;
+};
+
+/**
+ * The heads a v2 row kept (migration 0115), checked by their seal: none at all is a seal taken away (`missing`); a seal
+ * that fails, or one under a key version not held, is `forged`.
+ */
+function headKeptIn(keys: KeyProvider, row: KeyRow, stored: StoredKey): HeadKept {
+  const { head_mac: mac, head_mac_key_version: version } = stored;
+  const org = keptIn(stored.head_seq, stored.head_hash);
+  const platform = keptIn(stored.platform_head_seq, stored.platform_head_hash);
+  if (mac === null || version === null) return { kind: 'forged', missing: true };
+  if (org === false || platform === false) return { kind: 'forged' };
   try {
-    if (!keys.verifyMac('request-hash', version, headMessage(row, head), mac)) return { kind: 'forged' };
+    if (!keys.verifyMac('request-hash', version, headMessage(row, org, platform), mac)) return { kind: 'forged' };
   } catch (error) {
     if (error instanceof KeyError) return { kind: 'forged' };
     throw error;
   }
-  return head === undefined ? { kind: 'none' } : { kind: 'head', ...head };
+  return { kind: 'sealed', org, platform };
 }
 
 /**
@@ -550,13 +568,15 @@ async function doAndRecord<Schema>(
   const bad = resultProblem(answer);
   if (bad !== undefined) throw new IdempotencyFailed('bad_result', `An idempotent write's answer refused: ${bad}`);
   const result = Object.freeze({ status: answer.status, resourceId: answer.resourceId.toLowerCase() });
-  // The organisation's chain head the write left (TR-1, migration 0115), sealed with the key's names: a replay holds to it.
-  const head = headsWritten.get(tx)?.get(row.orgId);
-  const { mac: headMac, keyVersion: headKeyVersion } = keys.mac('request-hash', headMessage(row, head));
+  // The chain heads the write left (TR-1, migration 0115), sealed with the key's names: a replay holds to them.
+  const org = headsWritten.get(tx)?.get(row.orgId);
+  const platform = headsWritten.get(tx)?.get(PLATFORM_HEAD);
+  const { mac: headMac, keyVersion: headKeyVersion } = keys.mac('request-hash', headMessage(row, org, platform));
   const recorded = await sql<{ recorded: number }>`
     update idempotency.keys set result_status = ${result.status}, result_id = ${result.resourceId},
-      head_seq = ${head?.seq ?? null}, head_hash = ${head?.hash ?? null}, head_mac = ${headMac},
-      head_mac_key_version = ${headKeyVersion}
+      head_seq = ${org?.seq ?? null}, head_hash = ${org?.hash ?? null},
+      platform_head_seq = ${platform?.seq ?? null}, platform_head_hash = ${platform?.hash ?? null},
+      head_mac = ${headMac}, head_mac_key_version = ${headKeyVersion}
     where org_id = ${row.orgId} and client_kind = ${row.kind} and client_id = ${row.clientId}
       and operation = ${row.operation} and key = ${row.key} and result_status is null
     returning 1 as recorded

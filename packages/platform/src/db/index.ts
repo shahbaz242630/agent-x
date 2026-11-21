@@ -24,7 +24,7 @@ export {
   answeredFromEarlier,
   chainHeadWritten,
   type HeadKept,
-  HEAD_SEALS_REQUIRED_FROM,
+  type KeptHead,
 } from './idempotency.ts';
 export {
   isLockTimeout,

@@ -18,7 +18,7 @@ import {
   headIsSealed,
   type WitnessClass,
 } from '@agentx/platform/audit-chain';
-import { afterCommit, type HeadKept } from '@agentx/platform/db';
+import { afterCommit, type HeadKept, type KeptHead } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
 
@@ -86,31 +86,125 @@ export const nowChainsOf = (tx: object): readonly Chain[] =>
   [...(writtenIn.get(tx)?.values() ?? [])].filter(({ klass }) => klass === 'now').map(({ chain }) => chain);
 
 /**
- * A replay's write cut out of the chain (TR-1): the head the earlier write left is no longer the chain's (below its head,
- * or another event at its place), or its row's record of it doesn't hold. Never answered as done: 503, the alarm and the
- * hold.
+ * A replay's write cut out of a chain (TR-1): a head the earlier write left is no longer its chain's (missing, not
+ * sealed, below its head, another event at its place, or the next event not linked to it), or the row's record of the
+ * heads doesn't hold. Never answered as done: 503, the alarm and the hold.
  */
 export class WriteCutBack extends Error {
   readonly seq: bigint | undefined;
-  /** Where the row's record of the head failed rather than the chain: rewritten (`forged`) or taken away (`missing`). */
+  /** Where the row's record of the heads failed rather than a chain: rewritten (`forged`) or taken away (`missing`). */
   readonly record: 'forged' | 'missing' | undefined;
+  /** The chain the write was cut from. */
+  readonly chain: 'organisation' | 'platform';
 
-  constructor(seq: bigint | undefined, record?: 'forged' | 'missing') {
-    super("The write this request repeats is no longer on the organisation's audit chain");
+  constructor(
+    seq: bigint | undefined,
+    record?: 'forged' | 'missing',
+    chain: 'organisation' | 'platform' = 'organisation',
+  ) {
+    super('The write this request repeats is no longer on the audit chain');
     this.name = 'WriteCutBack';
     this.seq = seq;
     this.record = record;
+    this.chain = chain;
   }
 }
 
+/** A chain's head and, where a kept head is asked, what stands at its place and the next: one statement's columns. */
+interface HeadAndKept {
+  readonly head: { readonly seq: bigint; readonly hash: Buffer } | undefined;
+  readonly keptHash: unknown;
+  readonly nextPrev: unknown;
+}
+
 /**
- * For an answer that writes nothing but tells of an earlier write (an idempotent replay, TR-1), whose own head may never
- * have gone out (its answer was the 503 for that): the chain held to the head that write left (`kept`, from its row),
- * then the chain's head as it stands witnessed `now` once `tx` commits, so the answer waits for it (withSignedStates). A
- * head at or above the write's, with the write's event at its place, covers it: every read is held to it, and a walk
- * re-hashes through it. Throws WriteCutBack where the write's head is gone from the chain, or its record is forged. A
- * head not sealed is left to every read's own alarm, witnessed never: witnessing a head the owner planted would hold the
- * organisation to it for good. One statement.
+ * Whether the chain still holds the head a write left (`kept`): the chain's head sealed and at or past it, the event at
+ * its place with its hash, and the next event, where there is one, linked to it (so a row put back beside a cut branch
+ * stands alone, and fails); at the head's own place, the head itself.
+ */
+const stillHolds = ({ head, keptHash, nextPrev }: HeadAndKept, kept: KeptHead): boolean => {
+  if (head === undefined || head.seq < kept.seq) return false;
+  if (!(keptHash instanceof Buffer) || !keptHash.equals(kept.hash)) return false;
+  if (head.seq === kept.seq) return head.hash.equals(kept.hash);
+  return nextPrev instanceof Buffer && nextPrev.equals(kept.hash);
+};
+
+/** The organisation's head, sealed or none, and what stands at the kept place and after it: one statement. */
+async function orgHeadRead(
+  tx: Transaction<unknown>,
+  keys: KeyProvider,
+  chain: Chain & { readonly kind: 'organisation' },
+  kept: KeptHead | undefined,
+): Promise<HeadAndKept> {
+  const at = kept?.seq ?? null;
+  const { rows } = await sql<Record<string, unknown>>`
+    select h.seq, h.hash, h.mac, h.mac_key_version,
+      (select e.hash from audit.events e where e.org_id = ${chain.orgId} and e.seq = ${at}::bigint and e.seq <= h.seq)
+        as kept_hash,
+      (select e.prev_hash from audit.events e
+       where e.org_id = ${chain.orgId} and e.seq = ${at}::bigint + 1 and e.seq <= h.seq) as next_prev
+    from audit.heads h where h.org_id = ${chain.orgId}
+  `.execute(tx);
+  const [row] = rows;
+  const head = row === undefined ? undefined : headFields(row);
+  return {
+    head: head !== undefined && headIsSealed(keys, chain, head) ? { seq: head.seq, hash: head.hash } : undefined,
+    keptHash: row?.kept_hash,
+    nextPrev: row?.next_prev,
+  };
+}
+
+/** The platform's head, sealed and the one row or none, and what stands at the kept place and after it: one statement. */
+async function platformHeadRead(
+  tx: Transaction<unknown>,
+  keys: KeyProvider,
+  kept: KeptHead | undefined,
+): Promise<HeadAndKept> {
+  const at = kept?.seq ?? null;
+  const { rows } = await sql<Record<string, unknown>>`
+    select h.seq, h.hash, h.mac, h.mac_key_version,
+      (select pg_catalog.count(*) from platform_controls.audit_head) as heads,
+      (select e.hash from platform_controls.audit_events e where e.seq = ${at}::bigint and e.seq <= h.seq limit 1)
+        as kept_hash,
+      (select e.prev_hash from platform_controls.audit_events e
+       where e.seq = ${at}::bigint + 1 and e.seq <= h.seq limit 1) as next_prev
+    from platform_controls.audit_head h
+  `.execute(tx);
+  const [row, ...more] = rows;
+  const head = row === undefined || more.length > 0 ? undefined : headFields(row);
+  return {
+    head:
+      head !== undefined && headIsSealed(keys, { kind: 'platform' }, head)
+        ? { seq: head.seq, hash: head.hash }
+        : undefined,
+    keptHash: row?.kept_hash,
+    nextPrev: row?.next_prev,
+  };
+}
+
+/** The chain's head as it stands witnessed `now` once `tx` commits: the answer waits for it (withSignedStates). */
+async function witnessOnCommit(
+  tx: Transaction<unknown>,
+  chain: Chain,
+  head: { readonly seq: bigint; readonly hash: Buffer },
+): Promise<void> {
+  if (witness === undefined) return;
+  witnessedWrite(tx, chain, 'now');
+  wroteTo(tx, chain, head);
+  await afterCommit(tx, () => {
+    noteCommitted(tx, chain, head);
+  });
+}
+
+/**
+ * For an answer that writes nothing but tells of an earlier write (an idempotent replay, TR-1), whose own heads may never
+ * have gone out (its answer was the 503 for that): each chain held to the head that write left there (`kept`, from its
+ * row: the organisation's, and the platform's where it recorded there), then that chain's head as it stands witnessed
+ * `now`, so the answer waits for it. A head at or above the write's, with the write's event at its place linked onward,
+ * covers it: every read is held to it, and a walk re-hashes through it. Throws WriteCutBack where a kept head is gone
+ * from its chain (its head missing or not sealed among those), or the row's record of the heads fails. A head not sealed
+ * where nothing is kept on its chain (a legacy row, or a write that recorded nothing there) is left to every read's own
+ * alarm, witnessed never: witnessing a head the owner planted would hold the organisation to it for good.
  */
 export async function witnessReplayedWrite(
   tx: Transaction<unknown>,
@@ -119,28 +213,16 @@ export async function witnessReplayedWrite(
   kept: HeadKept,
 ): Promise<void> {
   if (kept.kind === 'forged') throw new WriteCutBack(undefined, kept.missing === true ? 'missing' : 'forged');
-  const chain: Chain = { kind: 'organisation', orgId: orgId.toLowerCase() };
-  const keptAt = kept.kind === 'head' ? kept.seq : null;
-  const { rows } = await sql<Record<string, unknown>>`
-    select h.seq, h.hash, h.mac, h.mac_key_version,
-           (select e.hash from audit.events e
-            where e.org_id = ${chain.orgId} and e.seq = ${keptAt}::bigint and e.seq <= h.seq) as kept_hash
-    from audit.heads h where h.org_id = ${chain.orgId}
-  `.execute(tx);
-  const [row] = rows;
-  const head = row === undefined ? undefined : headFields(row);
-  if (head === undefined || !headIsSealed(keys, chain, head)) return;
-  if (kept.kind === 'head') {
-    const there = row?.kept_hash;
-    if (!(there instanceof Buffer) || !there.equals(kept.hash)) throw new WriteCutBack(kept.seq);
+  const chain = { kind: 'organisation', orgId: orgId.toLowerCase() } as const;
+  const org = kept.kind === 'sealed' ? kept.org : undefined;
+  const orgRead = await orgHeadRead(tx, keys, chain, org);
+  if (org !== undefined && !stillHolds(orgRead, org)) throw new WriteCutBack(org.seq);
+  if (kept.kind === 'sealed' && kept.platform !== undefined) {
+    const platformRead = await platformHeadRead(tx, keys, kept.platform);
+    if (!stillHolds(platformRead, kept.platform)) throw new WriteCutBack(kept.platform.seq, undefined, 'platform');
+    if (platformRead.head !== undefined) await witnessOnCommit(tx, { kind: 'platform' }, platformRead.head);
   }
-  if (witness === undefined) return;
-  const sealed = { seq: head.seq, hash: head.hash };
-  witnessedWrite(tx, chain, 'now');
-  wroteTo(tx, chain, sealed);
-  await afterCommit(tx, () => {
-    noteCommitted(tx, chain, sealed);
-  });
+  if (orgRead.head !== undefined) await witnessOnCommit(tx, chain, orgRead.head);
 }
 
 /**

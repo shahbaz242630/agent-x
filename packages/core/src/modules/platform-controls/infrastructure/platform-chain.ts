@@ -81,7 +81,7 @@ import {
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { afterCommit, JOB_ANSWER_WITHIN_MS, limitedTransaction } from '@agentx/platform/db';
+import { afterCommit, chainHeadWritten, JOB_ANSWER_WITHIN_MS, limitedTransaction } from '@agentx/platform/db';
 import { type Kysely, type QueryResult, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
@@ -177,6 +177,8 @@ export interface PlatformChain {
     cursor: CheckedPoint,
     target: CheckedPoint,
     most: number,
+    /** The places whose hashes the step keeps as it reads them (TR-1: witnessed heads confirmed on the way). */
+    watch?: { readonly heads: readonly HeadSeen[]; readonly found: Map<bigint, Buffer> },
   ): Promise<ChainStep>;
   /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as checkFromAnchor's. */
   countStep(db: Kysely<PlatformControlsTables>, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
@@ -815,6 +817,8 @@ export function createPlatformChain({
     });
     moved.head = { seq: sealed.seq, hash: sealed.hash };
     wroteTo(tx, CHAIN, moved.head);
+    // Kept with an idempotent write's answer (TR-1, migration 0115): a replay holds the platform chain to it.
+    chainHeadWritten(tx, 'platform', moved.head);
     return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
   };
 
@@ -910,8 +914,19 @@ export function createPlatformChain({
       cursor: CheckedPoint,
       target: CheckedPoint,
       most: number,
+      watch?: { readonly heads: readonly HeadSeen[]; readonly found: Map<bigint, Buffer> },
     ): Promise<ChainStep> {
-      return limitedTransaction(db, (tx) => passStep(keys, CHAIN, readerFor(tx, keys), cursor, target, most));
+      return limitedTransaction(db, (tx) => {
+        const reader = readerFor(tx, keys);
+        return passStep(
+          keys,
+          CHAIN,
+          watch === undefined ? reader : watchingPlaces(reader, watch.heads, watch.found),
+          cursor,
+          target,
+          most,
+        );
+      });
     },
 
     countStep(db: Kysely<PlatformControlsTables>, after: bigint, upTo: bigint): Promise<ChainProblem | undefined> {

@@ -517,6 +517,42 @@ describe('the witness log: reading', () => {
 });
 
 describe('the witness log: memory and snapshots', () => {
+  it('a thousand heads let go write the leader’s next snapshot before the hour, at most one a quarter hour, so a restart doesn’t confirm them again', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const { log } = witnessOn(createFakeWriteOnceStore(), { snapshots, leads: true, time });
+    await log.refresh();
+    log.soon(CHAIN, head(1n, 1));
+    await log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    const many = Array.from({ length: 1_000 }, (_, at) => head(BigInt(at + 2), 1));
+    for (const one of many.slice(0, 999)) log.soon(CHAIN, one);
+    log.prune(CHAIN, many.slice(0, 999));
+    await log.flush();
+    // 999 let go: not yet.
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    log.soon(CHAIN, many[999] ?? head(1_001n, 1));
+    log.prune(CHAIN, [many[999] ?? head(1_001n, 1)]);
+    await log.flush();
+    // A thousand, within a quarter hour of the last: not yet.
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    time.held.at += 15 * MINUTE;
+    log.soon(CHAIN, head(1_002n, 1));
+    await log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
+    // Another thousand let go at once after it: the next waits its quarter hour too, the hour as ever.
+    const more = Array.from({ length: 1_000 }, (_, at) => head(BigInt(at + 2_000), 1));
+    for (const one of more) log.soon(CHAIN, one);
+    log.prune(CHAIN, more);
+    time.held.at += 15 * MINUTE - 1;
+    await log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
+    time.held.at += 1;
+    log.soon(CHAIN, head(3_002n, 1));
+    await log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(3);
+  });
+
   it('past what it may hold, the chain holding most lets its lowest head go, loudly, and reads beyondMemory until a rebase: anchors and prunes clear nothing, a snapshot keeps it', async () => {
     const snapshots = createFakeWriteOnceStore();
     const time = clock();

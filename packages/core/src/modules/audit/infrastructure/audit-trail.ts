@@ -464,6 +464,8 @@ export interface AuditTrail {
     cursor: CheckedPoint,
     target: CheckedPoint,
     most: number,
+    /** The places whose hashes the step keeps as it reads them (TR-1: witnessed heads confirmed on the way). */
+    watch?: { readonly heads: readonly HeadSeen[]; readonly found: Map<bigint, Buffer> },
   ): Promise<WalkedStep>;
   /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as passStep's. */
   countStep(db: Kysely<AuditTables>, orgId: string, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
@@ -1953,13 +1955,18 @@ export function createAuditTrail({
       cursor: CheckedPoint,
       target: CheckedPoint,
       most: number,
+      watch?: { readonly heads: readonly HeadSeen[]; readonly found: Map<bigint, Buffer> },
     ): Promise<WalkedStep> {
       const chain = chainOf(orgId);
       const seen = new Map<string, bigint>();
       const step = await withTenant(
         db,
         chain.orgId,
-        (tx) => passStep(keys, chain, seeingSigned(readerFor(tx, chain.orgId, keys), seen), cursor, target, most),
+        (tx) => {
+          const reader = seeingSigned(readerFor(tx, chain.orgId, keys), seen);
+          const watching = watch === undefined ? reader : watchingPlaces(reader, watch.heads, watch.found);
+          return passStep(keys, chain, watching, cursor, target, most);
+        },
         JOB_LIMITS,
       );
       return walked(step, seen);

@@ -691,7 +691,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
       // The write this replay repeats cut out of the chain (TR-1): the alarm, and the hold once the transaction ends.
       const own = orgId.toLowerCase();
       logger.child({ orgId: own }).error('audit.integrity_failed', {
-        chain: 'organisation',
+        chain: error.chain,
         check: 'witness',
         reason: 'cut_back',
         ...(error.seq === undefined ? { record: error.record ?? 'forged' } : { seq: error.seq.toString() }),

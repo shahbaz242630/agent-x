@@ -503,6 +503,46 @@ describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version}
     expect((await run(['--request', pause])).code).toBe(0);
   });
 
+  it('a named organisation whose head row was taken away is no “done”: nothing noted for it', async () => {
+    const created = await run(['create-organization', '--name', NAME]);
+    const orgId = String(created.line('operator.organization_created')?.orgId);
+    const noted: string[] = [];
+    const witness = { note: (chain: Chain) => noted.push(chain.kind) };
+    const config = loadOperatorConfig(envFor('operator'));
+    const request = {
+      command: 'factor-reset-notice',
+      orgId,
+      userId: uuidV7Ids.next(),
+      reason: 'INC-2026/0211',
+      id: uuidV7Ids.next(),
+    } as const;
+    // Control: its sealed head noted, the platform's too.
+    await noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness);
+    expect(noted).toEqual(['platform', 'organisation']);
+    // A chain with no events yet (an export of a new organisation's): no head to witness, and done.
+    const empty = { ...request, orgId: uuidV7Ids.next() };
+    await noteHeadsAsTheyStand(config, auditKeys, quiet(), empty, witness);
+    expect(noted).toEqual(['platform', 'organisation', 'platform']);
+    noted.length = 2;
+    const owner = await tamperAsOwner(database, ORGANIZATIONS, orgId);
+    try {
+      const [kept] = await owner.query<{ head: unknown }>(
+        'select pg_catalog.row_to_json(h) as head from audit.heads h where h.org_id = $1',
+        [orgId],
+      );
+      await owner.query('delete from audit.heads where org_id = $1', [orgId]);
+      await expect(noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness)).rejects.toThrow(/no head row/);
+      expect(noted).toEqual(['platform', 'organisation', 'platform']);
+      // Put back, for the tests after this one, which tell every organisation.
+      await owner.query(
+        'insert into audit.heads select * from pg_catalog.json_populate_record(null::audit.heads, $1::json)',
+        [JSON.stringify(kept?.head)],
+      );
+    } finally {
+      await owner.end();
+    }
+  });
+
   it('never notes a head that isn’t sealed (one planted past the app): the command is not done, said, and nothing noted', async () => {
     const noted: bigint[] = [];
     const witness = { note: (_chain: Chain, head: { readonly seq: bigint }) => noted.push(head.seq) };
