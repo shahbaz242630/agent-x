@@ -106,8 +106,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a membership's grant summary (OR1), a registered contact (B6-1a), a factor reset (B6-3a), an agent, an agent key (C1-1), a connection (6E3a) and its refresh head (R-15, 0102), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), its instruction and transaction (Phase 4 B3), a proposal to mark that failed (gate H10), an agent's month total (GM-1a, 0110), and a payee's split window (GM-1b, 0112)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then each one's grant summary, then contacts, then resets, then agents before their keys, then the keys' connections, then each one's refresh head, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then their remittance settings, then the agents' month zones, then spend requests, then their instructions and transactions, then the proposals to mark those failed, then the agents' month totals, then the payees' split windows.
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a membership's grant summary (OR1), a registered contact (B6-1a), a factor reset (B6-3a), an agent, an agent key (C1-1), a connection (6E3a) and its refresh head (R-15, 0102), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), its instruction and transaction (Phase 4 B3), a proposal to mark that failed (gate H10), an agent's month total (GM-1a, 0110), a payee's split window (GM-1b, 0112), and an order's slot (TR-2, 0114)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then each one's grant summary, then contacts, then resets, then agents before their keys, then the keys' connections, then each one's refresh head, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then their remittance settings, then the agents' month zones, then spend requests, then their instructions and transactions, then the proposals to mark those failed, then the agents' month totals, then the payees' split windows, then the orders' slots.
     const [
       organizations,
       invitations,
@@ -135,6 +135,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
       proposalRows,
       monthTotals,
       payeeWindows,
+      orderSlots,
       ...others
     ] = PRODUCT_AUTHORITY_TABLES;
 
@@ -164,6 +165,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(proposalRows).toBe(transactions.FAILURE_PROPOSALS);
     expect(monthTotals).toBe(limitReservations.MONTH_TOTALS);
     expect(payeeWindows).toBe(limitReservations.PAYEE_WINDOWS);
+    expect(orderSlots).toBe(spendRequests.ORDER_SLOTS);
     expect(others).toEqual([]);
     // CI's view of them takes the same fields and the same machine, as `status`.
     expect(AUTHORITY_TABLES).toEqual([
@@ -362,6 +364,13 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: limitReservations.PAYEE_WINDOWS.fields,
         fixedAtCreation: ['supplier_id', 'payee_key', 'currency', 'created_at'],
       },
+      // An order's slot moves with each claim and release (R-15, 0114): no status; its kind, supplier, key, hash and making fixed.
+      {
+        table: spendRequests.ORDER_SLOTS.table,
+        subject: spendRequests.ORDER_SLOTS.subject,
+        fields: spendRequests.ORDER_SLOTS.fields,
+        fixedAtCreation: ['kind', 'supplier_id', 'payee_key', 'key_hash', 'created_at'],
+      },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
     expect(AUTHORITY_TABLES[0]?.status).toBe(ORGANIZATION);
@@ -415,6 +424,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[24]?.status).toBeUndefined();
     expect(AUTHORITY_TABLES[25]?.fields).toBe(limitReservations.PAYEE_WINDOWS.fields);
     expect(AUTHORITY_TABLES[25]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[26]?.fields).toBe(spendRequests.ORDER_SLOTS.fields);
+    expect(AUTHORITY_TABLES[26]?.status).toBeUndefined();
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

@@ -862,6 +862,15 @@ describe('the duplicate check and claiming an order (D3)', () => {
     expect(await check(org, 'PO-2026/0042')).toBe(false);
   });
 
+  it('looks for no lookalike of a reference the bank would not carry (no bank key), only for the same order', async () => {
+    const org = await organisation();
+    // No letter or digit: the bank is sent the request's own ID instead, which no other order can look like.
+    const looks = await inOrg(org, (tx) =>
+      claimsOn(tx, { supplierId: org.supplier.id, payeeKey: null, reference: '--/--' }),
+    );
+    expect(looks).toEqual({ duplicate: false, possible: false });
+  });
+
   it('finds an order claimed under the same payee key by another supplier (ADR-014 §3)', async () => {
     const org = await organisation();
     const [first, second] = [await supplierOf(org.id, 'payee-1'), await supplierOf(org.id)];

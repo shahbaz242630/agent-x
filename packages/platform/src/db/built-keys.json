@@ -92,6 +92,8 @@
   {"table":"security.partner_event_evidence","name":"partner_event_evidence_pkey","definition":"PRIMARY KEY (id)"},
   {"table":"spend_requests.order_claims","name":"one_claim_a_request","definition":"UNIQUE (org_id, request_id)"},
   {"table":"spend_requests.order_claims","name":"order_claims_pkey","definition":"PRIMARY KEY (org_id, id)"},
+  {"table":"spend_requests.order_slots","name":"one_slot_an_order","definition":"UNIQUE NULLS NOT DISTINCT (org_id, kind, supplier_id, payee_key, key_hash)"},
+  {"table":"spend_requests.order_slots","name":"order_slots_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"spend_requests.requests","name":"claimed_as_asked","definition":"UNIQUE (org_id, id, supplier_id, order_key)"},
   {"table":"spend_requests.requests","name":"requests_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"suppliers.beneficiary_registrations","name":"beneficiary_registrations_pkey","definition":"PRIMARY KEY (org_id, id)"},

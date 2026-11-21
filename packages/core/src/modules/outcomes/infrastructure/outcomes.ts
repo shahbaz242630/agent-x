@@ -18,7 +18,8 @@ import {
 } from '../../limit-reservations/index.ts';
 import {
   lockClaimsOf,
-  lockedTotalOf,
+  heldSlotsLetGo,
+  lockedHoldingsOf,
   type PaymentHolds,
   releaseClaim,
   type SpendRequestsTables,
@@ -28,18 +29,23 @@ import { settlementOf } from './settlement.ts';
 
 type HoldingsTransaction = Transaction<LimitReservationsTables & SpendRequestsTables & AuditTables>;
 
-/** Each transaction's month total lockHoldingsOf locked, by request ID in lower case, for settleHoldings to give back to. */
-const totalsLocked = new WeakMap<HoldingsTransaction, Map<string, LockedTotal>>();
+/**
+ * Each transaction's month total, windows and order slots lockHoldingsOf locked, by request ID in lower case, for
+ * settleHoldings to give back to and let go of.
+ */
+const totalsLocked = new WeakMap<HoldingsTransaction, Map<string, LockedHoldings>>();
 
-type LockedTotal = Awaited<ReturnType<typeof lockedTotalOf>>;
+type LockedHoldings = Awaited<ReturnType<typeof lockedHoldingsOf>>;
 
 /**
  * Locks the request's reservation and order claim (level 11), then its month's
  * total for change (11a, GM-1a: a verified failure gives its capacity back),
- * then its payee windows (11b, GM-1b, in order of ID), before the move that
- * settles them takes the head. The total and windows are found by the
+ * then its payee windows (11b, GM-1b, in order of ID), then its order slots
+ * (11c, TR-2: a verified failure lets the order go), before the move that
+ * settles them takes the head. The total, windows and slots are found by the
  * request's signed state and sealed decision; a request whose decision sealed
- * no month (decided before E1) holds none.
+ * no month (decided before E1) holds no total or windows, its slots as the
+ * slots' cutover named them.
  */
 export async function lockHoldingsOf(
   tx: HoldingsTransaction,
@@ -61,8 +67,8 @@ export async function lockHoldingsOf(
   // Read FOR SHARE (8) after the payment (10) and these (11), against the order: safe, as a handed-off request's status
   // never moves again, so no one takes it for change (an ending, a carry, a void take only pending ones), and this read
   // neither waits on nor blocks any holder of 10 or 11. Its total (11a) comes after, before the move's head (12).
-  const locked = await lockedTotalOf(tx, states, { orgId, id: requestId }, 'share');
-  const ofTx = totalsLocked.get(tx) ?? new Map<string, LockedTotal>();
+  const locked = await lockedHoldingsOf(tx, states, { orgId, id: requestId }, 'share');
+  const ofTx = totalsLocked.get(tx) ?? new Map<string, LockedHoldings>();
   ofTx.set(requestId.toLowerCase(), locked);
   totalsLocked.set(tx, ofTx);
 }
@@ -84,10 +90,11 @@ export async function settleHoldings(
   }: { readonly orgId: string; readonly requestId: string; readonly status: TransactionStatus; readonly at: Date },
 ): Promise<void> {
   const { reservation, releasesClaim } = settlementOf(status);
+  const locked = totalsLocked.get(tx)?.get(requestId.toLowerCase());
   if (reservation === 'RELEASED') {
     // Locked by lockHoldingsOf in this transaction (lockPayment's): one missing gives nothing back, which the holdings
     // check then finds as a total holding more than its reservations, never less.
-    await givenBack(tx, states, orgId, totalsLocked.get(tx)?.get(requestId.toLowerCase()), {
+    await givenBack(tx, states, orgId, locked?.total, {
       at,
       change: {
         actor: { type: 'system', id: 'api' },
@@ -97,13 +104,21 @@ export async function settleHoldings(
     });
     // Its payee windows likewise (GM-1b), read for change with the total: none read, nothing given back, which the
     // holdings check then finds as a window holding more than its reservations, never less.
-    await heldWindowsGivenBack(tx, states, orgId, totalsLocked.get(tx)?.get(requestId.toLowerCase()), {
+    await heldWindowsGivenBack(tx, states, orgId, locked?.total, {
       at,
       change: { actor: { type: 'system', id: 'api' }, action: 'payee_window.released', details: {} },
     });
   }
   if (reservation !== null) await settleReservationsOf(tx, { requestId, to: reservation, at });
-  if (releasesClaim) await releaseClaim(tx, { requestId, releasedAt: at });
+  if (releasesClaim) {
+    // Its order let go of in its slots (TR-2), read for change with its total: none read, nothing let go, which the
+    // holdings check then finds as a slot held with its claim released (fail safe: the order stays refused).
+    await heldSlotsLetGo(tx, states, orgId, locked, {
+      at,
+      change: { actor: { type: 'system', id: 'api' }, action: 'order_slot.released', details: {} },
+    });
+    await releaseClaim(tx, { requestId, releasedAt: at });
+  }
 }
 
 /**

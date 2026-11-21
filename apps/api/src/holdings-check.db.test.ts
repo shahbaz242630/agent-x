@@ -151,6 +151,11 @@ const job = (w: World, page = 200, pagesARun = 50) =>
   });
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
+/**
+ * The requests' own alarms: a claim changed past the app is a mismatch of its order's slots too (TR-2, held to the open
+ * claims, order-slots.db.test.ts), alarmed beside the request's.
+ */
+const requestAlarms = () => lines('audit.integrity_failed').filter((line) => line.subjectType !== 'order_slot');
 
 const holdOf = (w: World) => withSignedStates(app, w.org, quiet(), (tx, states) => states.holdRecord(tx, w.org));
 
@@ -211,7 +216,7 @@ describe('the holdings check (E1)', () => {
     await check.run();
 
     expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 1, mismatched: 0 })]);
-    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(requestAlarms()).toEqual([]);
     expect(await holdOf(w)).toMatchObject({ outcome: 'clear' });
     // A pass ended starts again from the beginning.
     await check.run();
@@ -392,7 +397,7 @@ describe('the holdings check (E1)', () => {
     // Moved, it also holds capacity in a month with no total at all.
     const movesMonth = what === 'a reservation moved to another month';
     const totalAlarm = expect.objectContaining({ reason: 'holding', subjectType: 'month_total' }) as unknown;
-    expect(lines('audit.integrity_failed')).toEqual([
+    expect(requestAlarms()).toEqual([
       expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: held[whose] }),
       ...(cutsTheMonth ? [totalAlarm] : []),
       ...(movesMonth ? [totalAlarm] : []),
@@ -597,7 +602,7 @@ describe('the holdings check (E1)', () => {
     await job(w).run();
 
     expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
-    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(requestAlarms()).toEqual([]);
   });
 
   it.each(payeeChanged)('raises the alarm and the hold for %s past the app (E1b)', async (_, change, whose) => {
@@ -608,7 +613,7 @@ describe('the holdings check (E1)', () => {
 
     await job(w).run();
 
-    expect(lines('audit.integrity_failed')).toEqual([
+    expect(requestAlarms()).toEqual([
       expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: held[whose] }),
     ]);
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
@@ -706,7 +711,7 @@ describe('the holdings check (E1)', () => {
       await pastTheApp(w, (owner) => owner.query(change, [allowed]));
       await job(w).run();
 
-      expect(lines('audit.integrity_failed')).toEqual([
+      expect(requestAlarms()).toEqual([
         expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: allowed }),
       ]);
     },
@@ -723,7 +728,7 @@ describe('the holdings check (E1)', () => {
 
     await job(w).run();
 
-    expect(lines('audit.integrity_failed')).toEqual([
+    expect(requestAlarms()).toEqual([
       expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: held.allowed }),
     ]);
   });
@@ -749,9 +754,7 @@ describe('the holdings check (E1)', () => {
 
     await job(w).run();
 
-    expect(lines('audit.integrity_failed')).toEqual([
-      expect.objectContaining({ reason: 'unsigned', objectId: allowed }),
-    ]);
+    expect(requestAlarms()).toEqual([expect.objectContaining({ reason: 'unsigned', objectId: allowed })]);
     expect(lines('holdings_check.passed')).toEqual([
       expect.objectContaining({ requests: 2, mismatched: 0, tampered: 1 }),
     ]);
@@ -771,9 +774,7 @@ describe('the holdings check (E1)', () => {
 
     await job(w).run();
 
-    expect(lines('audit.integrity_failed')).toEqual([
-      expect.objectContaining({ reason: 'deleted', objectId: allowed }),
-    ]);
+    expect(requestAlarms()).toEqual([expect.objectContaining({ reason: 'deleted', objectId: allowed })]);
     expect(lines('holdings_check.passed')).toEqual([
       expect.objectContaining({ requests: 2, mismatched: 0, tampered: 1 }),
     ]);

@@ -64,6 +64,7 @@
   "security.org_events",
   "security.partner_event_evidence",
   "spend_requests.order_claims",
+  "spend_requests.order_slots",
   "spend_requests.requests",
   "suppliers.beneficiary_registrations",
   "suppliers.remittance_settings",

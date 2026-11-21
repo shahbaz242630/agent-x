@@ -1066,6 +1066,17 @@ export const PLAIN_WORDS = {
     broke: 'The organisation is on hold and its agents are answered busy.',
     next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
   },
+  'order_slots.cutover_failed': {
+    happened: "Moving an organisation's duplicate-order check onto signed order slots failed.",
+    broke: "That organisation's agents can't spend under a mandate yet: their requests are answered busy.",
+    next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database and the error.',
+  },
+  'order_slots.cutover_held': {
+    happened:
+      "An organisation's duplicate-order check was not moved onto signed order slots: a record can't be trusted.",
+    broke: 'The organisation is on hold and its agents are answered busy.',
+    next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
+  },
   'http.framework_log': {
     happened: 'The web server reported a problem of its own while handling a request.',
     broke: 'That request may not have been answered properly.',

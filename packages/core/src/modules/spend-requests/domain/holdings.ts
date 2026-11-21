@@ -24,7 +24,8 @@
 //   RELEASED one, no claim or a released one; but where its signed ending
 //   kept its capacity (AT13d: ended past what the digest remembers), its one
 //   reservation stays HELD as decided, as its month total and windows kept the
-//   amount, and its claim released;
+//   amount, and its claim open as its order slots keep it (TR-2, partner
+//   S209: fail safe); or, ended so before TR-2, its claim released;
 // - VALIDATING: never seen once committed (a request leaves it in the
 //   transaction that made it), so it never matches.
 import type { Money } from '../../../shared-kernel/index.ts';
@@ -54,10 +55,12 @@ export interface HeldSealed {
   readonly windows: readonly string[] | null;
 }
 
-/** What a decision that holds capacity seals (signRequest's `held`): always a payee seal and its windows. */
+/** What a decision that holds capacity seals (signRequest's `held`): always a payee seal, its windows and its slots. */
 export interface HeldAs extends Omit<HeldSealed, 'payee' | 'bankKeyed' | 'windows'> {
   readonly payee: PayeeSeal;
   readonly windows: readonly string[];
+  /** The order slots its claim joined (TR-2, 0114), by ID: an ending lets go of these, whatever the claim says. */
+  readonly slots: readonly string[];
 }
 
 /**
@@ -154,6 +157,12 @@ export function windowsOf(sealed: unknown): readonly string[] | null {
   return ids.every((id) => WINDOW_ID.test(id)) ? ids : null;
 }
 
+/**
+ * The order slot IDs a decision sealed (`orderSlots`, TR-2), or its slots' cutover named, in the same form as its
+ * windows: null for none.
+ */
+export const slotIdsOf = (sealed: unknown): readonly string[] | null => windowsOf(sealed);
+
 /** The payee seal the details hold: none before E1b; unreadable if either half is there but not whole. */
 function payeeSealOf(details: Readonly<Record<string, unknown>> | undefined): HeldSealed['payee'] {
   const mac = details?.payeeSeal;
@@ -193,16 +202,25 @@ export function holdingsMatch(
   const [reservation] = reservations;
   if (holds === 'ended') {
     const claimsReleased = claims.every(({ released }) => released);
-    // Its signed ending kept its capacity (AT13d): its one reservation stays HELD, as decided; otherwise none holds.
+    // Its signed ending kept its capacity (AT13d): its one reservation stays HELD, as decided, and its order kept, its
+    // one claim open as its own (TR-2), or released where it ended so before TR-2; otherwise none holds.
     if (request.capacityKept === true) {
-      return claimsReleased && reservation !== undefined && reservationAsDecided(request, reservation, 'HELD');
+      return (
+        (claimsReleased || claimHeldAsDecided(claims)) &&
+        reservation !== undefined &&
+        reservationAsDecided(request, reservation, 'HELD')
+      );
     }
     return reservations.every(({ state }) => state === 'RELEASED') && claimsReleased;
   }
-  const [claim] = claims;
-  if (reservation === undefined || claim === undefined || claim.released || !claim.itsOwn) return false;
-  if (!claim.payeeAsSealed) return false;
+  if (reservation === undefined || !claimHeldAsDecided(claims)) return false;
   return reservationAsDecided(request, reservation, RESERVATION_STATE[holds]);
+}
+
+/** Whether the request's one claim is open, on its own supplier and order, and on its payee as sealed. */
+function claimHeldAsDecided(claims: readonly ClaimHolding[]): boolean {
+  const [claim] = claims;
+  return claim !== undefined && !claim.released && claim.itsOwn && claim.payeeAsSealed;
 }
 
 /** Whether the reservation is in `state`, on its payee as sealed, holding exactly what the request was decided to. */
