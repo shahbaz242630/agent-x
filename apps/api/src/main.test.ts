@@ -1203,6 +1203,22 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     checkStatesWith(undefined);
   });
 
+  it('`all` keeps its own anchors and digest alone: no read-only copy beside them, nor one in their place (AT13b)', async () => {
+    const anchors = mkdtempSync(path.join(tmpdir(), 'agentx-api-anchors-'));
+    folders.push(anchors);
+    for (const env of [ENV, { ...ENV, AGENTX_AUDIT_ANCHORS_DIR: anchors }]) {
+      checkStatesWith(undefined);
+      phase2Jobs.scheduled.length = 0;
+      const { host } = await start({ ...env, AGENTX_ROLE: 'all' });
+      expect(phase2Jobs.scheduled.map(([name]) => name)).not.toContain('anchors_read');
+      // The digest the anchor check records into, given by oneCopyJobs: never replaced by a web copy's, or by none.
+      expect(statesDigest()).toBeDefined();
+      expect((statesDigest() as { record?: unknown }).record).toEqual(expect.any(Function));
+      await stopped(host);
+    }
+    checkStatesWith(undefined);
+  });
+
   it('`jobs` runs every job and no server, stays up with nothing listening, and stops cleanly', async () => {
     const serversBefore = built.length;
     const { host, server, events } = await start({ ...ENV, AGENTX_ROLE: 'jobs' });
