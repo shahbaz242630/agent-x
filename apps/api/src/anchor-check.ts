@@ -146,6 +146,10 @@
 // (CONFIRM_EVENTS_A_HAND_OFF), apart from the run's.
 // On the chain, it is let go; a fork is the alarm and the hold; one that can't be walked is kept, said
 // (`audit.witness_head_unconfirmed`), and the chain anchored no more until it is: never let go unseen.
+// Between runs (TR-3), the leader's probe after each read of the log (the chains that gained a head, and those holding
+// most) lets go every head it found on the chain but the highest, which stands for those below it: so a burst never
+// fills what the log may hold. A chain that let heads go for memory anyway anchors again once a walk held to every head
+// still held runs from below the lowest let go to at or past the highest (the log's walkedPast), with no rebase.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type Anchor,
@@ -394,7 +398,10 @@ export interface AnchorCheckOptions {
   /** How many of the probe's pages are read at once, each on a connection of its own: never more than the lanes. */
   readonly probePages?: number;
   /** The witness log (TR-1): the heads each probe and walk is held to, let go once confirmed. None, held to none. */
-  readonly witness?: Pick<WitnessLog, 'pending' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> | undefined;
+  readonly witness?:
+    | (Pick<WitnessLog, 'pending' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> &
+        Partial<Pick<WitnessLog, 'walkedPast'>>)
+    | undefined;
 }
 
 /** See `stopFlushMs`. */
@@ -832,14 +839,16 @@ export function createAnchorCheck({
   ): readonly Witnessed[] | undefined => {
     if (witness === undefined) return [];
     if (!readSince(report.began) || unconfirmed.has(keyOf(chain))) return undefined;
-    if (witness.beyondMemory(chain)) {
-      log.error('audit.witness_beyond_memory', { chain: chain.kind, anchoring: false });
-      return undefined;
-    }
     const asked = report.heldTo ?? [];
     const from = report.walkedFrom ?? last?.seq ?? 0n;
     const askedOf = (head: Witnessed) => asked.some(({ seq, hash }) => seq === head.seq && hash.equals(head.hash));
     if (witness.pending(chain).some((head) => head.seq <= report.seq && !askedOf(head))) return undefined;
+    // Heads let go for memory (TR-3): a walk held to every head still held, from below the lowest of them to at or past
+    // the highest, passed every place they held; else the chain waits for one that does (or a rebase), said.
+    if (witness.beyondMemory(chain) && witness.walkedPast?.(chain, from, report.seq) !== false) {
+      log.error('audit.witness_beyond_memory', { chain: chain.kind, anchoring: false });
+      return undefined;
+    }
     return asked.filter(({ seq }) => seq > from && seq <= report.seq);
   };
 
@@ -1304,13 +1313,28 @@ export function createAnchorCheck({
       () => probe(asked, stop, 1),
       signal,
     );
-    for (const { orgId } of asked) {
+    for (const { orgId, heldTo } of asked) {
       const answer = answers.get(orgId);
-      if (answer?.kind !== 'failed' || answer.problem.reason !== 'cut_back') continue;
       const chain = { kind: 'organisation', orgId } as const;
+      if (answer === undefined || answer.kind === 'missed') continue;
+      if (answer.kind !== 'failed') {
+        letGoBelowHighest(chain, heldTo);
+        continue;
+      }
+      if (answer.problem.reason !== 'cut_back') continue;
       alarmed(chain, logger.child({ orgId }), 'cut_back', answer.problem.seq);
       await settle(organizations, orgId, signal);
     }
+  };
+
+  /**
+   * The heads a probe found on the chain, each its event's hash at its place in the probe's one statement (TR-3), let go
+   * but the highest: on a hash-linked chain it stands for every one below it (a cut below any is below it too, and a
+   * walk from the anchor re-hashes the links between), so a burst between anchor runs never fills what may be held.
+   */
+  const letGoBelowHighest = (chain: Chain, heldTo: readonly Witnessed[]): void => {
+    const [, ...below] = heldTo.toSorted((one, other) => (one.seq > other.seq ? -1 : 1));
+    if (below.length > 0) witness?.prune(chain, below);
   };
 
   /** A probe's answers kept for the turns: unmoved or failing as found, read anyway; its misses said in one line. */
