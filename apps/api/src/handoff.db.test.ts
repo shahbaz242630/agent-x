@@ -36,8 +36,10 @@ import {
   APPROVAL_HORIZON_MS,
   approveRequest,
   cancelRequest,
+  expireRequest,
   requestOf,
   SPEND_REQUESTS,
+  voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
 import {
   REMITTANCE_SETTINGS,
@@ -883,6 +885,149 @@ describe('an approval older than the horizon: denied at the hand-off, its holdin
 
     expect(await statusOf(w, request.id)).toBe('APPROVED');
   });
+
+  /** Past what the digest remembers of a request (the horizon and its day's margin): its facts forgotten. */
+  const PAST_THE_DIGEST = APPROVAL_HORIZON_MS + 24 * HOUR + 5 * 60_000;
+
+  /** How many times the organisation's payee windows were given capacity back. */
+  const windowsReleased = (w: World) =>
+    withTenant(
+      app,
+      w.org,
+      async (tx) =>
+        (
+          await tx
+            .selectFrom('audit.events')
+            .select('id')
+            .where('subject_type', '=', 'payee_window')
+            .where('action', '=', 'payee_window.released')
+            .execute()
+        ).length,
+    );
+
+  /**
+   * The request ended by a person (its capacity given back once), then that end taken back by the owner past what the
+   * digest remembers: the end's events deleted, its row put back as it was before.
+   */
+  async function endTakenBack(w: World, requestId: string) {
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      const saved = await owner.saveRow(requestId);
+      await signed(w, (tx, states) =>
+        cancelRequest(
+          tx,
+          states,
+          keys,
+          { orgId: w.org, id: requestId },
+          { kind: 'user', userId: w.admin.userId },
+          clock.now(),
+        ),
+      );
+      await owner.query('delete from audit.events where org_id = $1 and subject_id = $2 and action = $3', [
+        w.org,
+        requestId,
+        'spend_request.cancelled',
+      ]);
+      await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+    } finally {
+      await owner.end();
+    }
+  }
+
+  it('an approved request’s end taken back past the digest: voided, no call, its capacity never given back twice', async () => {
+    // A month's cap of AED 1,000, AED 600 of it paid: what the double give-back would open.
+    const { w, acting } = await ready({ perOrderLimit: AED(100_000n), monthlyLimit: AED(100_000n) });
+    const paid = await ask(acting, w, { amount: AED(60_000n) });
+    await handoffOf(w).run();
+    expect(await statusOf(w, paid.id)).toBe('HANDED_OFF');
+    const request = await ask(acting, w, { amount: AED(30_000n), orderReference: 'INV-TAKEN-BACK' });
+    expect(request.status).toBe('APPROVED');
+    await endTakenBack(w, request.id);
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    const [spent, windows] = [await spentOf(w, acting), await windowsReleased(w)];
+    clock.advanceBy(PAST_THE_DIGEST);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect(submitted()).toBe(0);
+    expect(lines('handoff.denied')).toEqual([
+      expect.objectContaining({ requestId: request.id, causes: 'APPROVAL_LAPSED' }),
+    ]);
+    // Its own reservation released; the month total and the payee windows untouched.
+    expect(await holdingsOf(w, request.id)).toMatchObject({ reservation: 'RELEASED', released: true });
+    expect(await spentOf(w, acting)).toBe(spent);
+    expect(await windowsReleased(w)).toBe(windows);
+    expect(lines('spend_request.capacity_kept')).toEqual([
+      expect.objectContaining({ level: 'warn', requestId: request.id }),
+    ]);
+    // A new request needing the capacity given back twice (600 paid, 500 more) still meets the cap.
+    const next = await ask(acting, w, { amount: AED(50_000n), orderReference: 'INV-NEXT' });
+    expect(next.status).not.toBe('APPROVED');
+    expect(next.reasons).toContain('MANDATE_MONTHLY_LIMIT');
+  });
+
+  it('a waiting request’s end taken back past the digest: expired, its capacity never given back twice', async () => {
+    const { w, acting } = await ready({ approvalThreshold: AED(50_000n) });
+    const request = await ask(acting, w, { amount: AED(60_000n) });
+    expect(request.status).toBe('APPROVAL_REQUIRED');
+    await endTakenBack(w, request.id);
+    const [spent, windows] = [await spentOf(w, acting), await windowsReleased(w)];
+    clock.advanceBy(PAST_THE_DIGEST);
+
+    const ended = await withSignedStates(app, w.org, { ...quiet(), logger: testLogger(capture) }, (tx, states) =>
+      expireRequest(tx, states, keys, { orgId: w.org, id: request.id }, clock.now()),
+    );
+
+    expect(ended).toMatchObject({ outcome: 'ended' });
+    expect(await statusOf(w, request.id)).toBe('EXPIRED');
+    expect(await spentOf(w, acting)).toBe(spent);
+    expect(await windowsReleased(w)).toBe(windows);
+    expect(lines('spend_request.capacity_kept')).toEqual([expect.objectContaining({ requestId: request.id })]);
+  });
+
+  it('a brake’s batch voids one taken back past the digest the same: its capacity never given back twice', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: AED(60_000n) });
+    await endTakenBack(w, request.id);
+    const [spent, windows] = [await spentOf(w, acting), await windowsReleased(w)];
+    clock.advanceBy(PAST_THE_DIGEST);
+
+    const voided = await withSignedStates(app, w.org, { ...quiet(), logger: testLogger(capture) }, (tx, states) =>
+      voidPendingOf(tx, states, keys, w.org, { agentId: w.agent }, 'AGENT_SUSPENDED', clock.now()),
+    );
+
+    expect(voided).toBe(1);
+    expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect(await spentOf(w, acting)).toBe(spent);
+    expect(await windowsReleased(w)).toBe(windows);
+    expect(lines('spend_request.capacity_kept')).toEqual([expect.objectContaining({ requestId: request.id })]);
+  });
+
+  it.each([
+    ['voided by the hand-off', 'void'],
+    ['expired', 'expire'],
+  ] as const)(
+    'the positive control: one %s within what the digest remembers gives its capacity back',
+    async (_what, how) => {
+      const { w, acting } = await ready(how === 'void' ? {} : { approvalThreshold: AED(50_000n) });
+      const request = await ask(acting, w, { amount: AED(60_000n) });
+      const [spent, windows] = [await spentOf(w, acting), await windowsReleased(w)];
+      if (how === 'void') {
+        await moved(w, await mandateIdOf(w), 'agent', 'cancel');
+        await handoffOf(w).run();
+      } else {
+        clock.advanceBy(73 * HOUR);
+        await signed(w, (tx, states) => expireRequest(tx, states, keys, { orgId: w.org, id: request.id }, clock.now()));
+      }
+
+      expect(await statusOf(w, request.id)).toBe(how === 'void' ? 'DENIED' : 'EXPIRED');
+      expect(await spentOf(w, acting)).toBe(spent - 60_000n);
+      expect(await windowsReleased(w)).toBeGreaterThan(windows);
+      expect(lines('spend_request.capacity_kept')).toEqual([]);
+    },
+  );
 
   it.each([
     ['paused past the horizon, then unfrozen: denied, never standing again', 8 * 24 * HOUR, 'DENIED'],

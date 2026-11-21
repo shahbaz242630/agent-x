@@ -38,6 +38,7 @@ import {
   actorEventsSince,
   type AuditDetails,
   type AuditTables,
+  DIGEST_FORGET_MARGIN_MS,
   type SignedChange,
   type SignedStates,
   type TamperSign,
@@ -60,13 +61,13 @@ import {
   windowsGivenBack,
   type WindowTake,
 } from '../../limit-reservations/index.ts';
-import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
+import { DAY_MS, HOUR_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { waitedOut } from '../domain/approval-wait.ts';
 import type { HeldSealed } from '../domain/holdings.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
-import { type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
+import { APPROVAL_HORIZON_MS, type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
-import { decisionOf, decisionsOf, NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
+import { type Decided, decisionOf, decisionsOf, NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -461,7 +462,8 @@ export async function voidPendingOf(
   await lockClaimsOf(tx, pending);
   // Their month totals (11a, GM-1a), each locked once, in order of ID, before any move takes the head: two brakes
   // whose requests share totals take them alike, never crosswise.
-  const held = await heldInOf(tx, states, orgId, found);
+  // Those past what the digest remembers keep their capacity (capacityKept): their totals and windows aren't touched.
+  const held = givingBack(states, await heldInOf(tx, states, orgId, found), now);
   const totals = await lockedTotalsOf(tx, states, orgId, held);
   // Then their payee windows (11b, GM-1b), each once, in order of ID, after every total.
   const takes = held.flatMap(({ windows }) => windows);
@@ -625,7 +627,8 @@ async function endHolding(
   const held = total === 'own' ? await lockedTotalOf(tx, states, key, 'change') : null;
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, change);
   movedAsRead(moved, `A spend request read as open didn't ${event}`);
-  if (held !== null) {
+  // Past what the digest remembers, its month total and windows keep the amount (capacityKept).
+  if (held !== null && givingBack(states, [held], at).length > 0) {
     await givenBack(tx, states, key.orgId, held, { at, change: givenBackBy(change, [held]) });
     await windowsGivenBack(tx, states, key.orgId, held.windowsRead, held.windows, {
       at,
@@ -645,6 +648,37 @@ interface HeldIn {
   readonly key: MonthTotalKey;
   readonly amount: bigint;
   readonly windows: readonly WindowTake[];
+  /** Its sealed approval, approved (Decided's `approvedAt`), else its sealed decision: what capacityKept ages. */
+  readonly sealedAt: Date;
+}
+
+/** Room for the app's clock and Postgres's beside the digest's own margin: the skip errs on keeping capacity. */
+const CLOCKS_MS = HOUR_MS;
+
+/**
+ * Whether a request ending at `at` keeps its capacity in its month total and payee windows (AT13d, review of #756):
+ * sealed past what the digest remembers, an owner could have rolled a paid or ended one back to pending, and giving
+ * its amount back again would let a new request past a cap. Its own reservation and claim are released all the same.
+ */
+export const capacityKept = (sealedAt: Date, at: Date): boolean =>
+  at.getTime() - sealedAt.getTime() >= APPROVAL_HORIZON_MS + DIGEST_FORGET_MARGIN_MS - CLOCKS_MS;
+
+/** What capacityKept ages a request by: its sealed approval once approved, its sealed decision while it waits. */
+export const sealedAtOf = (
+  status: SpendRequestRecord['status'],
+  { decidedAt, approvedAt }: Pick<Decided, 'decidedAt' | 'approvedAt'>,
+): Date => (status === 'APPROVAL_REQUIRED' ? decidedAt : approvedAt);
+
+/** Those whose capacity goes back at an ending at `at`; each kept said, once, as its own warning. */
+function givingBack(states: SignedStates, held: readonly HeldIn[], at: Date): readonly HeldIn[] {
+  return held.filter((request) => {
+    if (!capacityKept(request.sealedAt, at)) return true;
+    states.logger.warn('spend_request.capacity_kept', {
+      requestId: request.requestId,
+      sealedAt: request.sealedAt.toISOString(),
+    });
+    return false;
+  });
 }
 
 /**
@@ -666,10 +700,13 @@ async function heldInOf(
     requests.map(({ id }) => id),
   );
   return requests.flatMap((request) => {
-    const held = decided.get(request.id)?.held;
-    if (held === undefined || held === null) return [];
+    const decision = decided.get(request.id);
+    if (decision === undefined || decision.held === null) return [];
+    const held = decision.held;
     const key = { agentId: request.agentId, month: held.month, currency: request.amount.currency };
-    return [{ requestId: request.id, key, amount: request.amount.minor, windows: windowsHeldOf(orgId, request, held) }];
+    const sealedAt = sealedAtOf(request.status, decision);
+    const windows = windowsHeldOf(orgId, request, held);
+    return [{ requestId: request.id, key, amount: request.amount.minor, windows, sealedAt }];
   });
 }
 

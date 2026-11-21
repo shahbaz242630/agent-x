@@ -741,6 +741,8 @@ export interface SignedStates {
    * transaction ends (withSignedStates).
    */
   mismatch(subjectType: string, key: SignedRowKey): void;
+  /** The transaction's own logger: for a decision's line of its own (AT13d: capacity kept at a request's end). */
+  readonly logger: Logger;
   /**
    * Raises the integrity alarm for a row that now verifies but whose sealed
    * field, one that never changes, read otherwise as the caller's statement
@@ -1821,6 +1823,7 @@ export function createSignedStates({
 
     verifiedStates,
     pageStates,
+    logger,
 
     mismatch(subjectType: string, key: SignedRowKey): void {
       alarm(subjectType, key, 'holding');

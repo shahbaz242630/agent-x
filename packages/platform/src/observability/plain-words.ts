@@ -1343,6 +1343,13 @@ export const PLAIN_WORDS = {
     broke: "That organisation's requests stay waiting for now; nothing was rejected on what could not be read.",
     next: 'It is tried again in about 5 minutes. If it keeps failing, check the integrity alarms for that organisation.',
   },
+  'spend_request.capacity_kept': {
+    happened:
+      'A spend request approved or decided more than 8 days ago was ended (cancelled, rejected, expired or voided) without giving its amount back to its monthly total and payee window.',
+    broke:
+      "That amount stays counted as used in the agent's month and the supplier's window until the month or window rolls over. Nothing was paid.",
+    next: 'Nothing, for one now and then (a request left waiting through a long pause). Many in one organisation may mean someone changed its records past the app: check its integrity alarms.',
+  },
   'request_void.failed': {
     happened:
       'A pending spend request could not be cancelled after something it uses was stopped with its requests cancelled.',

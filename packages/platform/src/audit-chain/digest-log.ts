@@ -161,9 +161,10 @@ const DAY_MS = 24 * 60 * 60_000;
 /**
  * How far past the horizon a request's facts are kept beyond the time they were known by: far more than a walk takes
  * between reading an event and recording it, and than the app's clock and Postgres's may differ, so no event they name
- * can be younger than the horizon when they go.
+ * can be younger than the horizon when they go. Shared with the spend requests' ends, which keep the capacity of a
+ * request past it (endings.ts), so the two can't drift.
  */
-const FORGET_MARGIN_MS = DAY_MS;
+export const FORGET_MARGIN_MS = DAY_MS;
 
 /** How often the chains' request tables are looked over for a day past the horizon. */
 const FORGET_EVERY_MS = 60 * 60_000;
