@@ -102,7 +102,6 @@ export async function orgSecurityEventsPage(
       'created_at',
       'mac',
       'mac_key_version',
-      'before_macs',
       DATED.as('dated'),
     ])
     .where('org_id', '=', orgId.toLowerCase())
