@@ -535,7 +535,7 @@ async function keptOf(
  * (read `deleted` if its row goes), so only a claim made without its slot is looked for, and the check passes every
  * organisation at least hourly; a month leaves room for any pause.
  */
-export const SLOTS_MISSING_LOOK_BACK_MS = 31 * 24 * 3_600_000;
+const SLOTS_MISSING_LOOK_BACK_MS = 31 * 24 * 3_600_000;
 
 /**
  * Every slot an open claim made since SLOTS_MISSING_LOOK_BACK_MS before `at` should be held in, yet that has no row and
