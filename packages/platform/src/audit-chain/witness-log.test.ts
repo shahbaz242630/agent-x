@@ -192,6 +192,27 @@ describe('the witness log: writing', () => {
     expect(namesUnder(heads.files, 'heads')).toHaveLength(1);
   });
 
+  it('drained writes every head noted, a `soon` one too, retrying a failed Put within the wait; past it, WitnessUnconfirmed', async () => {
+    const { log, heads, time } = witnessOn(undefined, { waitMs: 300 });
+    log.soon(CHAIN, head(5n, 1));
+    let fails = 1;
+    heads.instead.put = (name, bytes) => {
+      if (fails > 0) {
+        fails -= 1;
+        time.held.at += 1000;
+        return Promise.reject(new Error('store blip'));
+      }
+      return heads.real.put(name, bytes);
+    };
+    await expect(log.drained()).resolves.toBeUndefined();
+    expect(namesUnder(heads.files, 'heads')).toHaveLength(1);
+    // Nothing waiting: at once.
+    await expect(log.drained()).resolves.toBeUndefined();
+    heads.instead.put = () => Promise.reject(new Error('store down'));
+    log.soon(OTHER, head(2n, 1));
+    await expect(log.drained()).rejects.toBeInstanceOf(WitnessUnconfirmed);
+  });
+
   it('the operator writes under its own folder and key, and the API copies take its file only so', async () => {
     const store = createFakeWriteOnceStore();
     const operator = witnessOn(store, { signer: 'operator' });
