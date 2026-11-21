@@ -164,9 +164,9 @@ const EXEMPT: Readonly<Record<string, string>> = {
   '/v1/oauth/requests/{id}':
     'An OAuth flow belongs to no organisation until it is decided, and is read only by the browser that opened it (its flow cookie): SEC-OAUTH-10, oauth-connections.db.test.ts.',
   '/v1/oauth/requests/{id}/consent':
-    'As /v1/oauth/requests/{id}: a flow is its own browser’s, never an organisation’s.',
+    'As /v1/oauth/requests/{id}: a flow is its own browser’s, never an organisation’s. Another organisation’s agentId in its body: SEC-OAUTH-10 in oauth-connections.db.test.ts.',
   '/v1/oauth/requests/{id}/consent/confirm':
-    'As /v1/oauth/requests/{id}: a flow is its own browser’s, never an organisation’s.',
+    'As /v1/oauth/requests/{id}: a flow is its own browser’s, never an organisation’s. Another organisation’s agentId in its body: SEC-OAUTH-10 in oauth-connections.db.test.ts.',
   '/v1/oauth/requests/{id}/deny': 'As /v1/oauth/requests/{id}: a flow is its own browser’s, never an organisation’s.',
 };
 
