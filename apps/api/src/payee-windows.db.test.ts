@@ -444,6 +444,9 @@ describe("the window's own rules", () => {
     await givenBack(w, supplier, hourOf(clock.now()) - 800, ORDER);
     expect(await heldIn(w, supplier)).toBe(ORDER);
     expect(lines('audit.integrity_failed')).toEqual([]);
+    // Nothing to give back is nothing recorded: the window keeps its state.
+    const events = await eventsAbout(w.org, payeeWindowId(w.org, supplier), PAYEE_WINDOWS.subject);
+    expect(events.map(({ action }) => action)).toEqual(['payee_window.held']);
   });
 
   it('alarms a give-back to a payee with no window once cut over, and gives nothing back before', async () => {
@@ -773,7 +776,11 @@ describe('an organisation made before GM-1b, until its cutover', () => {
    * The organisation as one before GM-1b with capacity held: the windows its decisions filled, their events and the
    * cutover's taken away by the owner, each request's decision sealed again as before GM-1b (no windows named).
    */
-  const asBeforeGm1b = async (w: World, requestIds: readonly string[]) => {
+  const asBeforeGm1b = async (
+    w: World,
+    requestIds: readonly string[],
+    windows: 'delete windows' | 'keep windows' = 'delete windows',
+  ) => {
     for (const id of requestIds) {
       const sealed = (await eventsAbout(w.org, id, SPEND_REQUESTS.subject)).findLast(
         ({ action }) => action === 'spend_request.decided',
@@ -806,10 +813,13 @@ describe('an organisation made before GM-1b, until its cutover', () => {
     try {
       await owner.query('begin');
       await owner.query('alter table audit.events disable trigger user');
-      await owner.query('delete from limit_reservations.payee_windows where org_id = $1', [w.org]);
+      if (windows === 'delete windows') {
+        await owner.query('delete from limit_reservations.payee_windows where org_id = $1', [w.org]);
+      }
+      // The windows' own events go with them; kept windows keep theirs, signed.
       await owner.query('delete from audit.events where org_id = $1 and (subject_type = $2 or action = $3)', [
         w.org,
-        PAYEE_WINDOWS.subject,
+        windows === 'delete windows' ? PAYEE_WINDOWS.subject : 'none',
         WINDOWS_CUTOVER_ACTION,
       ]);
       await owner.query('alter table audit.events enable trigger user');
@@ -937,7 +947,8 @@ describe('an organisation made before GM-1b, until its cutover', () => {
     const { w, acting } = await ready({ madeBeforePayeeWindows: true });
     await cutOverByHand(w);
     const held = await decided(acting, w);
-    await asBeforeGm1b(w, [held.id]);
+    const other = await decided(acting, w, 100_000n, supplierOf_(w, 1));
+    await asBeforeGm1b(w, [held.id, other.id]);
     const supplierId = supplierOf_(w);
     await asOwner(w, (owner) =>
       owner.query(
@@ -949,6 +960,22 @@ describe('an organisation made before GM-1b, until its cutover', () => {
     expect(lines('payee_windows.cutover_held')).toHaveLength(1);
     expect(lines('payee_windows.cut_over')).toEqual([]);
     alarmedOn('unsigned');
+    // Not cut over, the other payee's window is none to look for: not counted missing.
+    expect(lines('holdings_check.passed').at(-1)).toMatchObject({ windowsMissing: 0 });
+  });
+
+  it('is not cut over over a window already signed before it (its cutover gone): nothing opened over it', async () => {
+    const { w, acting } = await ready({ madeBeforePayeeWindows: true });
+    await cutOverByHand(w);
+    const held = await decided(acting, w);
+    await asBeforeGm1b(w, [held.id]);
+    // A window signed by a decision of its own, left; only the cutover taken away.
+    await cutOverByHand(w);
+    const second = await decided(acting, w, 100_000n, supplierOf_(w, 1));
+    await asBeforeGm1b(w, [second.id], 'keep windows');
+    await visit(w);
+    expect(lines('payee_windows.cutover_held')).toHaveLength(1);
+    expect(lines('payee_windows.cut_over')).toEqual([]);
   });
 
   it('is not cut over over a decision that already names its windows (made past the app): alarmed', async () => {
