@@ -379,7 +379,7 @@ describe(`confirming a payee change waiting, with the admin's passkey (E2-2b, Po
     expect(await approve(admin, id)).toEqual({ outcome: 'refused', status: 401, code: 'UNAUTHENTICATED' });
   });
 
-  it('SEC-HA-12 refuses a step-up made with an app code, changing nothing and telling no one', async () => {
+  it('SEC-HA-02, SEC-HA-12 refuses a step-up made with an app code, changing nothing and telling no one', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const id = await added(admin);

@@ -215,7 +215,7 @@ describe('the step-up an acceptance needs (B3, SEC-HA-12)', () => {
     expect(await registry.show(w.org, id, CORRELATION)).toMatchObject({ mandate: { status: 'PENDING_ACCEPTANCE' } });
   });
 
-  it('refuses a step-up never signed in again for, or run out', async () => {
+  it('SEC-HA-02 refuses a step-up never signed in again for, or run out', async () => {
     const w = await world();
     const { id, versionId } = await drafted(w);
     const unsigned = askedFor(await ask(w.admin, id, versionId));

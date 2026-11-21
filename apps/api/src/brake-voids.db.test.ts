@@ -1735,7 +1735,7 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     for (const request of many) expect(await statusOf(w, request.id)).toBe('APPROVED');
   }, 60_000);
 
-  it('refuses a step-up signed in with an app code: STEP_UP_FAILED (a passkey, SEC-HA-12)', async () => {
+  it('SEC-HA-02 refuses a step-up signed in with an app code: STEP_UP_FAILED (a passkey, SEC-HA-12)', async () => {
     const { w } = await ready();
     await frozen(w, 'pause');
 

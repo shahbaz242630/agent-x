@@ -600,7 +600,7 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
     expect(await rotated(admin, key)).toMatchObject({ outcome: 'rotated' });
   });
 
-  it('binds the step-up to the key as it was asked, and to rotating: another key’s, or a revocation’s, fails', async () => {
+  it('SEC-HA-02 binds the step-up to the key as it was asked, and to rotating: another key’s, or a revocation’s, fails', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
     const one = await agentWithKey(org, developer);
@@ -945,7 +945,7 @@ describe('revoking a key (C1-4b)', () => {
     expect(await revoked(admin, key)).toMatchObject({ outcome: 'revoked' });
   });
 
-  it('binds the step-up to the key as it was asked: a revocation asked before a rotation fails after it', async () => {
+  it('SEC-HA-02 binds the step-up to the key as it was asked: a revocation asked before a rotation fails after it', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
     const key = await agentWithKey(org, developer);

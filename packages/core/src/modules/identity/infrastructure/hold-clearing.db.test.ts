@@ -329,7 +329,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
   });
 
-  it('refuses to confirm before the admin has signed in again, as STEP_UP_FAILED, leaving it HELD', async () => {
+  it('SEC-HA-02 refuses to confirm before the admin has signed in again, as STEP_UP_FAILED, leaving it HELD', async () => {
     await holdThenRepair();
     const investigationId = await investigate();
     const answer = await ask(investigationId);

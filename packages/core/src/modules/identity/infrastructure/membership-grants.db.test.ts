@@ -358,7 +358,7 @@ describe(`a membership's grant summary, kept with each change (OR1, Postgres ${s
     expect(shape(read)).toEqual(shape(await historyFacts()));
   });
 
-  it('refuses to bring back a member whose summary was tampered with, its alarm raised', async () => {
+  it('SEC-DB-19 refuses to bring back a member whose summary was tampered with, its alarm raised', async () => {
     const alice = await add('admin');
     const bob = await add('approver');
     await deactivate(bob.id, alice.userId);
@@ -431,7 +431,7 @@ describe(`a membership's grant summary, kept with each change (OR1, Postgres ${s
   });
 });
 
-describe(`a grant summary changed past the app (FX-TAMPER, Postgres ${server.version})`, () => {
+describe(`SEC-DB-19 a grant summary changed past the app (FX-TAMPER, Postgres ${server.version})`, () => {
   it('denies a summary emptied of who granted the role: the seal', async () => {
     const alice = await add('admin');
     const bob = await add('approver', userActor(alice.userId));
@@ -503,7 +503,7 @@ describe(`a grant summary changed past the app (FX-TAMPER, Postgres ${server.ver
   });
 });
 
-describe(`a summary left behind its membership: the alarm since 0089 (OR1c, Postgres ${server.version})`, () => {
+describe(`SEC-DB-19 a summary left behind its membership: the alarm since 0089 (OR1c, Postgres ${server.version})`, () => {
   /** Bob's role changed past his summary, as only the owner can since 0089 (an image from before OR1 could before it). */
   const changedByOldImage = (bob: { id: string }, alice: { userId: string }, roleFrom: Role, roleTo: Role) =>
     withSignedStates(oldImage, org, services(), async (tx, states) => {
@@ -668,7 +668,7 @@ describe(`a summary left behind its membership: the alarm since 0089 (OR1c, Post
   });
 });
 
-describe(`the rule past 10,000 events, and the summaries built for members from before them (Postgres ${server.version})`, () => {
+describe(`SEC-DB-19 the rule past 10,000 events, and the summaries built for members from before them (Postgres ${server.version})`, () => {
   /** `count` events about invitations, as an organisation with years of them holds. */
   const manyInvitationEvents = (by: string, count: number) =>
     withSignedStates(app, org, services(), async (tx) => {
@@ -1002,7 +1002,7 @@ const roleAlone = (
     await pause?.until;
   });
 
-describe(`OR1b: the database holds each membership change to its summary (0089, Postgres ${server.version})`, () => {
+describe(`SEC-DB-19 OR1b: the database holds each membership change to its summary (0089, Postgres ${server.version})`, () => {
   it('lets every change the product makes commit, each summary in step with its membership', async () => {
     const alice = await add('admin');
     const bob = await add('viewer');

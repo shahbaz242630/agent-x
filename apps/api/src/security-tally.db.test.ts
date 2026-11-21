@@ -114,7 +114,7 @@ beforeEach(async () => {
   ]);
 });
 
-describe('the security events’ five-minute tally (S206, R-15)', () => {
+describe('SEC-DB-18 the security events’ five-minute tally (S206, R-15)', () => {
   it('logs each day once as first counted, then nothing while it stands, and no alarm', async () => {
     const run = tally();
     await run.run();

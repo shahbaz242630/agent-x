@@ -332,7 +332,7 @@ describe(`changing a member's role (B4-5a, SEC-HA-10, Postgres ${server.version}
     expect(await sessionsOf(approver.userId)).toBe(1);
   });
 
-  it('refuses before the admin signs in again, changing nothing and ending no session; the same key changes after', async () => {
+  it('SEC-HA-02 refuses before the admin signs in again, changing nothing and ending no session; the same key changes after', async () => {
     const who = await organization();
     const approver = await member(who.org, 'approver');
     const challengeId = await asked(who.admin, approver.membershipId, TO_DEVELOPER);
@@ -351,7 +351,7 @@ describe(`changing a member's role (B4-5a, SEC-HA-10, Postgres ${server.version}
     });
   });
 
-  it('refuses another change than the one signed in again for: another role, deactivating, or another member', async () => {
+  it('SEC-HA-02 refuses another change than the one signed in again for: another role, deactivating, or another member', async () => {
     const who = await organization();
     const approver = await member(who.org, 'approver');
     const viewer = await member(who.org, 'viewer');

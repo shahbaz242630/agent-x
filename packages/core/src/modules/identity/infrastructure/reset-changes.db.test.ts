@@ -587,7 +587,7 @@ describe(`sending it to the contacts (B6-3b, Postgres ${server.version})`, () =>
     expect(await noticesOf(org)).toHaveLength(notices.length);
   });
 
-  it('refuses without the step-up, with an app code rather than a passkey (SEC-HA-12), or from another admin', async () => {
+  it('SEC-HA-02 refuses without the step-up, with an app code rather than a passkey (SEC-HA-12), or from another admin', async () => {
     const { org, admin, otherAdmin, person } = await organization();
     const asked = written(await ask(admin, person.membershipId));
 

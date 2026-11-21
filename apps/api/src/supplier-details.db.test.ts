@@ -408,7 +408,7 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
     expect(await changed(alice, supplierId, NEW_PHONE)).toEqual(refusedWith('SUPPLIER_CHANGE_WAITING', 409));
   });
 
-  it('SEC-HA-12 refuses a step-up with an app code, and binds it to the details asked for', async () => {
+  it('SEC-HA-02, SEC-HA-12 refuses a step-up with an app code, and binds it to the details asked for', async () => {
     const { org, alice, supplierId } = await established();
     const before = await supplierNow(org, supplierId);
 

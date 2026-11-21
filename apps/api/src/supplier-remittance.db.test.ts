@@ -363,7 +363,7 @@ describe(`a supplier's remittance email (C2a, Postgres ${server.version})`, () =
     expect(await noticesOf(org)).toEqual([]);
   });
 
-  it('refuses a step-up asked for another supplier, or from where the setting no longer stands', async () => {
+  it('SEC-HA-02 refuses a step-up asked for another supplier, or from where the setting no longer stands', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const id = await added(admin, 'on');

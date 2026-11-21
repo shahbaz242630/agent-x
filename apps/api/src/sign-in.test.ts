@@ -379,19 +379,22 @@ describe('S47 a login service that cannot be reached, such as one still waking f
   it.each([
     ['203.0.113.7', '203.0.113.7'],
     ['2001:db8:1:2:3:4:5:6', clientSite('2001:db8:1::')],
-  ])('S206 V8 begins a sign-in from %s as from its network, as the OAuth flows count one', async (address, network) => {
-    const standIn = new StandIn();
-    const { app } = await server(standIn);
+  ])(
+    'SEC-HA-14 S206 V8 begins a sign-in from %s as from its network, as the OAuth flows count one',
+    async (address, network) => {
+      const standIn = new StandIn();
+      const { app } = await server(standIn);
 
-    expect((await app.inject({ url: '/v1/auth/sign-in', remoteAddress: address })).statusCode).toBe(302);
-    expect(standIn.networks).toEqual([network]);
-  });
+      expect((await app.inject({ url: '/v1/auth/sign-in', remoteAddress: address })).statusCode).toBe(302);
+      expect(standIn.networks).toEqual([network]);
+    },
+  );
 
   it.each([
     ['every network’s', 'full', 'auth.sign_ins_capped', MOST_OPEN_SIGN_INS],
     ['its network’s', 'network_full', 'auth.sign_ins_network_capped', MOST_OPEN_SIGN_INS_A_NETWORK],
   ] as const)(
-    'S206 V8 answers a sign-in past %s cap SIGN_IN_UNAVAILABLE, 503 and Retry-After, its warning once a minute',
+    'SEC-HA-14 S206 V8 answers a sign-in past %s cap SIGN_IN_UNAVAILABLE, 503 and Retry-After, its warning once a minute',
     async (_what, cap, event, most) => {
       const standIn = new StandIn();
       standIn.beginFailsWith = new SignInBusy(cap);
