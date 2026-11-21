@@ -664,7 +664,7 @@ function heldOpen<T>(work: (tx: Transaction<Tables>, begun: () => void, gate: Pr
   };
 }
 
-describe('AT13: the digest’s edges, as the owner tampers', () => {
+describe('SEC-DB-10, SEC-DB-11 AT13: the digest’s edges, as the owner tampers', () => {
   beforeEach(async () => {
     digest = await newDigest();
     held = heldTo(digest);
@@ -798,7 +798,7 @@ describe('AT13: the digest’s edges, as the owner tampers', () => {
   });
 });
 
-describe('AT13f: the chain cut back past the head this process saw, as the owner tampers', () => {
+describe('SEC-DB-11 AT13f: the chain cut back past the head this process saw, as the owner tampers', () => {
   const chainOfOrg = () => ({ kind: 'organisation' as const, orgId: org });
   /** A trail whose reads are held to `kept`, for the reads signed states don't make (history, log page, one event). */
   const heldTrail = (kept: DigestLog) => createAuditTrail({ keys, ids: new SequentialIds(0xa00), digest: kept });
@@ -1043,7 +1043,7 @@ describe('AT13f: the chain cut back past the head this process saw, as the owner
   });
 });
 
-describe('AT13h: the chain cut back below a write this process committed, before any read of it', () => {
+describe('SEC-DB-11 AT13h: the chain cut back below a write this process committed, before any read of it', () => {
   const chainOfOrg = () => ({ kind: 'organisation' as const, orgId: org });
   const seenNow = (kept: DigestLog = digest) => kept.heads(chainOfOrg())?.seen;
   /** The agent suspended through `through`'s trail, in a transaction of its own that commits. */

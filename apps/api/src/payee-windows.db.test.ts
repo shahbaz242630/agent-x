@@ -243,7 +243,7 @@ beforeEach(() => {
   });
 });
 
-describe("a payee's split window, signed (GM-1b)", () => {
+describe("SEC-LIM-04, SEC-DB-10 a payee's split window, signed (GM-1b)", () => {
   it("is made by the payee's first decision and added to at each one's hour, sealed, its ID in the decision", async () => {
     const { w, acting } = await ready();
     const supplier = supplierKey(supplierOf_(w));
@@ -390,7 +390,7 @@ describe("a payee's split window, signed (GM-1b)", () => {
     alarmedOn('pointer');
   });
 
-  it('AT13: is caught at decision time rolled back with its newest event deleted below the anchor; the anchor alone lets it pass', async () => {
+  it('SEC-DB-11 AT13: is caught at decision time rolled back with its newest event deleted below the anchor; the anchor alone lets it pass', async () => {
     const { w, acting } = await ready();
     const theirs = await shared.secondAgent(registry, w, TERMS);
     await decided(acting, w, 100_000n);
@@ -457,7 +457,7 @@ describe("a payee's split window, signed (GM-1b)", () => {
   });
 });
 
-describe('AT13f: a payee’s window made above the last anchor, cut off with the chain’s end (GM-1b)', () => {
+describe('SEC-DB-11 AT13f: a payee’s window made above the last anchor, cut off with the chain’s end (GM-1b)', () => {
   const window = (w: World) => supplierKey(supplierOf_(w));
   /** A digest as the process that keeps the anchors keeps one, every signed state read here held to it in `work`. */
   const heldToADigest = <T>(work: (digest: DigestLog) => Promise<T>) =>
@@ -710,7 +710,7 @@ describe('every ending gives its amount back to the windows its decision sealed,
   });
 });
 
-describe('in the lock order (11b: after the month totals, in order of ID), forced', () => {
+describe('SEC-LIM-01 in the lock order (11b: after the month totals, in order of ID), forced', () => {
   /** A void of `requestId` in a transaction of its own, held open at `gate` once it has given its capacity back. */
   const voidHeldOpen = (w: World, requestId: string, gate: Promise<unknown>, given: () => void) =>
     withSignedStates(app, w.org, quiet(), async (tx, states) => {

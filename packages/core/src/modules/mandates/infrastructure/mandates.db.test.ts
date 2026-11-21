@@ -330,7 +330,7 @@ describe('a mandate', () => {
     await expect(change(org, id, { pending_version_id: version })).rejects.toEqual(refusedBy('pending_is_not_current'));
   });
 
-  it('keeps its agent, time zone and window as made, while the rest moves on (fixed_at_creation)', async () => {
+  it('SEC-LIM-08 keeps its agent, time zone and window as made, while the rest moves on (fixed_at_creation)', async () => {
     const [org, other] = [await organisation(), await organisation()];
     const { id } = await accepted(org, org.agent);
     // The audit module's record writes them again as they are, which is no change.

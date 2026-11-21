@@ -100,7 +100,7 @@ function closedFile(name: string, lines: readonly string[], signing = keys): Buf
   return gzipSync([...lines, closing].join('\n'));
 }
 
-describe('the signed states’ digest in memory alone (no store)', () => {
+describe('SEC-DB-11 the signed states’ digest in memory alone (no store)', () => {
   it('keeps the highest place each object was seen at, says nothing of others, and stands for every chain', async () => {
     const log = createDigestLog({
       keys,
@@ -157,7 +157,7 @@ describe('the signed states’ digest in memory alone (no store)', () => {
   });
 });
 
-describe('the digest kept in the write-once store (AT13)', () => {
+describe('SEC-DB-11 the digest kept in the write-once store (AT13)', () => {
   it('is unknown until its first read has ended whole, and an empty store reads as nothing known', async () => {
     const { log } = digestOn();
     expect(log.state()).toBe('unread');
@@ -459,7 +459,7 @@ const requests = (count: number, from = 0) =>
     ]),
   );
 
-describe('the digest’s coverage: Tx A goes on a chain only as far as its walks join up from its first event (AT13)', () => {
+describe('SEC-DB-11 the digest’s coverage: Tx A goes on a chain only as far as its walks join up from its first event (AT13)', () => {
   it('covers a chain to where its stretches join from the start; a gap leaves it uncovered until filled', async () => {
     const { log } = digestOn();
     await log.read();
@@ -556,7 +556,7 @@ describe('the digest’s coverage: Tx A goes on a chain only as far as its walks
   });
 });
 
-describe('the digest within its memory: one organisation’s growth never stops another’s (AT13; S165, S170)', () => {
+describe('SEC-DB-11 the digest within its memory: one organisation’s growth never stops another’s (AT13; S165, S170)', () => {
   it('the largest chain gives way, its payments first, then all of it, each with its own alarm; the small one keeps all', async () => {
     const capture = new LogCapture();
     const { log, fake, time } = digestOn(undefined, { capture, mostBytes: 12_000 });
@@ -687,7 +687,7 @@ describe('the digest within its memory: one organisation’s growth never stops 
   });
 });
 
-describe('the digest in a process that loses the lease (AT13)', () => {
+describe('SEC-DB-11 the digest in a process that loses the lease (AT13)', () => {
   it('says nothing and forgets all it holds while it doesn’t lead, and reads the store again whole when it does', async () => {
     const leads = { now: true };
     const rebases = new Map<string, Date>();
@@ -744,7 +744,7 @@ const agents = (count: number, from = 0) =>
 const said = (capture: LogCapture, event: string) => capture.lines().filter((line) => line.event === event);
 const FIRST_REQUEST = '0199a0f0-0000-7000-8000-000000000000';
 
-describe('the digest’s fair share: many small organisations never push out a large one within its share (AT13e)', () => {
+describe('SEC-DB-11 the digest’s fair share: many small organisations never push out a large one within its share (AT13e)', () => {
   it('a chain past its share with growing objects gives way first, before a larger one of authority alone', async () => {
     const capture = new LogCapture();
     const { log } = digestOn(undefined, { capture, mostBytes: 40_000 });
@@ -798,7 +798,7 @@ describe('the digest’s fair share: many small organisations never push out a l
   });
 });
 
-describe('a chain given way comes back once there is room again (AT13e)', () => {
+describe('SEC-DB-11 a chain given way comes back once there is room again (AT13e)', () => {
   /** A chain whose payments gave way under 12 KB, written: coverage to 600, its agent at 3, its requests let go. */
   async function gaveWay() {
     const time = clock();
@@ -939,7 +939,7 @@ describe('a chain given way comes back once there is room again (AT13e)', () => 
   });
 });
 
-describe('the digest’s mark lines, read (AT13e)', () => {
+describe('SEC-DB-11 the digest’s mark lines, read (AT13e)', () => {
   it('a line naming what was let go but not how far is no line of ours; a generation alone is', async () => {
     const { fake, time, capture } = digestOn();
     const at = (minutes: number) => String(9_999_999_999_999 - (START.getTime() + minutes * MINUTE)).padStart(13, '0');
@@ -981,7 +981,7 @@ describe('the digest’s mark lines, read (AT13e)', () => {
   });
 });
 
-describe('a request’s facts forgotten past the approval horizon (AT13d)', () => {
+describe('SEC-DB-11 a request’s facts forgotten past the approval horizon (AT13d)', () => {
   const DAY = 24 * HOUR;
   /** The approval horizon, as the API passes it (APPROVAL_HORIZON_MS). */
   const HORIZON = 7 * DAY;
@@ -1257,7 +1257,7 @@ describe('a request’s facts forgotten past the approval horizon (AT13d)', () =
 /** A head as a read finds it: its place and a hash of its own. */
 const headAt = (seq: bigint, fill = Number(seq % 200n)) => ({ seq, hash: Buffer.alloc(32, fill) });
 
-describe('the highest head each chain was read at (AT13f)', () => {
+describe('SEC-DB-11 the highest head each chain was read at (AT13f)', () => {
   it('holds nothing at first, then each head a read saw where higher, never lower, never a place before the first', async () => {
     const { log } = digestOn();
     await log.read();
@@ -1431,7 +1431,7 @@ describe('the highest head each chain was read at (AT13f)', () => {
   });
 });
 
-describe('a chain taken as it stands after a signed answer to its cut (AT13h, S208: accept)', () => {
+describe('SEC-DB-11, SEC-DB-16 a chain taken as it stands after a signed answer to its cut (AT13h, S208: accept)', () => {
   it('nothing taken at first; once taken, held to where it was taken, the head seen never lowered', async () => {
     const { log } = digestOn();
     await log.read();
@@ -1615,7 +1615,7 @@ const oneEntry = (place: bigint): string => {
   return entry.toString('base64');
 };
 
-describe('a head read held to the head seen (AT13f, AT13h: headHeldTo)', () => {
+describe('SEC-DB-11 a head read held to the head seen (AT13f, AT13h: headHeldTo)', () => {
   const at = (seq: bigint, byte: number) => ({ seq, hash: Buffer.alloc(32, byte) });
   const seen = at(5n, 5);
 
@@ -1639,7 +1639,7 @@ describe('a head read held to the head seen (AT13f, AT13h: headHeldTo)', () => {
   });
 });
 
-describe('the platform chain’s session ends forgotten past the longest session (AT13g)', () => {
+describe('SEC-DB-16 the platform chain’s session ends forgotten past the longest session (AT13g)', () => {
   const DAY = 24 * HOUR;
   /** The longest absolute timeout there can be, as the API passes it (LONGEST_ABSOLUTE_SECONDS). */
   const LONGEST = DAY;

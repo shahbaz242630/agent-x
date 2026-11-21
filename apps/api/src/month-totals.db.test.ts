@@ -196,7 +196,7 @@ beforeEach(() => {
   });
 });
 
-describe("an agent's month total, signed (GM-1a)", () => {
+describe("SEC-DB-10 an agent's month total, signed (GM-1a)", () => {
   it("is made by the month's first decision and added to by each one holding capacity, each sealed", async () => {
     const { w, acting, max } = await ready();
     expect(await heldIn(w)).toBe('none');
@@ -441,7 +441,7 @@ describe('capacity given back to the total', () => {
   });
 });
 
-describe("two brakes over the same totals, in the totals' ID order, forced", () => {
+describe("SEC-LIM-01 two brakes over the same totals, in the totals' ID order, forced", () => {
   it('makes a brake take the lower total first and wait for the higher, and a second brake wait for it: neither deadlocks', async () => {
     const { w, acting, max } = await ready();
     const theirs = await shared.secondAgent(registry, w);
@@ -492,7 +492,7 @@ describe("two brakes over the same totals, in the totals' ID order, forced", () 
   });
 });
 
-describe('in the lock order (11a: after a request and its reservation, before the head), forced', () => {
+describe('SEC-LIM-01 in the lock order (11a: after a request and its reservation, before the head), forced', () => {
   /** A void of `requestId` in a transaction of its own, held open at `gate` once it has given its capacity back. */
   const voidHeldOpen = (w: World, requestId: string, gate: Promise<unknown>, given: () => void) =>
     withSignedStates(app, w.org, quiet(), async (tx, states) => {
@@ -965,7 +965,7 @@ describe('an organisation made before GM-1a, until its cutover', () => {
   });
 });
 
-describe('a decision racing a total made meanwhile, forced', () => {
+describe('SEC-LIM-01 a decision racing a total made meanwhile, forced', () => {
   it('is answered busy, never a 500, when the total its month read empty is made before it adds its own', async () => {
     const { w, acting, max } = await ready();
     // Its zone kept by a first decision; then next month: its period there, its total not yet.
@@ -1017,7 +1017,7 @@ describe('a decision racing a total made meanwhile, forced', () => {
   });
 });
 
-describe('AT13f: a month’s total made above the last anchor, cut off with the chain’s end', () => {
+describe('SEC-DB-11 AT13f: a month’s total made above the last anchor, cut off with the chain’s end', () => {
   const headOf = (w: World) => savedHeadOf(database, w.org);
   const cutBack = (w: World, saved: SavedHead) => cutChainEndBack(database, w.org, saved);
   /** A digest as the process that keeps the anchors keeps one, every signed state read here held to it in `work`. */
