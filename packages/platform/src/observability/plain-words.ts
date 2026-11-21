@@ -1340,6 +1340,12 @@ export const PLAIN_WORDS = {
     broke: 'Its work most likely did not happen, though a connection lost at the very end may have saved it.',
     next: 'Check the database, then re-run the same request file: it says if it was done. Check a new organisation was not made before typing it again.',
   },
+  'operator.not_witnessed': {
+    happened: 'An operator job finished its change, but could not write its audit chain heads to the witness store.',
+    broke:
+      'The change is saved. Until its heads are written, other copies cannot tell if someone cuts it out of the log.',
+    next: 'Check the witness store on Azure, then re-run the same request file: it finds its change done and says so.',
+  },
   'operator.handoff_notice_failed': {
     happened: 'A pause or resume of payments to the bank was recorded, but one organisation was not told.',
     broke:

@@ -747,7 +747,17 @@ async function run(
       alertAfterMs: 0,
       mostBytes: OPERATOR_WITNESS_BYTES,
     });
-  witnessWith(witness);
+  // Its heads noted as they commit, never waited for there: a wait inside a command would read as the command failing,
+  // its change standing. The whole command waits once, at its end (drained), and only then says it is done.
+  witnessWith(
+    witness && {
+      note: (chain, head, klass) => {
+        witness.note(chain, head, klass);
+      },
+      pending: (chain) => witness.pending(chain),
+      settled: () => Promise.resolve(),
+    },
+  );
   const code = await runRequest(config, keys, request, logger);
   if (witness === undefined) return code;
   try {
@@ -755,7 +765,7 @@ async function run(
     return code;
   } catch (error) {
     // Done in the database, its heads not yet outside it: never reported as done. Run the same request again.
-    logger.error('operator.failed', { command: request.command, step: 'witness', err: error });
+    logger.error('operator.not_witnessed', { command: request.command, err: error });
     return 1;
   }
 }
