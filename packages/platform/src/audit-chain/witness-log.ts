@@ -67,8 +67,11 @@ export interface ChainWitness {
   note(chain: Chain, head: { readonly seq: bigint; readonly hash: Buffer }, klass: WitnessClass): void;
   /** Resolves once every `now` head noted so far for these chains is written; WitnessUnconfirmed past the wait. */
   settled(chains: readonly Chain[]): Promise<void>;
-  /** Every witnessed head above the chain's latest anchor, the highest first. */
-  pending(chain: Chain): readonly WitnessedHead[];
+  /**
+   * Every witnessed head above the chain's latest anchor, the highest first; at most `most` where given (a decision's
+   * read asks only the highest few, so its cost stays flat however busy the chain is between anchors).
+   */
+  pending(chain: Chain, most?: number): readonly WitnessedHead[];
 }
 
 /** What the witness log asks of the anchors' log: the rebases it read, and each chain's latest anchor. */
@@ -313,15 +316,34 @@ export function createWitnessLog({
   };
 
   /** The chain's heads that still stand, those that don't let go. */
-  const standing = (name: string): readonly WitnessedHead[] => {
+  const standing = (name: string, most = Number.POSITIVE_INFINITY): readonly WitnessedHead[] => {
     const list = held.get(name);
     if (list === undefined) return [];
-    const kept = list.filter((head) => stands(name, head));
-    if (kept.length !== list.length) {
-      heldCount -= list.length - kept.length;
-      if (kept.length === 0) held.delete(name);
-      else held.set(name, kept);
+    // Highest first: those at or below the anchor are the list's tail, let go from its end.
+    const anchored = anchoredAt(name);
+    let end = list.length;
+    while (anchored !== undefined && end > 0 && (list[end - 1]?.seq ?? 0n) <= anchored) end -= 1;
+    if (end < list.length) setList(name, list.slice(0, end));
+    const kept: WitnessedHead[] = [];
+    for (const head of held.get(name) ?? []) {
+      if (kept.length >= most) break;
+      if (!stands(name, head)) return dropRebased(name).slice(0, most);
+      kept.push(head);
     }
+    return kept;
+  };
+
+  /** The chain's list as given, counted. */
+  const setList = (name: string, list: WitnessedHead[]): void => {
+    heldCount += list.length - (held.get(name)?.length ?? 0);
+    if (list.length === 0) held.delete(name);
+    else held.set(name, list);
+  };
+
+  /** The chain's heads a rebase set aside, let go (rare: a sanctioned restore): what stands. */
+  const dropRebased = (name: string): readonly WitnessedHead[] => {
+    const kept = (held.get(name) ?? []).filter((head) => stands(name, head));
+    setList(name, kept);
     return kept;
   };
 
@@ -575,8 +597,8 @@ export function createWitnessLog({
     soon(chain: Chain, head: { readonly seq: bigint; readonly hash: Buffer }): void {
       note(chain, head, 'soon');
     },
-    pending(chain: Chain): readonly WitnessedHead[] {
-      return standing(nameOf(chain));
+    pending(chain: Chain, most?: number): readonly WitnessedHead[] {
+      return standing(nameOf(chain), most);
     },
     async flush(): Promise<void> {
       await write(true);

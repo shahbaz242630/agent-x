@@ -328,7 +328,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       writes: leading,
       forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
       forgetSessionEndsAfterMs: LONGEST_ABSOLUTE_SECONDS * 1000,
-      witnessed: witness && ((chain) => witness.pending(chain)),
+      witnessed: witness && ((chain, most) => witness.pending(chain, most)),
     });
   checkStatesWith(digest);
   // Anchors in memory alone: the witness log lets a head go once anchored past it there too (TR-1).

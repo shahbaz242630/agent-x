@@ -342,6 +342,20 @@ describe('the witness log: reading', () => {
     expect(seqs(log.pending(OTHER))).toEqual([5n]);
   });
 
+  it('asked for the highest few, gives those that stand, however many are held; a rebase found among them sets aside all before it', () => {
+    const time = clock();
+    const { log } = witnessOn(undefined, { time });
+    for (const seq of [1n, 2n, 3n, 4n, 5n]) {
+      log.soon(CHAIN, head(seq, 1));
+      time.held.at += 1000;
+    }
+    expect(seqs(log.pending(CHAIN, 2))).toEqual([5n, 4n]);
+    // A rebase dated between the third head and the fourth: the three before it go, the two after stand.
+    log.useAnchors(anchorsWith(new Map([[ORG, new Date(START.getTime() + 2500)]])));
+    expect(seqs(log.pending(CHAIN, 3))).toEqual([5n, 4n]);
+    expect(seqs(log.pending(CHAIN))).toEqual([5n, 4n]);
+  });
+
   it('holds only heads above the chain’s anchor; prune lets go those at or below a place', () => {
     const { log } = witnessOn();
     for (const seq of [3n, 5n, 8n]) log.soon(CHAIN, head(seq, 1));

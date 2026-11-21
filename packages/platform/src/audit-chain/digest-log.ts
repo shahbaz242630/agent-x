@@ -664,7 +664,7 @@ export function createDigestLog({
    * Every head any copy witnessed above the chain's anchor, the highest first (TR-1, witness-log.ts's `pending`): each
    * read is held to the highest of them too. None, only to the heads this process saw and its walks covered.
    */
-  readonly witnessed?: ((chain: Chain) => readonly (HeadSeen & { readonly at: number })[]) | undefined;
+  readonly witnessed?: ((chain: Chain, most?: number) => readonly (HeadSeen & { readonly at: number })[]) | undefined;
 }): DigestLog {
   const chains = new Map<string, ChainState>();
   // The highest head each chain was read at here (AT13f), with when that read was asked, the one raised longest ago first.
@@ -1363,7 +1363,9 @@ export function createDigestLog({
   /** The chain's witnessed heads, the highest first, at most MOST_WITNESSED: only those noted after `after` where given. */
   const witnessedOf = (chain: Chain, after?: number): HeadSeen[] => {
     const found: HeadSeen[] = [];
-    for (const { seq, hash, at } of witnessed?.(chain) ?? []) {
+    // The highest few alone, however many are held: on an honest chain a later head is higher, so those after an accept
+    // are among them.
+    for (const { seq, hash, at } of witnessed?.(chain, MOST_WITNESSED) ?? []) {
       if (found.length >= MOST_WITNESSED) break;
       if (after === undefined || at > after) found.push({ seq, hash });
     }
