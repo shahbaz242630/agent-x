@@ -19,7 +19,6 @@ import {
   type TestDatabase,
   testLogger,
 } from '@agentx/testing';
-import { CHAIN_START, createDigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, liveSchemaProblems } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -27,8 +26,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
 import {
   type AuditTables,
+  CHAIN_START,
   checkStatesWith,
   createAuditTrail,
+  type StateDigest,
   type TamperSign,
   withSignedStates,
 } from '../../audit/index.ts';
@@ -225,6 +226,11 @@ describe(`FX-TAMPER as the owner on a membership: denied by the row check, and h
   });
 });
 
+/** What the anchor check's walk read, as the digest keeps it (AT13): each object's newest signed place, by its key. */
+const digestOf = (seen: ReadonlyMap<string, bigint>): Pick<StateDigest, 'latest'> => ({
+  latest: (_chain, type, id) => seen.get(`${type}\n${id.toLowerCase()}`),
+});
+
 describe(`AT13 a member's removal deleted below the anchor, the membership rolled back (R-15; Postgres ${server.version})`, () => {
   /**
    * An admin deactivated; the anchor check's walk of the chain kept in a digest; then the deactivation's event deleted
@@ -236,15 +242,7 @@ describe(`AT13 a member's removal deleted below the anchor, the membership rolle
     await deactivate(id);
     const step = await createAuditTrail({ keys, ids }).checkFromAnchor(app, org, CHAIN_START);
     if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
-    const digest = createDigestLog({
-      keys,
-      logger: testLogger(),
-      now: () => clock.now(),
-      epoch: 1,
-      alertAfterMs: 60_000,
-      mostBytes: 1024 * 1024,
-    });
-    digest.record({ kind: 'organisation', orgId: org }, step.signed, clock.now(), { from: 0n, to: step });
+    const digest = digestOf(step.signed);
     await owner.query(
       "delete from audit.events where org_id = $1 and subject_id = $2 and action = 'membership.deactivated'",
       [org, id],

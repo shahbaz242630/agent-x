@@ -1,8 +1,6 @@
 // The sessions' signed ends as the signed states' digest keeps them (AT13c): which platform events are an end, the
-// object each is, and those that can't be read naming none. The reads held to it are in sessions-tamper.db.test.ts.
-import { createDigestLog, subjectKey } from '@agentx/platform/audit-chain';
-import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { testLogger } from '@agentx/testing';
+// object each is, and those that can't be read naming none. The reads held to it are in sessions-tamper.db.test.ts;
+// that they give way first under memory is in apps/api's platform-subjects.test.ts.
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -43,37 +41,5 @@ describe('a session’s signed ends as the digest keeps them (AT13c)', () => {
     expect(signedEndSubjectOf(SESSIONS_ENDED, '{"person":5}')).toBeUndefined();
     expect(signedEndSubjectOf(SESSION_ENDED, '{"person":"p"}')).toBeUndefined();
     expect(signedEndSubjectOf(SESSION_ROTATED, '{"person":"p","record":"r"}')).toBeUndefined();
-  });
-
-  it('each end grows with use: given way before the authority the digest keeps on the platform chain', () => {
-    const keys = createKeyProvider(
-      Object.fromEntries(
-        PURPOSES.map((purpose, index) => [
-          purpose,
-          { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) },
-        ]),
-      ),
-    );
-    const digest = createDigestLog({
-      keys,
-      logger: testLogger(),
-      now: () => AT,
-      epoch: 1,
-      alertAfterMs: 1,
-      mostBytes: 12_000,
-    });
-    const platform = { kind: 'platform' } as const;
-    digest.record(platform, new Map([[subjectKey('platform.handoff_pause', 'pause'), 1n]]), AT);
-    for (const action of [SESSION_ENDED, SESSION_ROTATED, SESSIONS_ENDED]) {
-      digest.record(
-        platform,
-        new Map(Array.from({ length: 150 }, (_, at) => [subjectKey(action, `p/${String(at)}`), BigInt(at + 2)])),
-        AT,
-      );
-    }
-    expect(digest.latest(platform, 'platform.handoff_pause', 'pause')).toBe(1n);
-    for (const action of [SESSION_ENDED, SESSION_ROTATED, SESSIONS_ENDED]) {
-      expect(digest.latest(platform, action, 'p/0')).toBeUndefined();
-    }
   });
 });

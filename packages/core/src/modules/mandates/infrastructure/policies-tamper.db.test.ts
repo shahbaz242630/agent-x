@@ -3,7 +3,6 @@
 // event below the anchor (older than the chain's last 1,000, which no check each run reads) and putting its row back
 // as it was before, every seal true: without the signed states' digest it reads as the wider policy; held to the digest
 // the anchor check's walk kept, it is refused at decision time, the alarm raised and the organisation held.
-import { CHAIN_START, createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -19,15 +18,21 @@ import {
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { money } from '../../../shared-kernel/index.ts';
-import { type AuditTables, checkStatesWith, createAuditTrail, withSignedStates } from '../../audit/index.ts';
-import type { DirectoryTables } from '../../directory/index.ts';
+import {
+  type AuditTables,
+  CHAIN_START,
+  checkStatesWith,
+  createAuditTrail,
+  type StateDigest,
+  withSignedStates,
+} from '../../audit/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { PolicyRules } from '../domain/policy.ts';
 import { POLICIES } from './mandates.ts';
 import { policyOf, setPolicy } from './policies.ts';
 import type { MandatesTables } from './tables.ts';
 
-type Tables = MandatesTables & OrganizationsTables & DirectoryTables & AuditTables;
+type Tables = MandatesTables & OrganizationsTables & AuditTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -49,6 +54,11 @@ let org: string;
 
 const services = () => ({ keys, ids, logger: testLogger(capture) });
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
+
+/** What the anchor check's walk read, as the digest keeps it (AT13): each object's newest signed place, by its key. */
+const digestOf = (seen: ReadonlyMap<string, bigint>): Pick<StateDigest, 'latest'> => ({
+  latest: (_chain, type, id) => seen.get(`${type}\n${id.toLowerCase()}`),
+});
 
 /** Rules with a monthly cap of `dirhams`. */
 const cappedAt = (dirhams: bigint): PolicyRules => ({
@@ -95,7 +105,12 @@ beforeEach(async () => {
   capture = new LogCapture();
   org = ids.next();
   await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
-    createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
+    // Its directory entry too, which mandates never reads: the transaction is the organisation module's to type.
+    createOrganization(tx as unknown as Parameters<typeof createOrganization>[0], states, {
+      id: org,
+      name: 'Acme Trading LLC',
+      actor: OPERATOR,
+    }),
   );
   owner = await tamperAsOwner(database, POLICIES, org);
 });
@@ -109,7 +124,7 @@ describe(`AT13 an organisation's policy change deleted below the anchor, its row
    * A cap of 50,000 lowered to 1,000; the anchor check's walk kept in a digest; then the lowering's event deleted past
    * the app and the row put back at the wider version.
    */
-  async function widenedBack(): Promise<{ digest: DigestLog; wider: string }> {
+  async function widenedBack(): Promise<{ digest: Pick<StateDigest, 'latest'>; wider: string }> {
     await policySet(cappedAt(50_000n));
     const before = await owner.saveRow(org);
     const wider = await policyNow();
@@ -117,15 +132,7 @@ describe(`AT13 an organisation's policy change deleted below the anchor, its row
     await policySet(cappedAt(1000n));
     const step = await createAuditTrail({ keys, ids }).checkFromAnchor(app, org, CHAIN_START);
     if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
-    const digest = createDigestLog({
-      keys,
-      logger: testLogger(),
-      now: () => clock.now(),
-      epoch: 1,
-      alertAfterMs: 60_000,
-      mostBytes: 1024 * 1024,
-    });
-    digest.record({ kind: 'organisation', orgId: org }, step.signed, clock.now(), { from: 0n, to: step });
+    const digest = digestOf(step.signed);
     await owner.query("delete from audit.events where org_id = $1 and subject_id = $2 and action = 'policy.changed'", [
       org,
       org,

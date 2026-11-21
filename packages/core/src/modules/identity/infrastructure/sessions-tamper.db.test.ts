@@ -23,14 +23,17 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { createDigestLog, type StateDigest } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AuditTables, ChainBroken, createAuditTrail } from '../../audit/index.ts';
-import { createPlatformChain, type PlatformTransaction } from '../../platform-controls/index.ts';
+import { type AuditTables, ChainBroken, createAuditTrail, type StateDigest } from '../../audit/index.ts';
+import {
+  createPlatformChain,
+  type PlatformControlsTables,
+  type PlatformTransaction,
+} from '../../platform-controls/index.ts';
 import {
   createSessions,
   endSessionsOf,
@@ -1143,20 +1146,12 @@ describe(`AT13c R-15 a signed end deleted below the platform chain's anchor, its
   const heldTo = (digest: Pick<StateDigest, 'latest'> | undefined) =>
     createSessions({ ids, clock, timeouts: TIMEOUTS, keys, logger: testLogger(capture), digest: () => digest });
 
-  /** The platform chain walked whole, as the anchor check does after a start, kept in a digest. */
-  async function digested() {
-    const digest = createDigestLog({
-      keys,
-      logger: testLogger(),
-      now: () => clock.now(),
-      epoch: 1,
-      alertAfterMs: 60_000,
-      mostBytes: 1024 * 1024,
-    });
-    const report = await walking.verifyAlone(app, undefined);
+  /** The platform chain walked whole, as the anchor check does after a start: what it read, as the digest keeps it. */
+  async function digested(): Promise<Pick<StateDigest, 'latest'>> {
+    const report = await walking.verifyAlone(app as unknown as Kysely<PlatformControlsTables>, undefined);
     if (!report.ok) throw new Error('The platform chain should have checked out');
-    digest.record({ kind: 'platform' }, report.signed ?? new Map(), clock.now(), { from: 0n, to: report });
-    return digest;
+    const seen = report.signed ?? new Map<string, bigint>();
+    return { latest: (_chain, type, id) => seen.get(`${type}\n${id.toLowerCase()}`) };
   }
 
   /**

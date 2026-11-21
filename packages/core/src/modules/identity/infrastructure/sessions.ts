@@ -58,12 +58,12 @@
 // own with a statement timeout (B2-4a: hourly, from the API).
 import { createHash, randomBytes } from 'node:crypto';
 
-import type { StateDigest } from '@agentx/platform/audit-chain';
 import { limitStatements } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
+import type { StateDigest } from '../../audit/index.ts';
 import {
   latestPlatformSeqRead,
   latestPlatformTimeOfRead,

@@ -29,9 +29,8 @@ import {
   keptPersonReader,
   membersFor,
   resetLinkFor,
-  signedEndSubjectOf,
 } from '@agentx/core/modules/identity';
-import { createPlatformChain, pauseSubjectOf, type PlatformSubjectOf } from '@agentx/core/modules/platform-controls';
+import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
 import { sweepConnectionTokens } from '@agentx/core/modules/agents';
 import { sweepClientMetadata, sweepClientNetworks, sweepClients, sweepFlows } from '@agentx/core/modules/oauth';
@@ -46,6 +45,7 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
 import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
+import { platformSubjectOf } from './platform-subjects.ts';
 import { anchorsKeptOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
@@ -108,10 +108,6 @@ const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
 /** What the signed states' digest may hold where no store keeps the anchors: a tenth of the heap, as with a store. */
 const MEMORY_DIGEST_BYTES = Math.floor(getHeapStatistics().heap_size_limit / 10);
-
-/** The platform events that are some object's signed state, for the digest (AT13c): the pause's, the sessions' ends. */
-export const platformSubjectOf: PlatformSubjectOf = (action, details) =>
-  pauseSubjectOf(action) ?? signedEndSubjectOf(action, details);
 
 /**
  * The idempotency keys' retention sweep (B1e-3): at each start, then an hour
