@@ -6181,8 +6181,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'Microsoft.Insights/activityLogAlerts',
         // The interface Azure makes for the audit-export store's private endpoint (AZ11).
         'Microsoft.Network/networkInterfaces',
-        // AZ32 (c)'s stray endpoint policy, still in Azure until deleted (S207): access already allows it.
-        'Microsoft.Network/serviceEndpointPolicies',
       ];
       expect(new Set(allowed)).toEqual(new Set(made));
       expect(new Set(ALLOWED_TYPES)).toEqual(new Set(made));

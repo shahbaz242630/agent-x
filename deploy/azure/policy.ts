@@ -5269,9 +5269,6 @@ export const ALLOWED_TYPES: readonly string[] = [
   // AZ11's endpoint and its zone group, allowed a foundation ahead of them (AZ11a, as #627's alerts were).
   'Microsoft.Network/privateEndpoints',
   'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
-  // AZ32 (c)'s stray sep-agentx-staging-apps, unattached since Azure refused it on the apps subnet (S207): goes from
-  // here and guardrails.bicep together at the next access run after it's deleted (a note there would ask for one now).
-  'Microsoft.Network/serviceEndpointPolicies',
   'Microsoft.Network/virtualNetworks',
   'Microsoft.OperationalInsights/workspaces',
   'Microsoft.OperationalInsights/workspaces/savedSearches',
