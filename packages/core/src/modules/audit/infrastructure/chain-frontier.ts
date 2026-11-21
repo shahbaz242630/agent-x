@@ -8,8 +8,11 @@
 // Tx A walks from F to the head it locked (walkWithin, on the trip it makes anyway) and raises F there; the next Tx A
 // walks only what was written since. F starts at the chain's latest anchor and goes back to it whenever the anchor
 // moves past it, is no longer on the stretch kept, or a rebase (chain-rebase --after-restore) is dated after the
-// stretch began. Memory: 32 bytes an event above the anchor, for chains a hand-off walked; past `mostBytes` a chain's
-// stretch is not kept (its next Tx A walks from the anchor again: slower, never less safe).
+// stretch began. The stretch reaches below the latest anchor too, back to where it began, until it holds more than
+// `mostKept` events: the jobs copy holds a head witnessed late below the anchor until confirmed (witness-log.ts), and
+// one on the stretch is judged at once, not left to wait for the anchor check. Memory: 32 bytes an event, for chains a
+// hand-off walked; past `mostBytes` a chain's stretch is not kept (its next Tx A walks from the anchor again: slower,
+// never less safe).
 import {
   type Chain,
   type ChainEdges,
@@ -85,10 +88,13 @@ export function createChainFrontier({
   anchors,
   now,
   mostBytes = MOST_FRONTIER_BYTES,
+  mostKept = MOST_WALKED_WITHIN,
 }: {
   readonly anchors: FrontierAnchors;
   readonly now: () => Date;
   readonly mostBytes?: number;
+  /** How many events a chain's stretch keeps before it is trimmed to the latest anchor. */
+  readonly mostKept?: number;
 }): ChainFrontier {
   const byChain = new Map<string, FrontierStart>();
   let heldBytes = 0;
@@ -103,7 +109,7 @@ export function createChainFrontier({
     heldBytes += kept.hashes.length;
   };
 
-  /** The stretch kept for the chain, trimmed to its latest anchor, where it still stands. */
+  /** The stretch kept for the chain, where it still stands: trimmed to its latest anchor once past `mostKept`. */
   const standing = (chain: Chain, name: string, anchor: CheckedPoint): FrontierStart | undefined => {
     const kept = byChain.get(name);
     if (kept === undefined) return undefined;
@@ -112,7 +118,7 @@ export function createChainFrontier({
     if (anchors.rebasedAfter(chain, new Date(kept.at))) return undefined;
     // The anchor not on the stretch walked: another walk read another chain there. Start over from the anchor.
     if (hashIn(kept, anchor.seq)?.equals(anchor.hash) !== true) return undefined;
-    if (anchor.seq === kept.base.seq) return kept;
+    if (anchor.seq === kept.base.seq || kept.hashes.length <= mostKept * HASH_BYTES) return kept;
     const cut = Number(anchor.seq - kept.base.seq) * HASH_BYTES;
     const trimmed: FrontierStart = { ...kept, base: anchor, hashes: Buffer.from(kept.hashes.subarray(cut)) };
     set(name, trimmed);

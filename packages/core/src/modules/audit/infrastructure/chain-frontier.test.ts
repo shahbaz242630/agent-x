@@ -181,6 +181,7 @@ describe('TR-1 F.1 the walk within a transaction and the path frontier', () => {
     const frontier = createChainFrontier({
       anchors: { latest: () => latest.anchor, rebasedAfter: () => false },
       now: () => AT,
+      mostKept: 6,
     });
     expect(frontier.startOf(CHAIN)).toBeUndefined();
     latest.anchor = chain.point(3n);
@@ -198,7 +199,7 @@ describe('TR-1 F.1 the walk within a transaction and the path frontier', () => {
       kind: 'cut',
       seq: 6n,
     });
-    // A later anchor on the stretch: trimmed to it, F kept.
+    // A later anchor on the stretch, the stretch past what it keeps: trimmed to the anchor, F kept.
     latest.anchor = chain.point(8n);
     const trimmed = frontier.startOf(CHAIN);
     expect(trimmed).toMatchObject({ base: { seq: 8n }, from: { seq: 12n } });
@@ -247,6 +248,27 @@ describe('TR-1 F.1 the walk within a transaction and the path frontier', () => {
     const grown = await new Sealed().grow(14);
     latest.anchor = grown.point(13n);
     expect(frontier.startOf(CHAIN)?.from.seq).toBe(13n);
+  });
+
+  it('keeps its stretch below a later anchor while it is short: a head witnessed late below the anchor is judged on it', async () => {
+    const chain = await new Sealed().grow(10);
+    const latest = { anchor: chain.point(2n) };
+    const frontier = createChainFrontier({
+      anchors: { latest: () => latest.anchor, rebasedAfter: () => false },
+      now: () => AT,
+    });
+    const first = frontier.startOf(CHAIN);
+    if (first === undefined) throw new Error('anchored');
+    frontier.raise(CHAIN, first, walked(await chain.walk(first.from)));
+    latest.anchor = chain.point(8n);
+    const start = frontier.startOf(CHAIN);
+    expect(start).toMatchObject({ base: { seq: 2n }, from: { seq: 10n } });
+    if (start === undefined) throw new Error('kept');
+    const walk = walked(await chain.walk(start.from));
+    expect(judgeWitnessed([chain.witnessed(5n)], start, walk, 'cut')).toEqual({ kind: 'held' });
+    expect(judgeWitnessed([{ seq: 5n, hash: Buffer.alloc(32) }], start, walk, 'cut')).toEqual({ kind: 'cut', seq: 5n });
+    // Below where the stretch began: nothing to place it on.
+    expect(judgeWitnessed([chain.witnessed(1n)], start, walk, 'cut')).toEqual({ kind: 'unjudged', seqs: [1n] });
   });
 
   it('keeps no stretch past its memory, and none with a hole: the next walk starts from the anchor again', async () => {

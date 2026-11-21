@@ -475,6 +475,16 @@ describe('the witness log: reading', () => {
     expect(await first).toEqual([]);
     expect(await second).toEqual([CHAIN]);
   });
+
+  it('refreshWhole says whether the read begun after the call ended whole (TR-1 F.6: the gate sends on no failed one)', async () => {
+    const store = createFakeWriteOnceStore();
+    const { log } = witnessOn(store);
+    expect(await log.refreshWhole()).toBe(true);
+    store.instead.list = () => Promise.reject(new Error('store away'));
+    expect(await log.refreshWhole()).toBe(false);
+    delete store.instead.list;
+    expect(await log.refreshWhole()).toBe(true);
+  });
 });
 
 describe('the witness log: memory and snapshots', () => {

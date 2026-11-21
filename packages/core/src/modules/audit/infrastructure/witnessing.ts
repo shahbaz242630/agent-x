@@ -93,7 +93,7 @@ export async function witnessHeadAsItStands(tx: Transaction<unknown>, orgId: str
   if (row === undefined || typeof row.seq !== 'bigint' || !(row.hash instanceof Buffer)) return;
   const head = { seq: row.seq, hash: row.hash };
   witnessedWrite(tx, chain, 'now');
-  wroteTo(tx, chain, head.seq);
+  wroteTo(tx, chain, head);
   await afterCommit(tx, () => {
     noteCommitted(tx, chain, head);
   });
