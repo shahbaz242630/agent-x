@@ -15,6 +15,7 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import { noStatementTimes, timingStatements } from './statement-times.ts';
 import {
+  afterCommit,
   assertTenant,
   holdTransactionLock,
   inBoundedSavepoint,
@@ -22,6 +23,7 @@ import {
   lockName,
   readAloneOnOneTrip,
   readEachTenant,
+  sendTogether,
   STATEMENT_SECONDS,
   TenantContextError,
   withTenant,
@@ -1005,5 +1007,93 @@ describe(`each organisation's read under its own wall, in one trip (4D2e E8, Pos
     expect(twistedOnce).toBe(true);
     // Refused and read again: the page's three trips, then the retry's own.
     expect(times.trips).toBeGreaterThan(3);
+  });
+});
+
+describe(`afterCommit (AT13h, Postgres ${server.version})`, () => {
+  /** A hook that counts its runs, given in `tx`: whether it was kept. */
+  const counted = () => {
+    const runs = { count: 0 };
+    return { runs, give: (tx: Kysely<ProbeSchema>) => afterCommit(tx, () => (runs.count += 1)) };
+  };
+
+  it('runs once the transaction commits, after the commit, and never on a rollback', async () => {
+    const { runs, give } = counted();
+    const inside = await withTenant(app, ORG_A, async (tx) => {
+      expect(await give(tx)).toBe(true);
+      return runs.count;
+    });
+    expect(inside).toBe(0);
+    expect(runs.count).toBe(1);
+
+    const rolled = counted();
+    await expect(
+      withTenant(app, ORG_A, async (tx) => {
+        await rolled.give(tx);
+        throw new Error('rolled back');
+      }),
+    ).rejects.toThrow('rolled back');
+    expect(rolled.runs.count).toBe(0);
+    // Nothing left on the connection for the next transaction to run.
+    await withTenant(app, ORG_A, (tx) => tx.selectFrom('probe.items').select('id').execute());
+    expect(rolled.runs.count).toBe(0);
+  });
+
+  it('a savepoint rolled back after the hook was given keeps it from running; one rolled back before does not', async () => {
+    const after = counted();
+    const before = counted();
+    await withTenant(app, ORG_A, async (tx) => {
+      await sql`savepoint probe_first`.execute(tx);
+      await sql`rollback to savepoint probe_first`.execute(tx);
+      await before.give(tx);
+      await after.give(tx);
+      await sql`savepoint probe_second`.execute(tx);
+      // Sent together, as the idempotency claim sends its savepoint: counted all the same.
+      await sendTogether(tx, [sql`select 1 as one`, sql`rollback to savepoint probe_second`]);
+    });
+    expect(after.runs.count).toBe(0);
+    expect(before.runs.count).toBe(0);
+
+    const kept = counted();
+    await withTenant(app, ORG_A, async (tx) => {
+      await sql`savepoint probe_first`.execute(tx);
+      await sql`rollback to savepoint probe_first`.execute(tx);
+      await kept.give(tx);
+    });
+    expect(kept.runs.count).toBe(1);
+  });
+
+  it('a transaction a failed statement aborted, its commit answered ROLLBACK with no error: nothing runs', async () => {
+    const { runs, give } = counted();
+    await app.transaction().execute(async (tx) => {
+      await give(tx);
+      await expect(sql`select 1 / 0`.execute(tx)).rejects.toMatchObject({ code: '22012' });
+    });
+    expect(runs.count).toBe(0);
+  });
+
+  it('a handle that is no transaction keeps nothing; a hook that throws is said, and the commit stands', async () => {
+    expect(await afterCommit(app, () => undefined)).toBe(false);
+
+    const { capture, logger } = capturedLogger();
+    const own = appDatabase(undefined, logger);
+    try {
+      const later = counted();
+      await withTenant(own, ORG_A, async (tx) => {
+        await afterCommit(tx, () => {
+          throw new Error('a hook gone wrong');
+        });
+        await later.give(tx);
+        await tx
+          .insertInto('probe.items')
+          .values({ org_id: ORG_A, id: ITEM(9_200), label: 'after-commit' })
+          .execute();
+      });
+      expect(later.runs.count).toBe(1);
+      expect(capture.lines()).toMatchObject([{ level: 'error', event: 'db.after_commit_failed' }]);
+      expect(await labelsSeenBy(ORG_A)).toContain('after-commit');
+    } finally {
+      await own.destroy();
+    }
   });
 });

@@ -486,6 +486,11 @@ export const PLAIN_WORDS = {
     broke: 'Any request using it at that moment failed; the app replaces the connection by itself.',
     next: "Nothing to do if it is rare, such as during a database restart. If it repeats, check the database's health.",
   },
+  'db.after_commit_failed': {
+    happened: 'A step meant to run after a change was saved in the database failed.',
+    broke: 'The change is saved. Only the tamper check of the newest records waits for their next read.',
+    next: 'Nothing urgent. If it repeats, report it as a fault with the error shown.',
+  },
   'db.migration.connection_lost': {
     happened: 'The database update job lost its connection to the database.',
     broke: 'The update in progress did not finish; any part not saved was undone.',
@@ -1247,6 +1252,11 @@ export const PLAIN_WORDS = {
       "An organisation's audit chain was repaired from a copy holding only some lost events; it ends before its last trusted point.",
     broke: 'Later events are still missing: the anchor check keeps alarming and the organisation stays on hold.',
     next: "Once the rest is accepted as lost, run the chain's rebase (playbook H).",
+  },
+  'operator.chain_restored_rebase_needed': {
+    happened: "An organisation's audit chain was repaired by taking away or replacing records the app saw.",
+    broke: 'Copies of the app still hold the old end of the chain, so they keep alarming and holding the organisation.',
+    next: 'Run the rebase this line names, after this repair (playbook H), then clear the hold.',
   },
   'operator.state_recovery_refused': {
     happened: "A recovery plan for an organisation's tampered records was refused.",

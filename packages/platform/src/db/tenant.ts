@@ -577,6 +577,12 @@ function resultOf<R>(result: pg.QueryResult): QueryResult<R> {
     : { rows };
 }
 
+/**
+ * Any rollback a statement's text names (or ABORT, its other name): a savepoint's undoes part of the transaction, which
+ * afterCommit must know. Matched anywhere in the text, so a word in a literal counts too: wider is only safer.
+ */
+const UNDOING = /\b(?:rollback|abort)\b/i;
+
 const READ_ALONE: TransactionSettings = { isolationLevel: 'read committed', accessMode: 'read only' };
 
 /** The opening the first transaction begun in its scope takes, or none. */
@@ -610,6 +616,12 @@ class CheckedConnection implements DatabaseConnection {
   readonly #leaveShare: () => void;
   /** The opening's limit on an answer, in its transaction. */
   #answeredWithinMs: number | undefined;
+  /** What runs once the open transaction commits (afterCommit), each with `#undoing` as it was when given. */
+  #onCommit: { readonly run: () => void; readonly undoing: number }[] = [];
+  /** Whether a transaction is open on it, begun and not yet ended. */
+  #inTransaction = false;
+  /** How many statements sent on this connection could undo part of a transaction (any `rollback`: a savepoint's). */
+  #undoing = 0;
 
   constructor(pool: pg.Pool, logger: Logger, attempts: number, client: pg.PoolClient, leaveShare: () => void) {
     this.#pool = pool;
@@ -679,6 +691,8 @@ class CheckedConnection implements DatabaseConnection {
   /** The start, with the connection's check and the opening's settings, in one round trip. */
   async begin(settings: TransactionSettings, asked: Opening | undefined): Promise<void> {
     this.#answeredWithinMs = asked?.answeredWithinMs;
+    this.#onCommit = [];
+    this.#inTransaction = true;
     const set = await this.#sound(async (client) => {
       const answers = await startSent(client, settings, asked, asked?.answeredWithinMs);
       // A connection closed for its state ends the transaction just begun on it.
@@ -697,12 +711,15 @@ class CheckedConnection implements DatabaseConnection {
   async commit(): Promise<void> {
     const tenant = this.#tenant;
     this.#tenant = undefined;
+    const waiting = this.#onCommit;
+    this.#onCommit = [];
+    this.#inTransaction = false;
     if (tenant === undefined) {
-      await timedTrip(() => this.#trip('commit'), 'commit');
+      this.#committed(await timedTrip(() => this.#trip('commit'), 'commit'), waiting);
       return;
     }
     try {
-      await timedTrip(() => this.#trip(`${stillTenant(tenant)}; commit`), 'commit');
+      this.#committed(await timedTrip(() => this.#trip(`${stillTenant(tenant)}; commit`), 'commit'), waiting);
     } catch (error) {
       // Changed and put back in between is not seen here; row security still walls each statement to the setting it ran under.
       if (error instanceof Error && (error as { code?: unknown }).code === TENANT_CHANGED) {
@@ -714,8 +731,38 @@ class CheckedConnection implements DatabaseConnection {
     }
   }
 
+  /**
+   * Runs `run` once the open transaction commits (afterCommit), unless a statement that could undo part of it is sent
+   * from here on. Says whether it is kept: only inside a transaction this connection began.
+   */
+  onCommit(run: () => void): boolean {
+    if (!this.#inTransaction) return false;
+    this.#onCommit.push({ run, undoing: this.#undoing });
+    return true;
+  }
+
+  /**
+   * After the commit's trip: what was waiting for it runs, only where the server answered COMMIT (a transaction a
+   * failed statement aborted answers ROLLBACK, with no error) and nothing that could undo part of it was sent since it
+   * was given. One that throws is said, never thrown: the transaction is committed whatever it does.
+   */
+  #committed(answer: pg.QueryResult | pg.QueryResult[], waiting: readonly { run: () => void; undoing: number }[]) {
+    const last = Array.isArray(answer) ? answer.at(-1) : answer;
+    if (last?.command !== 'COMMIT') return;
+    for (const { run, undoing } of waiting) {
+      if (undoing !== this.#undoing) continue;
+      try {
+        run();
+      } catch (error) {
+        this.#logger.error('db.after_commit_failed', { err: error });
+      }
+    }
+  }
+
   async rollback(): Promise<void> {
     this.#tenant = undefined;
+    this.#onCommit = [];
+    this.#inTransaction = false;
     // Gone unanswered: it would wait as long again behind that statement. Closing it rolls back.
     if (this.#broken) return;
     await timedTrip(() => this.#trip('rollback'));
@@ -742,6 +789,8 @@ class CheckedConnection implements DatabaseConnection {
   #trip(text: string, values?: unknown[]): Promise<pg.QueryResult> {
     const client = this.#taken();
     const within = this.#answeredWithinMs;
+    // Counted before it is sent, so one that fails counts too: what was waiting for the commit never runs after it.
+    if (UNDOING.test(text)) this.#undoing += 1;
     // eslint-disable-next-line agentx/no-string-built-sql -- fixed text, or Kysely's compiled query with its values bound as parameters: what Kysely's own driver sends, with the opening's limit where it has one.
     const answer = client.query(underLimit(text, values, within));
     if (within === undefined) return answer;
@@ -785,6 +834,24 @@ class CheckedConnection implements DatabaseConnection {
 function checked(connection: DatabaseConnection): CheckedConnection {
   if (!(connection instanceof CheckedConnection)) throw new TenantContextError('not a checked connection');
   return connection;
+}
+
+/**
+ * Runs `hook` once the transaction `tx` commits (AT13h), on createDatabase's connections: never where it rolls back or
+ * its commit fails, nor where any statement that could undo part of it (a savepoint's rollback, whoever sends it) is
+ * sent on it from here on, so what the hook believes was written before it was given is what committed. No trip.
+ * Says whether it is kept: not for a handle that isn't a transaction, nor on any other driver.
+ */
+export async function afterCommit(
+  tx: Pick<Kysely<unknown>, 'isTransaction' | 'getExecutor'>,
+  hook: () => void,
+): Promise<boolean> {
+  if (!tx.isTransaction) return false;
+  return tx
+    .getExecutor()
+    .provideConnection((connection) =>
+      Promise.resolve(connection instanceof CheckedConnection && connection.onCommit(hook)),
+    );
 }
 
 /** A statement sendTogether takes. */

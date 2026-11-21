@@ -4,10 +4,13 @@
 //   timeout there can be (LONGEST_IDLE_SECONDS), whatever this process's own
 //   setting. That holds only while the config refuses anything longer: if its
 //   maximum grew alone, a session a longer setting still accepts could be swept.
+// - The signed states' digest forgets a session end past the longest absolute
+//   timeout there can be (LONGEST_ABSOLUTE_SECONDS, AT13g): a longer setting
+//   would let a session outlive the end the digest forgot.
 // - The security events' module refuses a retention under LEAST_RETENTION_DAYS
 //   (B2-5a); the config's minimum must be the same, or a start would fail on a
 //   setting the config had accepted.
-import { LONGEST_IDLE_SECONDS } from '@agentx/core/modules/identity';
+import { LONGEST_ABSOLUTE_SECONDS, LONGEST_IDLE_SECONDS } from '@agentx/core/modules/identity';
 import { LEAST_RETENTION_DAYS } from '@agentx/core/modules/security-events';
 import { ConfigError, loadConfig } from '@agentx/platform/config';
 import { describe, expect, it } from 'vitest';
@@ -33,6 +36,20 @@ describe("the longest idle timeout: the config's and the sweep's are one", () =>
     expect(() => loadConfig({ ...LOCAL, AGENTX_SESSION_IDLE_MINUTES: String(LONGEST_IDLE_SECONDS / 60 + 1) })).toThrow(
       ConfigError,
     );
+  });
+});
+
+describe("the longest absolute timeout: the config's and the digest's are one (AT13g)", () => {
+  it('takes an absolute timeout of exactly the longest the digest allows for', () => {
+    expect(
+      loadConfig({ ...LOCAL, AGENTX_SESSION_ABSOLUTE_HOURS: String(LONGEST_ABSOLUTE_SECONDS / 3600) }).sessions,
+    ).toMatchObject({ absoluteSeconds: LONGEST_ABSOLUTE_SECONDS });
+  });
+
+  it('refuses an hour more', () => {
+    expect(() =>
+      loadConfig({ ...LOCAL, AGENTX_SESSION_ABSOLUTE_HOURS: String(LONGEST_ABSOLUTE_SECONDS / 3600 + 1) }),
+    ).toThrow(ConfigError);
   });
 });
 

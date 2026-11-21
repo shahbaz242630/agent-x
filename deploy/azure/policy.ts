@@ -2669,15 +2669,16 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     },
     problem,
   );
-  // The chain repair reads the plan it applies (4D2e E10): reading alone, on the exports, to its identity alone.
+  // The chain repair reads the plan it applies (4D2e E10), and the operator a repair's record before the rebase after
+  // it (AT13f): reading alone, on the exports, to those two identities alone, once each.
   storeRoleProblems(
     snapshot,
     {
       name: planReaderRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_READ_ACTIONS,
       containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
-      workloads: ['chain-restore'],
-      called: "the chain repair's read of the plans",
+      workloads: ['chain-restore', 'operator'],
+      called: 'the read of the plans and repair records',
       on: 'the export container',
     },
     problem,

@@ -24,6 +24,19 @@
 // some object's signed state (the hand-off pause's moves, a session's signed
 // ends), that object's newest place they read: the signed states' digest keeps
 // it, so a read finding an older one is tampering at decision time.
+//
+// **Its head is held to the highest this process has seen (AT13h).** As an
+// organisation's chain is (audit-trail.ts, AT13f): the newest events not yet
+// anchored deleted, and an earlier sealed head put back, leave every seal true and
+// a session's sign-out (or the hand-off pause) reading as never signed. So the
+// reads that judge a session (sessions.ts) and the pause (handoff-pause.ts) read
+// the head, and the hash of the event at the seen place, in their own statement
+// (platformHeadRead), and a head below it, or another event there, is the chain
+// cut back (platformCutBack): that session is refused, the pause read as
+// tampered (paused), with the alarm. Raised by those reads, from a transaction that hasn't gone to record
+// here, and by each event recorded here once its transaction commits, unless
+// anything that could undo part of it was sent after (afterCommit). Kept in the
+// signed states' digest (statesDigest), in memory: no trip and no file.
 import {
   type AnchorPoint,
   appendEvent,
@@ -44,7 +57,9 @@ import {
   edgesIn,
   entryIsSealed,
   headFields,
+  headHeldTo,
   headIsSealed,
+  type HeadWatch,
   LAST_COUNTED,
   operatorSignature,
   passStep,
@@ -57,10 +72,11 @@ import {
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { JOB_ANSWER_WITHIN_MS, limitedTransaction } from '@agentx/platform/db';
+import { afterCommit, JOB_ANSWER_WITHIN_MS, limitedTransaction } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
+import { statesDigest } from '../../audit/index.ts';
 import { checkedPlatformEvent, type PlatformEvent, platformEventContent } from '../domain/event.ts';
 import type { PlatformControlsTables } from './tables.ts';
 
@@ -203,6 +219,75 @@ function orgIdIn(details: unknown): string | undefined {
 }
 
 const CHAIN: Chain = { kind: 'platform' };
+
+/**
+ * The transactions that have gone to record on the platform chain (AT13h): their reads see their own events, which may
+ * never commit, so none of them raises the head this process has seen.
+ */
+const headsTaken = new WeakSet<object>();
+
+/** The platform chain's head as a read finds it, and the hash of the event at the place it is held to: platformHeadRead's columns. */
+export interface PlatformHeadOfRow {
+  readonly platform_heads: bigint | null;
+  readonly platform_head_seq: bigint | null;
+  readonly platform_head_hash: Buffer | null;
+  readonly platform_head_mac: Buffer | null;
+  readonly platform_head_mac_key_version: number | null;
+  readonly platform_seen_hash: Buffer | null;
+}
+
+/**
+ * The platform chain's head, how many heads there are (one, or none is believed), and the hash of the event at `seenAt`
+ * (the place the read is held to, by the events' key), as columns of the caller's statement (AT13h), so all come from
+ * its snapshot: a few one-row reads, no trip.
+ */
+export function platformHeadRead(seenAt: bigint | undefined) {
+  const head = <Column>(column: string) =>
+    sql<Column | null>`(select ${sql.ref('h.' + column)} from platform_controls.audit_head h limit 1)`;
+  const seenHash =
+    seenAt === undefined
+      ? sql<Buffer | null>`null::bytea`
+      : sql<Buffer | null>`(select s.hash from platform_controls.audit_events s where s.seq = ${seenAt} limit 1)`;
+  return [
+    sql<bigint | null>`(select pg_catalog.count(*) from platform_controls.audit_head)`.as('platform_heads'),
+    head<bigint>('seq').as('platform_head_seq'),
+    head<Buffer>('hash').as('platform_head_hash'),
+    head<Buffer>('mac').as('platform_head_mac'),
+    head<number>('mac_key_version').as('platform_head_mac_key_version'),
+    seenHash.as('platform_seen_hash'),
+  ] as const;
+}
+
+/**
+ * Where the platform chain was cut back below the head `watch` holds it to (AT13h, the header), as platformHeadRead read
+ * it in `tx`'s statement: below it, none, two, not sealed, or another event at its place. Else none, and the head is
+ * raised to the one read, unless `tx` has gone to record here. Nothing to hold to without a watch.
+ */
+export function platformCutBack(
+  keys: KeyProvider,
+  tx: object,
+  watch: HeadWatch | undefined,
+  row: PlatformHeadOfRow,
+): bigint | undefined {
+  if (watch === undefined) return undefined;
+  const fields =
+    row.platform_heads === 1n
+      ? headFields({
+          seq: row.platform_head_seq,
+          hash: row.platform_head_hash,
+          mac: row.platform_head_mac,
+          mac_key_version: row.platform_head_mac_key_version,
+        })
+      : undefined;
+  const head = fields !== undefined && headIsSealed(keys, CHAIN, fields) ? fields : undefined;
+  const { seen } = watch;
+  if (seen !== undefined && !headHeldTo(seen, head, row.platform_seen_hash)) return seen.seq;
+  if (head !== undefined && !headsTaken.has(tx)) watch.saw({ seq: head.seq, hash: head.hash });
+  return undefined;
+}
+
+/** What the platform chain's reads are held to (AT13h): the signed states' digest's watch, none where none is kept. */
+const platformHeadWatch = (): HeadWatch | undefined => statesDigest()?.heads?.(CHAIN);
 
 /**
  * Every platform event, each with the operator's signature on it, if any, and
@@ -579,11 +664,21 @@ export function createPlatformChain({
   const record = async (tx: PlatformTransaction, input: PlatformEvent): Promise<RecordedPlatformEvent> => {
     const event = checkedPlatformEvent(input, hidesField);
     const details = canonicalDetails(event.details);
+    headsTaken.add(tx);
+    // AT13h, the header: given before the write, so anything that could undo it, sent from here on, keeps it unraised.
+    const moved: { head?: { readonly seq: bigint; readonly hash: Buffer } } = {};
+    const watch = platformHeadWatch();
+    if (watch !== undefined) {
+      await afterCommit(tx, () => {
+        if (moved.head !== undefined) watch.saw(moved.head);
+      });
+    }
     await boundHeadWait(tx);
     const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details, keys), {
       nextId: () => ids.next(),
       content: platformEventContent(event, details),
     });
+    moved.head = { seq: sealed.seq, hash: sealed.hash };
     return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
   };
 

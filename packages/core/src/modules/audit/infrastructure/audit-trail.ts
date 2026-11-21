@@ -46,6 +46,26 @@
 // that, or none, as broken at that place. In memory: no trip. An object signed
 // past the anchor isn't in it yet; the next check of the chain sees to that.
 //
+// Nor is one whose events all went with the chain's end not yet anchored, cut
+// off by the owner with an earlier sealed head put back (AT13f): no seal fails,
+// no walk finds a gap, and the object reads as never made. So every read here
+// beside the chain's head also holds that head to the highest this process has
+// seen the chain at (the digest's `heads`, asked before the statement as the
+// object's place is): a head below it, none, one not sealed, or another event at
+// its place (read in the same statement, by the events' key) is the chain cut
+// back, broken there for every object it reads, unless the object is broken on
+// its own already. A read from a transaction that hasn't moved the head raises
+// it: such a read sees only what is committed, so nothing it raises can be rolled
+// back. In memory, with no trip.
+//
+// A write raises it too (AT13h), to the head it moved the chain to, once its
+// transaction commits (afterCommit, in the commit's own handling: no trip), and
+// only where nothing that could undo part of the transaction (a savepoint's
+// rollback, the idempotency claim's among them) was sent after the write was
+// begun: so the newest events this process wrote are held from their commit,
+// not from its next read. Asked before the head is locked, so a rebase after it
+// sets the head aside, as a read's.
+//
 // What this read can't see: a later event about the object deleted, or moved
 // to another object or organisation, which the chain's check and anchor find;
 // an event sealed with a key the app still holds, though rotated out, which
@@ -75,12 +95,14 @@ import {
   type ChainReport,
   type ChainStep,
   type CheckedPoint,
+  type HeadWatch,
   clockOf,
   countIn,
   countStep,
   edgesIn,
   entryIsSealed,
   headFields,
+  headHeldTo,
   headIsSealed,
   LAST_COUNTED,
   OPERATOR_ID,
@@ -99,6 +121,7 @@ import {
   walkLast,
 } from '@agentx/platform/audit-chain';
 import {
+  afterCommit,
   type AnswersOf,
   assertTenant,
   type GatheredRead,
@@ -736,7 +759,7 @@ export function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['
 
 /** The chain's head (`h`) and the first event past it (`past`), as every read of events beside the head gives them. */
 const HEAD_COLUMNS = sql`h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
-  h.mac_key_version as head_mac_key_version, past.past_head`;
+  h.mac_key_version as head_mac_key_version, past.past_head, past.seen_hash`;
 
 /**
  * The operator's signature on an event of its, and where signing started on the
@@ -772,13 +795,22 @@ export const SIGNED_EVENT_COLUMNS = sql`${EVENT_COLUMNS}, ${OPERATOR_COLUMNS}`;
  * leakproof, so Postgres filtered it after the wall instead of seeking with it, and every read walked the
  * organisation's whole log (Stage G on Azure: 38,095 rows, 1,265 pages a read, every decision slower as its log grew).
  */
-export const headJoins = (chain: Chain & { readonly kind: 'organisation' }): RawBuilder<unknown> => sql`
+export const headJoins = (
+  chain: Chain & { readonly kind: 'organisation' },
+  /** The place of the highest head this process has seen (AT13f): the hash of its event there read too, by the key. */
+  seenAt?: bigint,
+): RawBuilder<unknown> => sql`
   left join audit.heads h on h.org_id = ${chain.orgId}
   cross join lateral (
     select case when h.org_id is null
       then (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${chain.orgId} and p.seq > 0)
       else (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${chain.orgId} and p.seq > h.seq)
-    end as past_head
+    end as past_head,
+    ${
+      seenAt === undefined
+        ? sql`null::bytea`
+        : sql`(select s.hash from audit.events s where s.org_id = ${chain.orgId} and s.seq = ${seenAt})`
+    } as seen_hash
   ) as past`;
 
 /**
@@ -797,7 +829,13 @@ async function eventsWithHead(
     each,
     newest = false,
     alongside,
-  }: { readonly each?: readonly string[]; readonly newest?: boolean; readonly alongside?: RawBuilder<unknown> } = {},
+    seenAt,
+  }: {
+    readonly each?: readonly string[];
+    readonly newest?: boolean;
+    readonly alongside?: RawBuilder<unknown>;
+    readonly seenAt?: bigint | undefined;
+  } = {},
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
   // The oldest events first, or the newest (HistoryToRead.newest); either way handed back in chain order, below.
   const order = newest ? sql`order by e.seq desc` : sql`order by e.seq`;
@@ -820,7 +858,7 @@ async function eventsWithHead(
     select ${HEAD_COLUMNS},
            ${SIGNED_EVENT_COLUMNS}${rowColumn}
     from (values (1)) as one (x)
-    ${headJoins(chain)}
+    ${headJoins(chain, seenAt)}
     left join lateral (${picked}) as e on true
     order by e.seq
   `.execute(tx);
@@ -841,6 +879,7 @@ async function historiesWithHead(
   tx: AuditTransaction,
   chain: Chain & { readonly kind: 'organisation' },
   picks: readonly HistoryPick[],
+  seenAt: bigint | undefined,
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
   const each = picks.map(
     ({ which, limit, newest }, find) =>
@@ -852,7 +891,7 @@ async function historiesWithHead(
     select ${HEAD_COLUMNS}, e.find,
            ${SIGNED_EVENT_COLUMNS}
     from (values (1)) as one (x)
-    ${headJoins(chain)}
+    ${headJoins(chain, seenAt)}
     left join lateral (${sql.join(each, sql` union all `)}) as e on true
     order by e.find, e.seq
   `.execute(tx);
@@ -883,6 +922,7 @@ export interface GatheredLatest {
 function gatheredWithHead(
   chain: Chain & { readonly kind: 'organisation' },
   reads: readonly GatheredRead[],
+  seenAt: bigint | undefined,
 ): RawBuilder<Record<string, unknown>> {
   const each = reads.map(
     (read, item) =>
@@ -896,7 +936,7 @@ function gatheredWithHead(
            ${HEAD_COLUMNS},
            ${SIGNED_EVENT_COLUMNS}
     from objects o
-    ${headJoins(chain)}
+    ${headJoins(chain, seenAt)}
     left join lateral (
       select e.* from audit.events e
       where e.org_id = ${chain.orgId} and e.subject_type = o.subject_type and e.subject_id = o.subject_id
@@ -1001,6 +1041,12 @@ interface HeadMoved {
  */
 const headsMoved = new WeakMap<object, Map<string, HeadMoved>>();
 
+/**
+ * The organisations each transaction has gone to move the head of (AT13f): its reads see its own events, which may
+ * never commit, so none of them raises the head this process has seen.
+ */
+const headsTaken = new WeakMap<object, Set<string>>();
+
 /** Recording's steps over the audit tables, for one organisation and the events recorded together, in their order. */
 function writerFor(
   tx: AuditTransaction,
@@ -1022,6 +1068,7 @@ function writerFor(
   };
   return {
     async lockHead() {
+      headsTaken.set(tx, (headsTaken.get(tx) ?? new Set<string>()).add(orgId));
       const held = headHeld ? headsMoved.get(tx)?.get(orgId) : undefined;
       if (held !== undefined) {
         lockedAt = held.now;
@@ -1388,7 +1435,7 @@ export function createAuditTrail({
    * The signed states' digest (AT13), where this process keeps one (withSignedStates): every read of a latest signed
    * state is held to it. None for a read that judges a copy, not the live log (a recovery plan's).
    */
-  readonly digest?: Pick<StateDigest, 'latest'> | undefined;
+  readonly digest?: (Pick<StateDigest, 'latest'> & Partial<Pick<StateDigest, 'heads'>>) | undefined;
 }): AuditTrail {
   if (correlationId !== undefined && !UUID.test(correlationId)) {
     throw new TypeError('A correlation ID sealed into the audit log must be a UUID');
@@ -1436,6 +1483,14 @@ export function createAuditTrail({
   ): Promise<readonly RecordedAuditEvent[]> => {
     const events = inputs.map((input) => checkedToWrite(hold, input));
     const chain = chainOf(orgId);
+    // AT13h, the header: given before the write, so anything that could undo it, sent from here on, keeps it unraised.
+    const moved: { head?: { readonly seq: bigint; readonly hash: Buffer } } = {};
+    const watch = watchOf(chain);
+    if (watch !== undefined) {
+      await afterCommit(tx, () => {
+        if (moved.head !== undefined) watch.saw(moved.head);
+      });
+    }
     const append = (reuse: boolean) =>
       appendEvents(
         keys,
@@ -1452,6 +1507,8 @@ export function createAuditTrail({
       headsMoved.get(tx)?.delete(chain.orgId);
       sealed = await append(false);
     }
+    const last = sealed.at(-1);
+    if (last !== undefined) moved.head = { seq: last.seq, hash: last.hash };
     return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));
   };
 
@@ -1498,6 +1555,35 @@ export function createAuditTrail({
     if (known === undefined || latest.kind === 'broken') return latest;
     return latest.kind === 'none' || latest.seq < known ? brokenAt(known) : latest;
   };
+
+  /** What the read holds the chain's head to (AT13f), asked before its statement as `knownOf` is: none without a digest. */
+  const watchOf = (chain: Chain & { readonly kind: 'organisation' }): HeadWatch | undefined => digest?.heads?.(chain);
+
+  /**
+   * The statement's head held to the highest this process has seen (AT13f, the header): below it, none, not sealed, or
+   * another event at its place (`seen_hash`), the chain cut back, broken there. Else raised to it, from a transaction
+   * that hasn't gone to move the head, whose reads see only what is committed.
+   */
+  const cutBack = (
+    tx: AuditTransaction,
+    chain: Chain & { readonly kind: 'organisation' },
+    watch: HeadWatch | undefined,
+    first: Readonly<Record<string, unknown>> | undefined,
+  ): BrokenRead | undefined => {
+    if (watch === undefined) return undefined;
+    const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
+    const { seen } = watch;
+    if (seen !== undefined && !headHeldTo(seen, head, first?.seen_hash)) return brokenAt(seen.seq);
+    if (head !== undefined && headsTaken.get(tx)?.has(chain.orgId) !== true)
+      watch.saw({ seq: head.seq, hash: head.hash });
+    return undefined;
+  };
+
+  /** A read's own judgement, broken on its own first; else broken where the chain was cut back (cutBack), if it was. */
+  const unlessCut = <Read extends { readonly kind: string }>(
+    own: Read,
+    cut: BrokenRead | undefined,
+  ): Read | BrokenRead => (own.kind === 'broken' || cut === undefined ? own : cut);
 
   /** latestIn's judgement of the rows alone, as before the digest. */
   const latestOfRows = (
@@ -1555,14 +1641,19 @@ export function createAuditTrail({
 
   /** gatheredWithHead's rows, as each read's answer. */
   const gatheredAnswers = (
+    tx: AuditTransaction,
     chain: Chain & { readonly kind: 'organisation' },
     reads: readonly GatheredRead[],
     { rows }: QueryResult<unknown>,
+    watch: HeadWatch | undefined,
   ): readonly GatheredLatest[] => {
+    const read = rows as readonly Readonly<Record<string, unknown>>[];
     const byItem = reads.map((): Readonly<Record<string, unknown>>[] => []);
-    for (const row of rows as readonly Readonly<Record<string, unknown>>[]) {
+    for (const row of read) {
       if (typeof row.item === 'number') byItem[row.item]?.push(row);
     }
+    // Every row carries the head alike. Cut back, no row is believed here: each is read again on its own, which alarms.
+    const cut = cutBack(tx, chain, watch, read[0]);
     return byItem.map((own, item) => {
       const [first] = own;
       const asked = first?.asked_id;
@@ -1573,7 +1664,7 @@ export function createAuditTrail({
       // A backlog, past the head or not, is left to the row's own read, which judges it as it always has.
       return {
         id: typeof asked === 'string' ? asked : null,
-        latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first, known),
+        latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : unlessCut(latestIn(chain, own, first, known), cut),
         rows: rowsAlong(first),
       };
     });
@@ -1592,6 +1683,7 @@ export function createAuditTrail({
     const chain = chainOf(orgId);
     const id = subject.id.toLowerCase();
     const known = knownOf(chain, subject.type, id);
+    const watch = watchOf(chain);
     // The object's newest signed event and every one after it.
     const events = await eventsWithHead(
       tx,
@@ -1603,10 +1695,11 @@ export function createAuditTrail({
             and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
         )`,
       LATER_EVENTS_READ + 1,
-      rowRead === undefined ? {} : { alongside: rowRead },
+      { seenAt: watch?.seen?.seq, ...(rowRead === undefined ? {} : { alongside: rowRead }) },
     );
     const rows = rowRead === undefined ? undefined : rowsAlong(events[0]);
-    return { latest: latestIn(chain, events, events[0], known), rows };
+    const cut = cutBack(tx, chain, watch, events[0]);
+    return { latest: unlessCut(latestIn(chain, events, events[0], known), cut), rows };
   };
 
   /**
@@ -1840,7 +1933,9 @@ export function createAuditTrail({
       if (reads.length === 0) return [];
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      return gatheredAnswers(chain, reads, await gatheredWithHead(chain, reads).execute(tx));
+      const watch = watchOf(chain);
+      const found = await gatheredWithHead(chain, reads, watch?.seen?.seq).execute(tx);
+      return gatheredAnswers(tx, chain, reads, found, watch);
     },
 
     async latestSignedStatesGatheredBehind<const Before extends readonly SentTogether[]>(
@@ -1852,12 +1947,13 @@ export function createAuditTrail({
       gatheredAllowed(reads);
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const query = gatheredWithHead(chain, reads);
+      const watch = watchOf(chain);
+      const query = gatheredWithHead(chain, reads, watch?.seen?.seq);
       const answered: readonly QueryResult<unknown>[] = await sendTogether(tx, [...before, query]);
       const gathered = answered.at(-1) as Awaited<ReturnType<typeof query.execute>>;
       return {
         ahead: answered.slice(0, -1) as unknown as AnswersOf<Before>,
-        answers: gatheredAnswers(chain, reads, gathered),
+        answers: gatheredAnswers(tx, chain, reads, gathered, watch),
       };
     },
 
@@ -1881,6 +1977,7 @@ export function createAuditTrail({
       const chain = chainOf(orgId);
       // Before the statement, as latestWith asks it.
       const known = new Map(asked.map((id) => [id, knownOf(chain, type, id)]));
+      const watch = watchOf(chain);
       // Each object's newest signed event and every one after it, as latestSignedState reads one object's, each
       // object's at most LATER_EVENTS_READ + 1 of its own: past that, its judgement below says so.
       const rows = await eventsWithHead(
@@ -1893,9 +1990,10 @@ export function createAuditTrail({
               and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
           )`,
         LATER_EVENTS_READ + 1,
-        { each: asked },
+        { each: asked, seenAt: watch?.seen?.seq },
       );
       const [first] = rows;
+      const cut = cutBack(tx, chain, watch, first);
       const byObject = new Map<string, Readonly<Record<string, unknown>>[]>(asked.map((id) => [id, []]));
       for (const row of rows) if (typeof row.subject_id === 'string') byObject.get(row.subject_id)?.push(row);
       // A chain past its head is judged as it is: every object broken, a backlogged one too.
@@ -1905,7 +2003,9 @@ export function createAuditTrail({
           const own = byObject.get(id) ?? [];
           return [
             id,
-            !pastHead && own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first, known.get(id)),
+            !pastHead && own.length > LATER_EVENTS_READ
+              ? BACKLOGGED
+              : unlessCut(latestIn(chain, own, first, known.get(id)), cut),
           ];
         }),
       );
@@ -1970,22 +2070,29 @@ export function createAuditTrail({
       }
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const [row] = await eventsWithHead(tx, chain, which, 1);
+      const watch = watchOf(chain);
+      const [row] = await eventsWithHead(tx, chain, which, 1, { seenAt: watch?.seen?.seq });
+      const cut = cutBack(tx, chain, watch, row);
       const past = row?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);
-      if (row === undefined || row.seq === null) return { kind: 'none' };
+      if (row === undefined || row.seq === null) return cut ?? { kind: 'none' };
       const head = row.has_head === true ? headIsWhole(keys, chain, row) : undefined;
       const read = wholeEvent(keys, chain, row, head);
       if (read === undefined) return brokenAt(row.seq);
-      return Object.freeze({ kind: 'recorded', ...read });
+      return cut ?? Object.freeze({ kind: 'recorded', ...read });
     },
 
     async recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck> {
       const pick = historyPick(find);
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const rows = await eventsWithHead(tx, chain, pick.which, pick.limit, { newest: pick.newest });
-      return historyIn(chain, rows, rows[0], find.limit);
+      const watch = watchOf(chain);
+      const rows = await eventsWithHead(tx, chain, pick.which, pick.limit, {
+        newest: pick.newest,
+        seenAt: watch?.seen?.seq,
+      });
+      const cut = cutBack(tx, chain, watch, rows[0]);
+      return unlessCut(historyIn(chain, rows, rows[0], find.limit), cut);
     },
 
     async recordedHistories(
@@ -2000,13 +2107,18 @@ export function createAuditTrail({
       if (picks.length === 0) return [];
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const rows = await historiesWithHead(tx, chain, picks);
+      const watch = watchOf(chain);
+      const rows = await historiesWithHead(tx, chain, picks, watch?.seen?.seq);
+      const cut = cutBack(tx, chain, watch, rows[0]);
       return finds.map((find, index) =>
-        historyIn(
-          chain,
-          rows.filter((row) => row.find === index),
-          rows[0],
-          find.limit,
+        unlessCut(
+          historyIn(
+            chain,
+            rows.filter((row) => row.find === index),
+            rows[0],
+            find.limit,
+          ),
+          cut,
         ),
       );
     },
@@ -2031,8 +2143,10 @@ export function createAuditTrail({
         sql` and `,
       );
       // One past the limit tells there is a next page; the rows come back in chain order.
-      const rows = await eventsWithHead(tx, chain, which, limit + 1, { newest: true });
+      const watch = watchOf(chain);
+      const rows = await eventsWithHead(tx, chain, which, limit + 1, { newest: true, seenAt: watch?.seen?.seq });
       const [first] = rows;
+      const cut = cutBack(tx, chain, watch, first);
       const past = first?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);
       const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
@@ -2048,7 +2162,7 @@ export function createAuditTrail({
         );
       }
       const next = picked.length > limit ? (events[0]?.seq ?? null) : null;
-      return Object.freeze({ kind: 'read', events: Object.freeze(events.toReversed()), next });
+      return cut ?? Object.freeze({ kind: 'read', events: Object.freeze(events.toReversed()), next });
     },
   });
   holdRecorders.set(trail, (tx, orgId, event) => recordAs(true, tx, orgId, event));

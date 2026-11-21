@@ -20,8 +20,10 @@
 //   subnet may reach (network.bicep); the network rule below stays as a second
 //   lock. Nobody reads an export from a laptop or the portal: how one is handed
 //   over is decided separately (decision 28)
-// - the operator's identity may only add a new file to `audit-exports`
-//   (`blobs/add/action`): it can't read, overwrite or list. The identity of the
+// - the operator's identity may add a new file to `audit-exports`
+//   (`blobs/add/action`), and read what is there (`blobs/read`, the plans'
+//   reader role, as the chain repair's): a rebase after a repair reads that
+//   repair's outcome record first (AT13f). It can't overwrite or delete. The identity of the
 //   app that holds the jobs (`anchorKeepers`, 4D2e D13) may add a new file to
 //   `audit-anchors` and read and list what is there (`blobs/read`, as a restart
 //   must), and can't overwrite or delete. The operator's may read and
@@ -332,6 +334,19 @@ resource restorerReadsPlans 'Microsoft.Authorization/roleAssignments@2022-04-01'
     principalId: restorer.properties.principalId
     principalType: 'ServicePrincipal'
     description: 'chain-restore reads recovery plans (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// The operator's identity reads a repair's outcome record before the rebase that follows it (AT13f,
+// `chain-rebase --after-restore`): the plans' reader role, the same read the chain repair holds, nothing more.
+resource writerReadsRepairs 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: container
+  name: guid(container.id, writer.id, planReaderRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', planReaderRole.name)
+    principalId: writer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'operator reads chain repair records before a rebase (deploy/azure/modules/evidence.bicep)'
   }
 }
 

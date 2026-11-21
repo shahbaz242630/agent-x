@@ -144,7 +144,7 @@ const events = (lines: readonly Record<string, unknown>[], event: string) =>
 /** Written out here, not taken from SECURITY_HEADERS, so a header dropped from that list fails the tests. */
 const EXPECTED_HEADERS = {
   'content-security-policy':
-    "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'strict-transport-security': 'max-age=31536000; includeSubDomains',
   'cache-control': 'no-store',
   'x-frame-options': 'DENY',

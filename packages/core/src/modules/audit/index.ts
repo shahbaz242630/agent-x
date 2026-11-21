@@ -23,6 +23,8 @@ export { actorEventsSince } from './infrastructure/actor-counts.ts';
 export { CHAIN_START, ChainBroken, type CheckedPoint, type StateDigest } from '@agentx/platform/audit-chain';
 // How far past a horizon the digest forgets a fact (AT13d): an ending keeps a request's capacity past it (endings.ts).
 export { FORGET_MARGIN_MS as DIGEST_FORGET_MARGIN_MS } from '@agentx/platform/audit-chain';
+// The digest itself, for another module's tamper tests to hold its reads to one (sessions-tamper.db.test, AT13g).
+export { createDigestLog } from '@agentx/platform/audit-chain';
 export {
   lockChainHead,
   REPAIR_ROLE,

@@ -5,8 +5,13 @@
 // request Node can't parse at all (client-errors.ts).
 export const SECURITY_HEADERS = {
   // ADR-011 §6 as written: no inline scripts, no plugins, and nothing may frame the app.
+  // form-action doesn't fall back to default-src (ZAP 10055), so it is set: a form sends only to us. Chrome also
+  // holds a form's redirects to it, but no page here sends a form natively: every form's submit is prevented and
+  // posted by fetch, and the OAuth consent, deny and device pages reach the app's redirect address by script
+  // (goTo, after the API's JSON answer), which form-action doesn't govern. A native form ending in a 302 to a
+  // redirect address would be blocked: keep it that way (oauth-requests.test.ts).
   'content-security-policy':
-    "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   // Once a browser has seen this over https, it uses only https for a year.
   'strict-transport-security': 'max-age=31536000; includeSubDomains',
   // Responses can hold account data, so no browser or proxy keeps a copy.
