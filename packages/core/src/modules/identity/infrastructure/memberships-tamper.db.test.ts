@@ -19,12 +19,19 @@ import {
   type TestDatabase,
   testLogger,
 } from '@agentx/testing';
+import { CHAIN_START, createDigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, liveSchemaProblems } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
-import { type AuditTables, type TamperSign, withSignedStates } from '../../audit/index.ts';
+import {
+  type AuditTables,
+  checkStatesWith,
+  createAuditTrail,
+  type TamperSign,
+  withSignedStates,
+} from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
@@ -214,6 +221,51 @@ describe(`FX-TAMPER as the owner on a membership: denied by the row check, and h
       expect(await guard()).toEqual(['agentx_app may DELETE on identity.memberships']);
     } finally {
       await owner.query('revoke delete on identity.memberships from agentx_app');
+    }
+  });
+});
+
+describe(`AT13 a member's removal deleted below the anchor, the membership rolled back (R-15; Postgres ${server.version})`, () => {
+  /**
+   * An admin deactivated; the anchor check's walk of the chain kept in a digest; then the deactivation's event deleted
+   * past the app (below the anchor, so no check each run sees it) and the row put back as it was, its seal true.
+   */
+  async function rolledBack() {
+    const { user, id } = await member('admin');
+    const saved = await owner.saveRow(id);
+    await deactivate(id);
+    const step = await createAuditTrail({ keys, ids }).checkFromAnchor(app, org, CHAIN_START);
+    if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    digest.record({ kind: 'organisation', orgId: org }, step.signed, clock.now(), { from: 0n, to: step });
+    await owner.query(
+      "delete from audit.events where org_id = $1 and subject_id = $2 and action = 'membership.deactivated'",
+      [org, id],
+    );
+    await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+    return { user, id, digest };
+  }
+
+  it('the positive control: without the digest, the removed admin reads active again', async () => {
+    const { user, id } = await rolledBack();
+    expect(await check(user)).toEqual({ outcome: 'active', id, role: 'admin' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('held to the digest: refused at decision time, the alarm at the walk’s place, and the organisation held', async () => {
+    const { user, id, digest } = await rolledBack();
+    checkStatesWith(digest);
+    try {
+      await deniedAndHeld(user, id, 'log');
+    } finally {
+      checkStatesWith(undefined);
     }
   });
 });

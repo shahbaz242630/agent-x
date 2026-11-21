@@ -4,6 +4,7 @@
 // the state it is in already recording nothing, a row changed past the app
 // read as tampered (the alarm raised, nothing recorded), and a hand-off's
 // FOR SHARE read waiting for a change in flight, then seeing it whole.
+import { createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -25,6 +26,7 @@ import {
   type HandoffPauseChange,
   type HandoffPauseLock,
   handoffPauseOf,
+  pauseSubjectOf,
 } from './handoff-pause.ts';
 import { createPlatformChain } from './platform-chain.ts';
 import type { PlatformControlsTables } from './tables.ts';
@@ -61,12 +63,12 @@ async function change(paused: boolean, overrides: Partial<HandoffPauseChange> = 
   return { done, lines: capture.lines() };
 }
 
-/** The pause as a hand-off reads it, the log captured. */
-async function pauseNow(lock: HandoffPauseLock = 'share') {
+/** The pause as a hand-off reads it, the log captured, held to `digest` where given (AT13c). */
+async function pauseNow(lock: HandoffPauseLock = 'share', digest?: DigestLog) {
   const capture = new LogCapture();
   const pause = await app
     .transaction()
-    .execute((tx) => handoffPauseOf(tx, lock, { keys, logger: testLogger(capture) }));
+    .execute((tx) => handoffPauseOf(tx, lock, { keys, logger: testLogger(capture), digest }));
   return { pause, lines: capture.lines() };
 }
 
@@ -417,5 +419,88 @@ describe('B1 the pause row is the first lock (ADR-006 §6 level 1)', () => {
     const { pause, lines } = await reading;
     expect(lines).toEqual([]);
     expect(pause).toMatchObject({ outcome: 'running', eventId: resumed.outcome === 'changed' ? resumed.eventId : '' });
+  });
+});
+
+describe('AT13c the pause held to the signed states’ digest (R-15)', () => {
+  const PLATFORM = { kind: 'platform' } as const;
+  /** The anchor check's platform chain, its walks saying where the pause last moved. */
+  const walking = createPlatformChain({ keys, ids: new SequentialIds(0xb2), subjectOf: pauseSubjectOf });
+  /** When the walks began: any time, as nothing here is dated by it. */
+  const WALKED_AT = new Date('2026-11-21T09:00:00.000Z');
+
+  /** The chain walked whole, as the anchor check does daily and after a start, kept in a digest. */
+  async function digested(): Promise<DigestLog> {
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: () => WALKED_AT,
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    const report = await walking.verifyAlone(app, undefined);
+    if (!report.ok) throw new Error('The platform chain should have checked out');
+    digest.record(PLATFORM, report.signed ?? new Map(), WALKED_AT, { from: 0n, to: report });
+    return digest;
+  }
+
+  /** Resumed, then paused, walked; then the pause deleted past the app (below the anchor) and the row pointed back. */
+  async function rolledBack(): Promise<DigestLog> {
+    await change(false);
+    await change(true);
+    const digest = await digested();
+    const [resumed, paused] = await pauseEvents();
+    if (resumed === undefined || paused === undefined) throw new Error('two moves');
+    await tamper('delete from platform_controls.operator_signatures where seq = $1', [paused.seq]);
+    await tamper('delete from platform_controls.audit_events where seq = $1', [paused.seq]);
+    await tamper('update platform_controls.handoff_pause set paused = false, event_seq = $1, event_id = $2', [
+      resumed.seq,
+      resumed.id,
+    ]);
+    return digest;
+  }
+
+  it('the walk names the pause’s newest move, and nothing else', async () => {
+    await change(false);
+    await change(true);
+    await walking.recordAlone(app, { actor: { type: 'system', id: 'api' }, action: 'probe.noted', details: {} });
+    const report = await walking.verifyAlone(app, undefined);
+    expect(report).toMatchObject({ ok: true, seq: 3n, signed: new Map([['platform.handoff_pause\npause', 2n]]) });
+    expect(await walking.checkFromAnchor(app, { seq: 0n, hash: Buffer.alloc(32), macKeyVersion: 0 })).toMatchObject({
+      signed: new Map([['platform.handoff_pause\npause', 2n]]),
+    });
+  });
+
+  it('the positive control: without the digest, the pause rolled back below the anchor reads running', async () => {
+    await rolledBack();
+    expect(await pauseNow()).toMatchObject({ pause: { outcome: 'running' }, lines: [] });
+  });
+
+  it('held to the digest: tampered, read as paused, the alarm at the digest’s place', async () => {
+    const digest = await rolledBack();
+    const { pause, lines } = await pauseNow('share', digest);
+    expect(pause).toEqual({ outcome: 'tampered' });
+    expect(lines).toEqual([expect.objectContaining({ ...ALARM, reason: 'rolled_back', seq: '2' })]);
+  });
+
+  it('every pause event deleted, the row as born: tampered too, never paused by no event', async () => {
+    await change(false);
+    await change(true);
+    const digest = await digested();
+    await tamper('delete from platform_controls.operator_signatures');
+    await tamper('delete from platform_controls.audit_events');
+    await tamper('update platform_controls.handoff_pause set paused = true, event_seq = null, event_id = null');
+    expect(await pauseNow('share', digest)).toMatchObject({
+      pause: { outcome: 'tampered' },
+      lines: [expect.objectContaining({ reason: 'rolled_back' })],
+    });
+  });
+
+  it('moved honestly since the walk: read as ever, no alarm', async () => {
+    await change(false);
+    const digest = await digested();
+    await change(true);
+    expect(await pauseNow('share', digest)).toMatchObject({ pause: { outcome: 'paused' }, lines: [] });
   });
 });

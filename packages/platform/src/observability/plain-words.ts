@@ -289,13 +289,13 @@ export const PLAIN_WORDS = {
   },
   'audit.state_digest_near_memory': {
     happened: 'The record of signed records’ latest versions has passed half its memory.',
-    broke: 'Nothing yet. If it fills, the largest organisation stops being held to it, its records checked as before.',
+    broke: 'Nothing yet. If it fills, the organisation most past its share stops being held to it, checked as before.',
     next: 'Plan more memory for the process in good time: the line says how much is held.',
   },
   'audit.state_digest_chain_gave_way': {
     happened: 'The record of one organisation’s signed records’ latest versions outgrew its share of memory.',
     broke: 'Its payments, or all its records, are checked as before: tampering there is found later. Others go on.',
-    next: 'Nothing waits: its payments go on, checked as before. Give the process more memory in good time.',
+    next: 'Nothing waits. It comes back by itself when memory has room again, an hour on at the soonest.',
   },
   'audit.state_digest_snapshot_too_large': {
     happened: 'The hourly copy of the record of signed records’ latest versions was larger than a start may read.',

@@ -23,6 +23,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
+import { createDigestLog, type StateDigest } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
@@ -45,6 +46,7 @@ import {
   type StepUpEvidence,
   stepUpDetails,
 } from './step-up-challenges.ts';
+import { SESSION_ENDED, signedEndKey, signedEndSubjectOf } from './signed-ends.ts';
 import type { IdentityTables } from './tables.ts';
 import { subjectOfUser, userForSubject, userOfSubject, UserUnbelieved } from './users.ts';
 
@@ -135,6 +137,16 @@ async function keep(sessionId: string): Promise<unknown> {
     sessionId,
   ]);
   return kept?.kept;
+}
+
+/** The owner swaps the session's row for the one it kept, MACs and all. */
+async function swapRow(sessionId: string, kept: unknown): Promise<void> {
+  await asOwner('delete from identity.sessions where id = $1', [sessionId]);
+  await asOwner(
+    `insert into identity.sessions
+       select * from pg_catalog.json_populate_record(null::identity.sessions, $1::json)`,
+    [JSON.stringify(kept)],
+  );
 }
 
 /** A person's MAC and its key version as the database holds them. */
@@ -842,15 +854,7 @@ describe(`SEC-DB-16 R-15 the owner can't bring back an idle session, nor one fro
   const useIn = (at: ReturnType<typeof sessions>, cookie: string) =>
     app.transaction().execute((tx) => at.use(tx as unknown as Kysely<IdentityTables>, cookie));
 
-  /** The owner swaps the row for the one it kept, MACs and all. */
-  const putBack = async (sessionId: string, kept: unknown) => {
-    await asOwner('delete from identity.sessions where id = $1', [sessionId]);
-    await asOwner(
-      `insert into identity.sessions
-         select * from pg_catalog.json_populate_record(null::identity.sessions, $1::json)`,
-      [JSON.stringify(kept)],
-    );
-  };
+  const putBack = swapRow;
 
   const rowOf = (sessionId: string) =>
     app.selectFrom('identity.sessions').select(['id', 'last_seen_at']).where('id', '=', sessionId).executeTakeFirst();
@@ -1127,5 +1131,198 @@ describe(`SEC-DB-16 R-15 the owner can't bring back an idle session, nor one fro
     expect(statements).toBe(2);
     expect(await at.rotate(counted, sessionId)).toBeDefined();
     expect(statements).toBe(4);
+  });
+});
+
+describe(`AT13c R-15 a signed end deleted below the platform chain's anchor, its session put back (Postgres ${server.version})`, () => {
+  const platform = createPlatformChain({ keys, ids });
+  /** The anchor check's platform chain: its walks say where each signed end is. */
+  const walking = createPlatformChain({ keys, ids, subjectOf: signedEndSubjectOf });
+
+  /** Sessions held to `digest`, as a process that keeps one makes them (boot.ts). */
+  const heldTo = (digest: Pick<StateDigest, 'latest'> | undefined) =>
+    createSessions({ ids, clock, timeouts: TIMEOUTS, keys, logger: testLogger(capture), digest: () => digest });
+
+  /** The platform chain walked whole, as the anchor check does after a start, kept in a digest. */
+  async function digested() {
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    const report = await walking.verifyAlone(app, undefined);
+    if (!report.ok) throw new Error('The platform chain should have checked out');
+    digest.record({ kind: 'platform' }, report.signed ?? new Map(), clock.now(), { from: 0n, to: report });
+    return digest;
+  }
+
+  /**
+   * The newest platform event of `action` naming `value` as `fact`, deleted by the owner: below the anchor, so no check
+   * of the chain each run sees it. Gives back how to put it back as it was, so the chain holds for the next test.
+   */
+  async function deletedEnd(action: string, fact: string, value: string): Promise<() => Promise<void>> {
+    const [found] = await asOwner(
+      `select e.seq, pg_catalog.row_to_json(e) as kept from platform_controls.audit_events e
+       where e.action = $1 and (e.details::jsonb ->> $2) = $3 order by e.seq desc limit 1`,
+      [action, fact, value],
+    );
+    if (found === undefined) throw new Error(`no ${action} for ${value}`);
+    await asOwner('delete from platform_controls.audit_events where seq = $1', [found.seq]);
+    return async () => {
+      await asOwner(
+        `insert into platform_controls.audit_events
+           select * from pg_catalog.json_populate_record(null::platform_controls.audit_events, $1::json)`,
+        [JSON.stringify(found.kept)],
+      );
+    };
+  }
+
+  const putBack = swapRow;
+
+  const signOut = (cookie: string) =>
+    app.transaction().execute(async (tx) => {
+      const ended = await sessions().end(tx as unknown as Kysely<IdentityTables>, cookie);
+      if (ended === undefined) throw new Error('the session did not end');
+      await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
+    });
+
+  /** Each of the three reads refused, each with the alarm for the session as `reason` says. */
+  async function refusedWithTheAlarm(
+    at: ReturnType<typeof heldTo>,
+    { sessionId, cookie, userId }: { sessionId: string; cookie: string; userId: string },
+    reason: string,
+  ) {
+    expect(await at.use(app, cookie)).toBeUndefined();
+    expect(await at.holder(app, cookie)).toBeUndefined();
+    expect(await at.rotate(app, sessionId)).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', check: 'session', reason, rowId: sessionId, userId }),
+      expect.objectContaining({ check: 'session', reason, rowId: sessionId }),
+      expect.objectContaining({ check: 'session', reason, rowId: sessionId }),
+    ]);
+  }
+
+  it('the positive control: without the digest, a sign-out deleted with its session put back signs in again', async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+    const kept = await keep(sessionId);
+    await signOut(cookie);
+    const restore = await deletedEnd(SESSION_ENDED, 'record', sessionId);
+    try {
+      await putBack(sessionId, kept);
+      expect(await heldTo(undefined).use(app, cookie)).toMatchObject({ sessionId, userId });
+      expect(alarms()).toEqual([]);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('held to the digest: the sign-out the walk read is missing, so the session put back is none, with the alarm', async () => {
+    const signed = await signedIn();
+    const kept = await keep(signed.sessionId);
+    await signOut(signed.cookie);
+    const digest = await digested();
+    const restore = await deletedEnd(SESSION_ENDED, 'record', signed.sessionId);
+    try {
+      await putBack(signed.sessionId, kept);
+      await refusedWithTheAlarm(heldTo(digest), signed, 'ended');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('held to the digest: a rotation deleted, the row from before it put back, is none for the old cookie', async () => {
+    const signed = await signedIn();
+    const before = await keep(signed.sessionId);
+    await app.transaction().execute(async (tx) => {
+      const rotated = await sessions().rotate(tx as unknown as Kysely<IdentityTables>, signed.sessionId);
+      if (rotated === undefined) throw new Error('the session did not rotate');
+      await platform.record(tx as unknown as PlatformTransaction, sessionRotatedEvent(rotated.retired, clock.now()));
+    });
+    const digest = await digested();
+    const restore = await deletedEnd('identity.session_rotated', 'record', signed.sessionId);
+    try {
+      await putBack(signed.sessionId, before);
+      expect(await heldTo(undefined).holder(app, signed.cookie)).toBe(signed.userId);
+      await refusedWithTheAlarm(heldTo(digest), signed, 'rotated');
+    } finally {
+      await restore();
+    }
+  });
+
+  it("held to the digest: the person's sessions all ended, that end deleted, a session put back is none", async () => {
+    const signed = await signedIn();
+    const kept = await keep(signed.sessionId);
+    const at = new Date(START.getTime() + 1000);
+    await app.transaction().execute(async (tx) => {
+      await lockSessionsOf(tx, [signed.userId]);
+      await endSessionsOf(tx, signed.userId, at);
+      await platform.record(tx as unknown as PlatformTransaction, sessionsEndedEvent(signed.userId, at));
+    });
+    const digest = await digested();
+    const restore = await deletedEnd('identity.sessions_ended', 'person', signed.userId);
+    try {
+      await putBack(signed.sessionId, kept);
+      expect(await heldTo(undefined).holder(app, signed.cookie)).toBe(signed.userId);
+      await refusedWithTheAlarm(heldTo(digest), signed, 'ended');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('control: held to the digest, sessions never ended, and those of the walk’s people, are found with no alarm', async () => {
+    const ended = await signedIn();
+    await signOut(ended.cookie);
+    const mine = await signedIn();
+    const digest = await digested();
+    const at = heldTo(digest);
+    expect(await at.use(app, mine.cookie)).toMatchObject({ sessionId: mine.sessionId });
+    expect(await at.holder(app, mine.cookie)).toBe(mine.userId);
+    expect(await at.rotate(app, mine.sessionId)).toBeDefined();
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a sign-out committed after the read’s snapshot, already in the digest: refused, read again, never the alarm', async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+    // The digest already knows the end: the anchor check walked it between the read's statement and its judgement.
+    const digest: Pick<StateDigest, 'latest'> = {
+      latest: (_chain, type, id) =>
+        type === SESSION_ENDED && id === signedEndKey.ended(userId, sessionId) ? 99_999n : undefined,
+    };
+    let commit: (value: undefined) => void = () => undefined;
+    const committing = new Promise<undefined>((resolve) => {
+      commit = resolve;
+    });
+    let ended: (value: undefined) => void = () => undefined;
+    const endedNow = new Promise<undefined>((resolve) => {
+      ended = resolve;
+    });
+    // The sign-out, its row deleted and its end recorded, waiting to commit.
+    const signingOut = app.transaction().execute(async (tx) => {
+      const gone = await sessions().end(tx as unknown as Kysely<IdentityTables>, cookie);
+      if (gone === undefined) throw new Error('the session did not end');
+      await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(gone, clock.now()));
+      ended(undefined);
+      await committing;
+    });
+    await endedNow;
+    let first = true;
+    // The read's statement found the row (the sign-out not committed); the sign-out commits before it is judged.
+    const ordered = app.withPlugin({
+      transformQuery: (args) => args.node,
+      transformResult: async (args) => {
+        if (first) {
+          first = false;
+          commit(undefined);
+          await signingOut;
+        }
+        return args.result;
+      },
+    }) as unknown as Kysely<IdentityTables>;
+
+    expect(await heldTo(digest).holder(ordered, cookie)).toBeUndefined();
+    expect(alarms()).toEqual([]);
   });
 });
