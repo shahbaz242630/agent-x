@@ -10,9 +10,8 @@ import type { AnchorLog } from '@agentx/platform/audit-chain';
 import { APP_ROLE, createDatabase, type Database, transactionsReadOnly } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { createOutboundFetch } from '@agentx/platform/outbound';
-import { azureBlobOrigins, azureWriteOnceStore, BlobStoreFailed, folderWriteOnceStore } from '@agentx/platform/storage';
 
+import { evidenceSummary, READ_DENIED_PROBLEM } from './evidence-read.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 import { anchorLogOf, evidenceStoreOf } from './main.ts';
 import { NO_ANCHORS_PROBLEM, NO_STORE_PROBLEM } from './request.ts';
@@ -38,15 +37,6 @@ function settingsProblems(config: OperatorConfig, store: unknown, anchors: unkno
   ];
 }
 
-/**
- * Whether the store said the file isn't there: Azure's 404, or the folder's
- * own refusal (development and test). BlobStoreFailed carries its answer in
- * these fixed words alone (packages/platform/src/storage/write-once.ts).
- */
-const missingFile = (error: unknown): boolean =>
-  error instanceof BlobStoreFailed &&
-  (error.message.includes('the blob service answered 404 ') || error.message.endsWith('no file of that name'));
-
 /** A plan's kind: the file its command keeps it in, by name, and its summary line's `k`. */
 export interface PlanKind {
   readonly file: 'chain-recovery' | 'state-recovery';
@@ -66,29 +56,12 @@ export interface PlanAsked {
  * that ID, a plan that was refused, or another digest than the one asked. Its
  * first line is its summary; the rows after it are what the repair makes again.
  */
-export async function storedPlanProblems(
-  { evidence }: OperatorConfig,
-  asked: PlanAsked,
-  kind: PlanKind,
-): Promise<string[]> {
-  const { container, directory } = evidence;
-  let reader;
-  if (container !== null) {
-    reader = azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
-  } else if (directory === null) {
-    return [];
-  } else {
-    reader = folderWriteOnceStore(directory);
-  }
+export async function storedPlanProblems(config: OperatorConfig, asked: PlanAsked, kind: PlanKind): Promise<string[]> {
   const name = `${asked.orgId}/${kind.file}-${asked.planId}.ndjson`;
-  let summary: Readonly<Record<string, unknown>>;
-  try {
-    const text = (await reader.get(name)).toString('utf8');
-    const parsed: unknown = JSON.parse(text.slice(0, text.indexOf('\n')));
-    summary = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
-  } catch (error) {
-    // No such file, or a first line that isn't JSON. Anything else (the network, a timeout) is the caller's failure.
-    if (!(missingFile(error) || error instanceof SyntaxError)) throw error;
+  const summary = await evidenceSummary(config, name);
+  if (summary === 'unset') return [];
+  if (summary === 'denied') return [READ_DENIED_PROBLEM];
+  if (summary === 'missing') {
     return [
       `the plan ${asked.planId} has no readable file in the evidence store (${name}): make the plan first, or check its ID`,
     ];

@@ -1248,6 +1248,11 @@ export const PLAIN_WORDS = {
     broke: 'Later events are still missing: the anchor check keeps alarming and the organisation stays on hold.',
     next: "Once the rest is accepted as lost, run the chain's rebase (playbook H).",
   },
+  'operator.chain_restored_rebase_needed': {
+    happened: "An organisation's audit chain was repaired by taking away or replacing records the app saw.",
+    broke: 'Copies of the app still hold the old end of the chain, so they keep alarming and holding the organisation.',
+    next: 'Run the rebase this line names, after this repair (playbook H), then clear the hold.',
+  },
   'operator.state_recovery_refused': {
     happened: "A recovery plan for an organisation's tampered records was refused.",
     broke:

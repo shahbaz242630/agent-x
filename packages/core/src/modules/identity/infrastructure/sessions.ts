@@ -174,6 +174,14 @@ const LEAST_SECONDS = 60;
  */
 export const LONGEST_IDLE_SECONDS = 8 * 60 * 60;
 
+/**
+ * The longest absolute timeout there can be: AGENTX_SESSION_ABSOLUTE_HOURS's maximum, 24 hours. A session's absolute
+ * end is set at its sign-in and held by its row's MAC, so none ends later than this past it, whatever the setting then
+ * or since. The signed states' digest forgets the platform chain's session ends past it (AT13g, digest-log.ts): a row
+ * an end names, put back, is past its end by then.
+ */
+export const LONGEST_ABSOLUTE_SECONDS = 24 * 60 * 60;
+
 const newCookie = (): string => randomBytes(COOKIE_BYTES).toString('base64url');
 const hashOf = (cookie: string): Buffer => createHash('sha256').update(cookie, 'ascii').digest();
 /** Only text a cookie ID could be is looked up: anything else is no session, and no query. */
@@ -469,6 +477,11 @@ export function createSessions({
   }
   if (idleSeconds > absoluteSeconds) {
     throw new RangeError('the idle timeout must not be longer than the absolute one');
+  }
+  if (absoluteSeconds > LONGEST_ABSOLUTE_SECONDS) {
+    throw new RangeError(
+      `the absolute timeout must not be longer than ${LONGEST_ABSOLUTE_SECONDS} seconds, which the digest relies on`,
+    );
   }
 
   /** The last use a session must have had after, to be live now. */

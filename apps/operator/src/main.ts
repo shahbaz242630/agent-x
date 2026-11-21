@@ -107,6 +107,7 @@ import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { type CountingContactsTables, listCountingContacts } from './counting-contacts.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
+import { evidenceSummary, type EvidenceSummary, READ_DENIED_PROBLEM } from './evidence-read.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { type FactorResetNoticeTables, noticeFactorReset } from './factor-reset-notice.ts';
 import { changeHandoffPauseAsOperator, type HandoffPauseTables } from './handoff-pause.ts';
@@ -286,6 +287,8 @@ type Request =
       readonly evidence: string;
       /** The rebase's ID: its file's name in the anchors' store. */
       readonly id: string;
+      /** The repair it follows on a chain that holds its anchor (AT13f): its outcome is read back and checked first. */
+      readonly afterRestore?: string;
     };
 
 /** A pause or resume of every hand-off, one shape for each command, so a check of the command narrows to its own. */
@@ -448,14 +451,21 @@ function chainNamed(named: string | undefined): Chain | undefined {
 /** A rebase request's flags, in their order, each followed by its value. */
 const REBASE_FLAGS = ['--chain', '--seq', '--hash', '--reason', '--evidence', '--id'] as const;
 
+/** The flag a rebase after a repair that kept its anchor ends with (AT13f), naming the repair. */
+const AFTER_RESTORE = '--after-restore';
+
 /**
  * A chain's rebase (4D2e E11): only from a file, naming the chain, the place the repair ended at (its head's number and
  * hash), why, the incident's reference and the rebase's ID.
  */
 function chainRebaseAsked(words: readonly string[], fromFile: boolean): Request | Problems {
   if (!fromFile) return problem(`${CHAIN_REBASE} runs only from a request file: ${CHAIN_REBASE_USAGE}`);
+  const plain = 1 + 2 * REBASE_FLAGS.length;
+  // AT13f: the repair a rebase follows, last, where it is named.
+  const afterRestore = words.length === plain + 2 && words[plain] === AFTER_RESTORE ? words[plain + 1] : undefined;
   const shaped =
-    words.length === 1 + 2 * REBASE_FLAGS.length && REBASE_FLAGS.every((flag, index) => words[1 + 2 * index] === flag);
+    (words.length === plain || afterRestore !== undefined) &&
+    REBASE_FLAGS.every((flag, index) => words[1 + 2 * index] === flag);
   if (!shaped) return problem(`the request file holds ${CHAIN_REBASE_USAGE} as a JSON list, and nothing else`);
   const [named, seq, hash, reason, evidence, id] = REBASE_FLAGS.map((_flag, index) => String(words[2 + 2 * index]));
   const chain = chainNamed(named);
@@ -469,6 +479,7 @@ function chainRebaseAsked(words: readonly string[], fromFile: boolean): Request 
       ? []
       : ['the incident reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit']),
     ...(UUID_V7.test(String(id)) ? [] : ["the rebase's ID must be a UUIDv7, in lower case"]),
+    ...(afterRestore === undefined ? [] : afterRestoreProblems(afterRestore, chain, why)),
   ];
   if (chain === undefined || why === undefined || problems.length > 0) return { problems };
   return {
@@ -479,7 +490,56 @@ function chainRebaseAsked(words: readonly string[], fromFile: boolean): Request 
     reason: why,
     evidence: String(evidence),
     id: String(id),
+    ...(afterRestore === undefined ? {} : { afterRestore }),
   };
+}
+
+/** What a rebase after a repair must name (AT13f): an organisation's chain, `repaired`, and the repair by its ID. */
+function afterRestoreProblems(restoreId: string, chain: Chain | undefined, reason: RebaseReason | undefined): string[] {
+  return [
+    ...(UUID_V7.test(restoreId) ? [] : ["the repair's ID must be a UUIDv7, in lower case"]),
+    ...(chain?.kind === 'platform' ? ["a rebase after a repair is of an organisation's chain"] : []),
+    ...(reason === undefined || reason === 'repaired' ? [] : ['a rebase after a repair has the reason repaired']),
+  ];
+}
+
+/** A repair record's time as it wrote it (an ISO time, AT13f), or undefined. */
+function recordedTime(text: unknown): Date | undefined {
+  if (typeof text !== 'string') return undefined;
+  const at = new Date(text);
+  return Number.isNaN(at.getTime()) || at.toISOString() !== text ? undefined : at;
+}
+
+/**
+ * Why a rebase may not follow the repair it names (AT13f), from that repair's own record in the evidence store: none
+ * there, not this organisation's repair of that ID, one that didn't repair, one that ended elsewhere than the rebase
+ * names, one short of its anchor (whose rebase is the plain one), or one that only put rows back, which needs none.
+ */
+export function restoreRecordProblems(
+  record: EvidenceSummary,
+  asked: { readonly orgId: string; readonly restoreId: string; readonly seq: bigint; readonly hash: Buffer },
+): string[] {
+  if (record === 'unset') return [NO_STORE_PROBLEM];
+  if (record === 'denied') return [READ_DENIED_PROBLEM];
+  if (record === 'missing') return [`the repair ${asked.restoreId} has no readable outcome in the evidence store`];
+  if (record.k !== 'restore' || record.restoreId !== asked.restoreId || record.orgId !== asked.orgId) {
+    return [`the outcome read is not this organisation's repair ${asked.restoreId}`];
+  }
+  if (record.ok !== true) return [`the repair ${asked.restoreId} did not repair the chain: there is nothing to rebase`];
+  if (record.endsAt !== asked.seq.toString() || record.endsAtHash !== asked.hash.toString('hex')) {
+    return [`the repair ${asked.restoreId} ended at another head than the one named: copy it from its line`];
+  }
+  if (record.endsShortOf !== null)
+    return [`the repair ${asked.restoreId} ended short of its anchor: rebase it without ${AFTER_RESTORE}`];
+  // Its time, which a rebase of the chain since makes the record spent by (chain-rebase.ts): one without is spent.
+  if (recordedTime(record.at) === undefined) {
+    return [
+      `the repair ${asked.restoreId}'s record holds no time it was recorded: run a new repair and use its record`,
+    ];
+  }
+  return record.rebaseNeeded === true
+    ? []
+    : [`the repair ${asked.restoreId} only put rows back: the chain is the app's own, and needs no rebase`];
 }
 
 /**
@@ -1111,6 +1171,23 @@ async function chainRebase(
       log.error('operator.refused', { problems: ['the connection is not read-only, so nothing was read'] });
       return 1;
     }
+    let afterRestoreAt: Date | undefined;
+    if (request.afterRestore !== undefined && chain.kind === 'organisation') {
+      const record = await evidenceSummary(
+        config,
+        `${chain.orgId}/chain-restore-${request.afterRestore}-outcome.ndjson`,
+      );
+      const problems = restoreRecordProblems(record, {
+        ...request,
+        orgId: chain.orgId,
+        restoreId: request.afterRestore,
+      });
+      if (problems.length > 0) {
+        log.error('operator.refused', { problems });
+        return 1;
+      }
+      afterRestoreAt = typeof record === 'object' ? recordedTime(record.at) : undefined;
+    }
     const outcome = await rebaseChain({
       live,
       writer,
@@ -1118,7 +1195,7 @@ async function chainRebase(
       store,
       anchors,
       chain,
-      asked: { ...request, release: config.release, run: config.run },
+      asked: { ...request, afterRestoreAt, release: config.release, run: config.run },
     });
     return rebaseSaid(log, outcome, rebaseId, chain);
   } catch (error) {

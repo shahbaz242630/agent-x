@@ -173,6 +173,41 @@ export interface RestoreFacts {
   readonly run: string | null;
 }
 
+/**
+ * Whether the repair needs a rebase after it though it holds its anchor (AT13f): it took a row away or put another in
+ * one's place, a fork discarded among them, so the head it ends at may be below, or other than, one the API's copies
+ * read. Each copy holds every read of the chain to the highest head it saw, and to where the digest covered it, which
+ * can sit past the anchor: until a rebase sets those aside, every read of the organisation raises the alarm. A repair
+ * that only puts rows back ends on the very chain the app wrote, and needs none. One short of its anchor (AT9) has its
+ * own rebase.
+ */
+const rebaseNeeded = (plan: Planned): boolean =>
+  plan.endsShortOf === null &&
+  (plan.forkDiscarded || plan.rows.some((row) => row.action === 'remove' || row.action === 'replace'));
+
+/**
+ * What the job says after a repair that needs a rebase though it holds its anchor (AT13f, rebaseNeeded): the head it
+ * ended at, and the rebase's request to run, its incident reference and ID left for the operator; none otherwise.
+ */
+export function rebaseAfterLine(
+  outcome: RestoreOutcome,
+  { orgId, restoreId }: Pick<RestoreFacts, 'orgId' | 'restoreId'>,
+): Readonly<Record<string, unknown>> | undefined {
+  if (!outcome.ok || !rebaseNeeded(outcome.plan)) return undefined;
+  const { seq, hash } = outcome.plan.endsAt;
+  const head = hash.toString('hex');
+  return {
+    restoreId,
+    endsAt: seq,
+    endsAtHash: head,
+    request: [
+      'chain-rebase',
+      ...['--chain', orgId, '--seq', seq.toString(), '--hash', head, '--reason', 'repaired'],
+      ...['--evidence', '<incident reference>', '--id', '<new rebase ID>', '--after-restore', restoreId],
+    ].join(' '),
+  };
+}
+
 /** How many of a plan's rows are of each action. */
 const rowCounts = (plan: Planned) => {
   const count = (action: string): number => plan.rows.filter((row) => row.action === action).length;
@@ -189,10 +224,12 @@ export function outcomeLine(outcome: RestoreOutcome): Readonly<Record<string, un
       headReplaced: plan.head !== undefined,
       forkDiscarded: plan.forkDiscarded,
       endsAt: plan.endsAt.seq.toString(),
-      // The repaired head's hash, kept as evidence: no rebase follows a repair that holds its anchor (AT5, S194); one
-      // short of it (AT9) names this head in the rebase that gives up the events past it.
+      // The repaired head's hash, kept as evidence: the rebase after a repair names it, one short of its anchor (AT9)
+      // or one that took rows away or replaced them (AT13f, rebaseNeeded); a repair that only put rows back needs none.
       endsAtHash: plan.endsAt.hash.toString('hex'),
       endsShortOf: plan.endsShortOf?.toString() ?? null,
+      // AT13f: a rebase after it, kept anchor or not, so the API's copies set aside the heads they saw (rebaseNeeded).
+      rebaseNeeded: rebaseNeeded(plan),
       // The live head row overwritten, as read: sealed, the proof of where the live chain reached (AT9 review).
       liveHeadReplaced:
         plan.liveHeadReplaced === undefined
@@ -222,5 +259,13 @@ export function outcomeLine(outcome: RestoreOutcome): Readonly<Record<string, un
 }
 
 /** The repair's record in the evidence store: one NDJSON line, the run's facts and its outcome. */
-export const restoreFile = (outcome: RestoreOutcome, facts: RestoreFacts): Buffer =>
-  Buffer.from(`${JSON.stringify({ k: 'restore', ...facts, ...outcomeLine(outcome) })}\n`);
+export const restoreFile = (outcome: RestoreOutcome, facts: RestoreFacts, at?: Date): Buffer =>
+  Buffer.from(
+    `${JSON.stringify({
+      k: 'restore',
+      ...facts,
+      ...outcomeLine(outcome),
+      // When it was recorded, by the database's clock (AT13f): a rebase of the chain dated after it spends the record.
+      ...(at === undefined ? {} : { at: at.toISOString() }),
+    })}\n`,
+  );

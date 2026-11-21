@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { LONGEST_ABSOLUTE_SECONDS } from '@agentx/core/modules/identity';
+import { APPROVAL_HORIZON_MS } from '@agentx/core/modules/spend-requests';
 import { signAnchor, subjectKey } from '@agentx/platform/audit-chain';
 import type { Config } from '@agentx/platform/config';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -95,5 +97,34 @@ describe("where the chains' anchors are kept (PL-58)", () => {
     await after?.digest.read();
     expect(after?.digest.latest(chain, 'agent', '0199a0f0-0000-7000-8000-0000000000a1')).toBe(3n);
     expect(anchorsKeptOf(configWith({ directory: null, container: null }), services)).toBeUndefined();
+  });
+
+  it('its digest forgets a request’s facts past the approval horizon, and session ends past the longest session (AT13d/g)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'anchors-'));
+    folders.push(directory);
+    const time = { at: AT.getTime() };
+    const kept = anchorsKeptOf(configWith({ directory, container: null }, 2), {
+      ...services,
+      clock: { now: () => new Date(time.at) },
+    });
+    if (kept === undefined) throw new Error('A folder is named');
+    await kept.log.read();
+    await kept.digest.read();
+    const chain = { kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000001' } as const;
+    const platform = { kind: 'platform' } as const;
+    const REQUEST = '0199a0f0-0000-7000-8000-0000000000c1';
+    const ENDED = '0199a0f0-0000-7000-8000-0000000000aa:0199a0f0-0000-7000-8000-0000000000bb';
+    kept.digest.record(chain, new Map([[subjectKey('spend_request', REQUEST), 3n]]), AT);
+    kept.digest.record(platform, new Map([[subjectKey('identity.session_ended', ENDED), 4n]]), AT);
+    const DAY = 86_400_000;
+    // The longest session (LONGEST_ABSOLUTE_SECONDS) and the day's margin past it, and a minute: the end goes.
+    time.at = AT.getTime() + LONGEST_ABSOLUTE_SECONDS * 1000 + DAY + 60_000;
+    kept.digest.record(chain, new Map(), new Date(time.at));
+    expect(kept.digest.latest(platform, 'identity.session_ended', ENDED)).toBeUndefined();
+    expect(kept.digest.latest(chain, 'spend_request', REQUEST)).toBe(3n);
+    // The approval horizon (APPROVAL_HORIZON_MS) and the day's margin past it, and an hour: the request's go.
+    time.at = AT.getTime() + APPROVAL_HORIZON_MS + DAY + 3_600_000;
+    kept.digest.record(chain, new Map(), new Date(time.at));
+    expect(kept.digest.latest(chain, 'spend_request', REQUEST)).toBeUndefined();
   });
 });

@@ -27,6 +27,7 @@ import {
   countingContactsFor,
   factorRemovalsDue,
   keptPersonReader,
+  LONGEST_ABSOLUTE_SECONDS,
   membersFor,
   resetLinkFor,
 } from '@agentx/core/modules/identity';
@@ -299,6 +300,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       mostBytes: MEMORY_DIGEST_BYTES,
       leading,
       forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
+      forgetSessionEndsAfterMs: LONGEST_ABSOLUTE_SECONDS * 1000,
     });
   checkStatesWith(digest);
   // The platform chain's walks keep its signed states in the digest too (AT13c): the pause, the sessions' signed ends.

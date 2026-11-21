@@ -16,7 +16,9 @@
 // the chain's first event (`covered`). Tx A asks `covers` of the anchor it compares with: a stretch lost (a crash between
 // the anchor's write and the digest's, a spoiled delta) or a rebase leaves the chain uncovered, so its hand-offs wait
 // (`digest_pending`, that organisation alone) until the anchor check's catch-up walk reads on from where it is covered
-// (anchor-check.ts). Every other read goes on with the facts held, which are true either way.
+// (anchor-check.ts). Every other read goes on with the facts held, which are true either way. Coverage can sit past
+// the chain's last anchor: the catch-up walk records it to the head it read, writing no anchor, and an anchor whose
+// write failed beside a digest delta that was written leaves it so. Each is a place the app's chain truly reached.
 //
 // A start reads the newest sound snapshot, then every delta named since it, less five minutes for the clocks. A file
 // whose closing line fails is spoiled: the alarm, and nothing in it counts. A snapshot spoiled is passed over for the one
@@ -63,6 +65,31 @@
 // with `y`, so an image before this one reads them as payments' facts, kept; a payments' line without `y` (written
 // before this) stays a payments' fact for good, as before. Instructions, transactions, failure proposals and remittances
 // are kept: the bank may still move a payment past the horizon, and nothing seals one's end yet.
+//
+// The platform chain's session ends are forgotten the same way (AT13g, `forgetSessionEndsAfterMs`): a sign-out, a
+// rotation and a person's sessions all ended matter only while a session they end could still be used, and a session
+// is used only before its absolute end, which its row's MAC holds as the app set it at sign-in (sessions.ts: never
+// further than the longest absolute timeout there can be past it). Every session such an end names opened before the
+// end was signed, so once its facts were known by a time the longest timeout and FORGET_MARGIN_MS ago, every version of
+// every row it names is past its absolute end, put back or not. Kept by the day they were known by, as a request's, on
+// payments' lines with `s` (the platform chain's own field, where an organisation's say `y`), so an image before this
+// one reads them as payments' facts, kept; one without (written before) stays kept for good. Which horizon a day's facts
+// go by is the chain's: only session ends are dated on the platform chain, only requests on an organisation's.
+//
+// The chain cut back (AT13f): an object first signed above the last anchor is in no walk yet, so the owner deleting
+// the chain's end not yet anchored, its events with it, and putting back an earlier sealed head, leaves every seal true
+// and the object reading as never made (a month's total as nothing held). So each read of an organisation's chain also
+// holds the chain's head, read in its own statement, to the highest head this process has seen the chain at (`heads`):
+// a head below it, or another event at its place, is the chain cut back past the app, tampering for every object it
+// holds, never an object missing. Raised by the reads themselves, from what is committed, asked before the statement as
+// `latest` is; in memory, with no trip and no file. A rebase after the read that saw it sets it aside, as it does the
+// facts. Where the digest covers the chain (a head a walk read, from the store: about its last anchor, or past it), that
+// is held to as well, so a restart keeps the chain held that far; what this process saw above it goes with the process.
+// So a sanctioned repair that leaves the chain below, or other than, a head a copy saw or a walk covered (rows taken
+// away or replaced, though the anchor holds) is followed by a rebase (the operator's `chain-rebase --after-restore`),
+// which sets every copy's heads and coverage aside within one read of the anchors.
+// Another copy sees only what it read itself. Held at most a tenth of what may be held, the one raised longest ago going
+// first: only weaker, never a stop.
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -91,10 +118,33 @@ interface Stretch {
   readonly to: CheckedPoint;
 }
 
+/** A chain's head as a read found it, sealed (AT13f): its place, and the hash of its event there. */
+interface HeadSeen {
+  readonly seq: bigint;
+  readonly hash: Buffer;
+}
+
+/** What a read holds the chain's head to (AT13f), asked before its statement is sent. */
+export interface HeadWatch {
+  /** The highest head this process has seen the chain at, or the digest covers it to; none, nothing to hold to. */
+  readonly seen: HeadSeen | undefined;
+  /** The head the read found, sealed and not cut back: kept as seen where higher, dated when this watch was asked. */
+  saw(head: HeadSeen): void;
+}
+
+/** A head seen, with when the read that saw it was asked: a rebase after that sets it aside. */
+type HeadKept = HeadSeen & { readonly at: number };
+
 /** What a decision reads of the digest. */
 export interface StateDigest {
   /** The newest signed place known for the object on the chain; nothing where it knows none, or can't say now. */
   latest(chain: Chain, type: string, id: string): bigint | undefined;
+  /**
+   * What a read of the chain holds its head to (AT13f, the header); none where the digest can't say now (a copy that
+   * doesn't lead, or the chain's shard let go). A head read below `seen`, or another event at its place, is the chain
+   * cut back past the app.
+   */
+  heads(chain: Chain): HeadWatch | undefined;
   /**
    * Whether Tx A may go on a chain anchored at `seq`: the digest covers it to there, or has given the chain up for memory
    * (today's checks, its alarm said). False until the store is read, and while a stretch below `seq` is missing.
@@ -155,7 +205,14 @@ const GROWING_SUBJECTS: ReadonlySet<string> = new Set([
 /** A spend request's subject type: its facts forgotten past the approval horizon (AT13d). */
 const REQUEST_SUBJECT = 'spend_request';
 
-/** A day: a request's facts are kept in one table a day they were known by. */
+/** The platform chain's session ends' subject types: their facts forgotten past the longest session (AT13g). */
+const SESSION_ENDS: ReadonlySet<string> = new Set([
+  'identity.session_ended',
+  'identity.session_rotated',
+  'identity.sessions_ended',
+]);
+
+/** A day: a request's or session end's facts are kept in one table a day they were known by. */
 const DAY_MS = 24 * 60 * 60_000;
 
 /**
@@ -166,7 +223,7 @@ const DAY_MS = 24 * 60 * 60_000;
  */
 export const FORGET_MARGIN_MS = DAY_MS;
 
-/** How often the chains' request tables are looked over for a day past the horizon. */
+/** How often the chains' days' tables are looked over for one past its horizon. */
 const FORGET_EVERY_MS = 60 * 60_000;
 
 /** The most objects on one line: 32 KB of entries, 44 KB of base64. */
@@ -213,6 +270,12 @@ const SAY_EVERY_MS = 60 * 60_000;
 
 /** How long after it gave way a chain may come back: at most once an hour, so it never flaps (AT13e). */
 const BACK_AFTER_MS = 60 * 60_000;
+
+/** What a chain's head seen takes (AT13f): the map's entry, its name and a 32-byte hash, generously. */
+const HEAD_BYTES = 200;
+
+/** The share of what may be held the heads seen may take, at most: past it the one raised longest ago goes. */
+const HEADS_SHARE = 0.1;
 
 const CHAIN = /^(?:platform|organisation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const SEQ = /^(?:0|[1-9]\d{0,18})$/;
@@ -284,7 +347,7 @@ interface DigestLine {
   readonly at: Date;
   readonly payments: boolean;
   readonly entries: Entries;
-  /** On a payments' line, for a request's facts (`y`, AT13d): the time no event they name can be newer than. */
+  /** On a payments' line, for dated facts (`y`, AT13d/g): the time no event they name can be newer than. */
   readonly knownBy?: number | undefined;
   readonly stretch?: Stretch | undefined;
   /** How much of the chain had given way for memory where the line was written (`g`): kept so across a restart. */
@@ -309,18 +372,23 @@ const markFieldsHold = ({ g, n, b }: Record<string, unknown>): boolean =>
   (n === undefined || isCount(n)) &&
   (b === undefined || (isCount(b) && g !== undefined));
 
-/** A line's class as it may be: payments' or none; a time its request's facts were known by only on a payments' one. */
-const classFieldsHold = ({ p, y }: Record<string, unknown>): boolean =>
-  (p === undefined || p === 1) && (y === undefined || (p === 1 && timeIn(y) !== undefined));
+/**
+ * A line's class as it may be: payments' or none; a time its dated facts were known by only on a payments' one, `y` on
+ * an organisation's chain (its requests', AT13d), `s` on the platform's (its session ends', AT13g).
+ */
+const classFieldsHold = (chain: unknown, { p, y, s }: Record<string, unknown>): boolean =>
+  (p === undefined || p === 1) &&
+  (y === undefined || (p === 1 && chain !== 'platform' && timeIn(y) !== undefined)) &&
+  (s === undefined || (p === 1 && chain === 'platform' && timeIn(s) !== undefined));
 
 function lineFrom(fields: unknown): DigestLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
   const said = fields as Record<string, unknown>;
-  const { c, t, e, p, g, n, b, y } = said;
+  const { c, t, e, p, g, n, b, y, s } = said;
   const at = timeIn(t);
   const stretch = stretchFrom(said);
   if (typeof c !== 'string' || !CHAIN.test(c) || at === undefined || stretch === undefined) return undefined;
-  if (!classFieldsHold(said) || !markFieldsHold(said)) return undefined;
+  if (!classFieldsHold(c, said) || !markFieldsHold(said)) return undefined;
   const entries = e === undefined ? [] : typeof e === 'string' ? unpackEntries(Buffer.from(e, 'base64')) : undefined;
   if (entries === undefined || (entries.length === 0 && stretch === 'none' && g === undefined && n === undefined)) {
     return undefined;
@@ -330,7 +398,7 @@ function lineFrom(fields: unknown): DigestLine | undefined {
     at,
     payments: p === 1,
     entries,
-    knownBy: timeIn(y)?.getTime(),
+    knownBy: timeIn(y ?? s)?.getTime(),
     ...(stretch === 'none' ? {} : { stretch }),
     ...(g === undefined ? {} : { gaveWay: g as 1 | 2 }),
     ...(n === undefined ? {} : { gen: n as number }),
@@ -342,7 +410,7 @@ function lineFrom(fields: unknown): DigestLine | undefined {
 interface LineParts {
   readonly payments?: boolean;
   readonly entries?: Entries;
-  /** A request's facts' time known by, on a payments' line (AT13d). */
+  /** Dated facts' time known by, on a payments' line (AT13d/g). */
   readonly knownBy?: number;
   readonly stretch?: Stretch | undefined;
   readonly mark?: Mark;
@@ -364,7 +432,7 @@ function lineText(
     ...(generation === 0 ? {} : { n: generation }),
     ...(entries.length === 0 ? {} : { e: packEntries(entries, entries.length).toString('base64') }),
     ...(payments ? { p: 1 } : {}),
-    ...(knownBy === undefined ? {} : { y: new Date(knownBy).toISOString() }),
+    ...(knownBy === undefined ? {} : { [chain === 'platform' ? 's' : 'y']: new Date(knownBy).toISOString() }),
     ...(stretch === undefined
       ? {}
       : {
@@ -382,15 +450,18 @@ interface Walked {
   readonly gen: number;
 }
 
-/** A day's table of a chain's requests' facts (AT13d): the latest time no event they name can be newer than. */
-interface RequestDay {
+/**
+ * A day's table of a chain's dated facts (its requests', AT13d; the platform's session ends, AT13g): the latest time
+ * no event they name can be newer than.
+ */
+interface DatedDay {
   readonly table: ChainDigest;
   knownBy: number;
 }
 
 /**
  * A chain's lines: how much of it gave way for memory and its generation, if either, first; each class's entries, at
- * most MOST_ENTRIES_A_LINE a line, its requests' a day's table at a time with the time they were known by (AT13d);
+ * most MOST_ENTRIES_A_LINE a line, its dated facts a day's table at a time with the time they were known by (AT13d/g);
  * the stretches on lines of their own.
  */
 function* linesOf(
@@ -399,14 +470,14 @@ function* linesOf(
   [kept, spent]: readonly [Entries, Entries],
   stretches: readonly Walked[],
   mark: Mark | undefined,
-  requests: Iterable<RequestDay>,
+  dated: Iterable<DatedDay>,
 ): Generator<string> {
   if (mark !== undefined && (mark.gaveWay !== 0 || mark.gen !== 0)) yield lineText(chain, at, { mark });
   const classes: (readonly [boolean, Entries, number | undefined])[] = [
     [false, kept, undefined],
     [true, spent, undefined],
   ];
-  for (const { table, knownBy } of requests) classes.push([true, [...table.entries()], knownBy]);
+  for (const { table, knownBy } of dated) classes.push([true, [...table.entries()], knownBy]);
   for (const [payments, entries, knownBy] of classes) {
     for (let from = 0; from < entries.length; from += MOST_ENTRIES_A_LINE) {
       const part = entries.slice(from, from + MOST_ENTRIES_A_LINE);
@@ -428,13 +499,14 @@ const baseOf = (gen: number): number => (gen % 2 === 1 ? gen : Math.max(gen - 1,
 
 /**
  * One chain as held: its authority's and its payments' tables, when its oldest fact's walk began, where it is covered to
- * and the stretches beyond a gap; and how much of it has given way for memory (1 its payments, 2 all of it). Its
- * requests' facts, where they are forgotten past the horizon, by the day they were known by (AT13d), of its payments.
+ * and the stretches beyond a gap; and how much of it has given way for memory (1 its payments, 2 all of it). Its dated
+ * facts (requests, AT13d; session ends, AT13g), where they are forgotten past a horizon, by the day they were known by,
+ * of its payments.
  */
 interface ChainState {
   bornAt: number;
   readonly tables: [ChainDigest, ChainDigest];
-  readonly requests: Map<number, RequestDay>;
+  readonly dated: Map<number, DatedDay>;
   covered: CheckedPoint | undefined;
   readonly stretches: Map<bigint, CheckedPoint>;
   gaveWay: 0 | 1 | 2;
@@ -495,6 +567,7 @@ export function createDigestLog({
   mostBytes,
   mostFileBytes = mostBytes,
   forgetRequestsAfterMs,
+  forgetSessionEndsAfterMs,
 }: {
   /** Where it is kept; none in development and test with no store, where it lives in memory alone and reads as read. */
   readonly store?: WriteOnceStore | undefined;
@@ -521,8 +594,17 @@ export function createDigestLog({
    * once FORGET_MARGIN_MS past it from when they were known by. None: kept with the other payments' facts, for good.
    */
   readonly forgetRequestsAfterMs?: number | undefined;
+  /**
+   * The longest a session can be used from its sign-in, whatever any copy's setting (identity's LONGEST_ABSOLUTE_SECONDS,
+   * AT13g): the platform chain's session ends are forgotten once FORGET_MARGIN_MS past it from when they were known by.
+   * None: kept for good.
+   */
+  readonly forgetSessionEndsAfterMs?: number | undefined;
 }): DigestLog {
   const chains = new Map<string, ChainState>();
+  // The highest head each chain was read at here (AT13f), with when that read was asked, the one raised longest ago first.
+  const heads = new Map<string, HeadKept>();
+  const mostHeads = Math.max(1, Math.floor((mostBytes * HEADS_SHARE) / HEAD_BYTES));
   // What moved since the last write, by chain, in the same shape: given way to nothing, written then dropped.
   let pending = new Map<string, ChainState>();
   // Each chain's stretches since the last write, in order, each with its chain's generation then.
@@ -546,33 +628,39 @@ export function createDigestLog({
     logger.error('audit.integrity_failed', { chain: 'store', check: 'digest_store', reason, ...more });
   };
 
-  /** What its requests' days' tables take (AT13d). */
-  const requestsBytes = (state: ChainState): number => {
+  /** What its days' tables take (AT13d/g). */
+  const datedBytes = (state: ChainState): number => {
     let bytes = 0;
-    for (const { table } of state.requests.values()) bytes += table.bytes;
+    for (const { table } of state.dated.values()) bytes += table.bytes;
     return bytes;
   };
 
-  /** How many requests' facts its days' tables hold, an object once a day it was known by. */
-  const requestsSize = (state: ChainState): number => {
+  /** How many dated facts its days' tables hold, an object once a day it was known by. */
+  const datedSize = (state: ChainState): number => {
     let size = 0;
-    for (const { table } of state.requests.values()) size += table.size;
+    for (const { table } of state.dated.values()) size += table.size;
     return size;
   };
 
-  const tablesBytes = (state: ChainState): number =>
-    state.tables[0].bytes + state.tables[1].bytes + requestsBytes(state);
+  const tablesBytes = (state: ChainState): number => state.tables[0].bytes + state.tables[1].bytes + datedBytes(state);
 
-  /** Whether a subject key is a request's whose facts are forgotten past the horizon. */
-  const forgotten = (key: string): boolean =>
-    forgetRequestsAfterMs !== undefined && key.slice(0, key.indexOf('\n')) === REQUEST_SUBJECT;
+  /** The horizon the chain's dated facts go by: the platform's session ends' (AT13g), an organisation's requests' (AT13d). */
+  const horizonOf = (name: string): number | undefined =>
+    name === 'platform' ? forgetSessionEndsAfterMs : forgetRequestsAfterMs;
+
+  /** Whether facts of a subject type are dated on the chain: forgotten past its horizon. */
+  const datedType = (name: string, type: string): boolean =>
+    horizonOf(name) !== undefined && (name === 'platform' ? SESSION_ENDS.has(type) : type === REQUEST_SUBJECT);
+
+  /** Whether a subject key's facts are dated on the chain. */
+  const dated = (name: string, key: string): boolean => datedType(name, key.slice(0, key.indexOf('\n')));
 
   /** A fresh chain, counted. */
   const newChain = (bornAt: number, counted: boolean): ChainState => {
     const made: ChainState = {
       bornAt,
       tables: [new ChainDigest(bornAt), new ChainDigest(bornAt)],
-      requests: new Map(),
+      dated: new Map(),
       covered: undefined,
       stretches: new Map(),
       gaveWay: 0,
@@ -594,6 +682,7 @@ export function createDigestLog({
   /** All held forgotten: a process that no longer leads, which reads the store again whole when it does. */
   const forget = (): void => {
     chains.clear();
+    heads.clear();
     heldBytes = 0;
     namesRead.clear();
     deltasFrom = undefined;
@@ -640,21 +729,21 @@ export function createDigestLog({
     return moved;
   };
 
-  /** The chain's requests' table for the day `knownBy` falls in, made where there is none (counted if held), later. */
-  const dayOf = (held: ChainState, knownBy: number, counted: boolean): RequestDay => {
+  /** The chain's dated facts' table for the day `knownBy` falls in, made where there is none (counted if held), later. */
+  const dayOf = (held: ChainState, knownBy: number, counted: boolean): DatedDay => {
     const day = Math.floor(knownBy / DAY_MS);
-    let found = held.requests.get(day);
+    let found = held.dated.get(day);
     if (found === undefined) {
       found = { table: new ChainDigest(held.bornAt), knownBy };
-      held.requests.set(day, found);
+      held.dated.set(day, found);
       if (counted) heldBytes += found.table.bytes;
     }
     found.knownBy = Math.max(found.knownBy, knownBy);
     return found;
   };
 
-  /** A request's fact into the chain's table for the day it was known by, counted: a payment's, given way with them. */
-  const putRequest = (held: ChainState, knownBy: number, high: number, low: number, place: number): boolean => {
+  /** A dated fact into the chain's table for the day it was known by, counted: a payment's, given way with them. */
+  const putDated = (held: ChainState, knownBy: number, high: number, low: number, place: number): boolean => {
     if (held.gaveWay !== 0) return false;
     const { table } = dayOf(held, knownBy, true);
     const before = table.bytes;
@@ -665,28 +754,41 @@ export function createDigestLog({
 
   let forgottenAt: number | undefined;
 
+  /** The chain's days whose facts were known by `before` or earlier, let go: how many facts went. */
+  const daysLetGo = (held: ChainState, before: number): number => {
+    let objects = 0;
+    for (const [day, { table, knownBy }] of held.dated) {
+      if (knownBy > before) continue;
+      objects += table.size;
+      heldBytes -= table.bytes;
+      held.dated.delete(day);
+      changedSinceSnapshot = true;
+    }
+    return objects;
+  };
+
   /**
-   * Each chain's requests' days whose facts were known by a time FORGET_MARGIN_MS past the horizon, let go (AT13d): no
-   * version of a request they name can be handed off or approved any more. Looked over at most every FORGET_EVERY_MS,
-   * or `atOnce` (a read: what it took in may be past it already).
+   * Each chain's days whose facts were known by a time FORGET_MARGIN_MS past the chain's horizon, let go: no version of
+   * a request they name can be handed off or approved any more (AT13d), nor of a session they end used (AT13g). Looked
+   * over at most every FORGET_EVERY_MS, or `atOnce` (a read: what it took in may be past it already).
    */
   const forgetPast = (atOnce: boolean): void => {
-    if (forgetRequestsAfterMs === undefined) return;
+    if (forgetRequestsAfterMs === undefined && forgetSessionEndsAfterMs === undefined) return;
     const at = now().getTime();
     if (!atOnce && forgottenAt !== undefined && at - forgottenAt < FORGET_EVERY_MS) return;
     forgottenAt = at;
-    const before = at - forgetRequestsAfterMs - FORGET_MARGIN_MS;
-    let objects = 0;
-    for (const held of chains.values()) {
-      for (const [day, { table, knownBy }] of held.requests) {
-        if (knownBy > before) continue;
-        objects += table.size;
-        heldBytes -= table.bytes;
-        held.requests.delete(day);
-        changedSinceSnapshot = true;
-      }
+    const forgot = { requests: 0, sessionEnds: 0 };
+    for (const [name, held] of chains) {
+      const horizon = horizonOf(name);
+      if (horizon === undefined) continue;
+      forgot[name === 'platform' ? 'sessionEnds' : 'requests'] += daysLetGo(held, at - horizon - FORGET_MARGIN_MS);
     }
-    if (objects > 0) logger.info('audit.state_digest_requests_forgotten', { objects, bytes: heldBytes });
+    if (forgot.requests > 0) {
+      logger.info('audit.state_digest_requests_forgotten', { objects: forgot.requests, bytes: heldBytes });
+    }
+    if (forgot.sessionEnds > 0) {
+      logger.info('audit.state_digest_session_ends_forgotten', { objects: forgot.sessionEnds, bytes: heldBytes });
+    }
   };
 
   /** The chain's own logger: an organisation's names it. */
@@ -758,18 +860,18 @@ export function createDigestLog({
     sayGaveWay(name, held);
   };
 
-  /** Whether the chain holds a growing object's fact: in its payments' table, or a request's day's (AT13d). */
-  const paymentsHeld = (held: ChainState): boolean => held.tables[1].size > 0 || held.requests.size > 0;
+  /** Whether the chain holds a growing object's fact: in its payments' table, or a day's (AT13d/g). */
+  const paymentsHeld = (held: ChainState): boolean => held.tables[1].size > 0 || held.dated.size > 0;
 
-  /** The chain held as given way this far: its growing objects' tables let go (its requests' days with them), or all. */
+  /** The chain held as given way this far: its growing objects' tables let go (its days with them), or all. */
   const dropTo = (held: ChainState, level: 1 | 2): void => {
     for (const index of level === 1 ? ([1] as const) : ([0, 1] as const)) {
       heldBytes -= held.tables[index].bytes;
       held.tables[index] = new ChainDigest(held.bornAt, 1);
       heldBytes += held.tables[index].bytes;
     }
-    heldBytes -= requestsBytes(held);
-    held.requests.clear();
+    heldBytes -= datedBytes(held);
+    held.dated.clear();
     held.gaveWay = level;
   };
 
@@ -866,13 +968,13 @@ export function createDigestLog({
     const held = heldChain(line.chain, at);
     const gen = line.gen ?? 0;
     raise(line.chain, held, gen, line.gaveWay ?? 0, line.letGo ?? 0);
-    // A request's facts by the day they were known by, where they are forgotten past the horizon; else payments' facts.
-    const { knownBy } = line;
+    // Dated facts by the day they were known by, where the chain's are forgotten past a horizon; else payments' facts.
+    const knownBy = horizonOf(line.chain) === undefined ? undefined : line.knownBy;
     for (const [high, low, place] of line.entries) {
       const moved =
-        knownBy !== undefined && forgetRequestsAfterMs !== undefined
-          ? putRequest(held, knownBy, high, low, place)
-          : putInto(held, line.payments, high, low, place);
+        knownBy === undefined
+          ? putInto(held, line.payments, high, low, place)
+          : putDated(held, knownBy, high, low, place);
       if (moved) changedSinceSnapshot = true;
     }
     // A stretch from before the chain last began coming back stands for nothing.
@@ -1050,8 +1152,8 @@ export function createDigestLog({
       ] as const;
       // Every chain with a stretch has its pending entry too (record makes one), dated by its walk.
       const mark = held?.marked === true ? held : undefined;
-      const requests = held?.requests.values() ?? [];
-      yield* linesOf(name, held?.bornAt ?? now().getTime(), entries, stretches.get(name) ?? [], mark, requests);
+      const days = held?.dated.values() ?? [];
+      yield* linesOf(name, held?.bornAt ?? now().getTime(), entries, stretches.get(name) ?? [], mark, days);
     }
   }
 
@@ -1067,8 +1169,8 @@ export function createDigestLog({
           ? [{ stretch: { from: 0n, to: held.covered }, gen: held.gen }]
           : ([] as Walked[]);
       const tables = [[...held.tables[0].entries()], [...held.tables[1].entries()]] as const;
-      // Its requests' days as held: none past the horizon, so a start from it holds what memory does (AT13d).
-      yield* linesOf(name, held.bornAt, tables, coverage, held, held.requests.values());
+      // Its days as held: none past the horizon, so a start from it holds what memory does (AT13d/g).
+      yield* linesOf(name, held.bornAt, tables, coverage, held, held.dated.values());
     }
   }
 
@@ -1092,7 +1194,7 @@ export function createDigestLog({
     for (const index of [0, 1] as const) {
       for (const [high, low, place] of held.tables[index].entries()) kept.tables[index].put(high, low, place);
     }
-    for (const { table, knownBy } of held.requests.values()) {
+    for (const { table, knownBy } of held.dated.values()) {
       const day = dayOf(kept, knownBy, false);
       for (const [high, low, place] of table.entries()) day.table.put(high, low, place);
     }
@@ -1138,25 +1240,25 @@ export function createDigestLog({
   };
 
   /**
-   * A walk's facts into the chain, and those that moved into what waits to be written. A request's are known by now:
-   * every event the walk read was recorded before it recorded them (AT13d).
+   * A walk's facts into the chain, and those that moved into what waits to be written. Dated ones are known by now:
+   * every event the walk read was recorded before it recorded them (AT13d/g).
    */
   const recordFacts = (name: string, held: ChainState, seen: SignedSeen, at: number): void => {
     const knownBy = now().getTime();
     for (const [key, seq] of seen) {
       const [high, low] = fingerprintOf(key);
       const place = placeOf(seq);
-      const request = forgotten(key);
-      const moved = request ? putRequest(held, knownBy, high, low, place) : putInto(held, grows(key), high, low, place);
+      const byDay = dated(name, key);
+      const moved = byDay ? putDated(held, knownBy, high, low, place) : putInto(held, grows(key), high, low, place);
       if (!moved) continue;
       changedSinceSnapshot = true;
-      if (store !== undefined) pendingTable(pendingChain(name, at), key, request, knownBy).put(high, low, place);
+      if (store !== undefined) pendingTable(pendingChain(name, at), key, byDay, knownBy).put(high, low, place);
     }
   };
 
-  /** The table a fact waits to be written in: a request's day's (AT13d), else its class's. */
-  const pendingTable = (waiting: ChainState, key: string, request: boolean, knownBy: number): ChainDigest =>
-    request ? dayOf(waiting, knownBy, false).table : waiting.tables[grows(key) ? 1 : 0];
+  /** The table a fact waits to be written in: a day's, for a dated one (AT13d/g), else its class's. */
+  const pendingTable = (waiting: ChainState, key: string, byDay: boolean, knownBy: number): ChainDigest =>
+    byDay ? dayOf(waiting, knownBy, false).table : waiting.tables[grows(key) ? 1 : 0];
 
   /**
    * A walk's stretch into the chain's coverage, and into what waits to be written, in the chain's generation: never for
@@ -1180,16 +1282,66 @@ export function createDigestLog({
     return held;
   };
 
+  /** The chain's head seen here, set aside where a rebase came after the read that saw it (AT13f). */
+  const headOf = (name: string, chain: Chain): HeadSeen | undefined => {
+    const held = heads.get(name);
+    if (held === undefined || anchors?.rebasedAfter(chain, new Date(held.at)) !== true) return held;
+    heads.delete(name);
+    heldBytes -= HEAD_BYTES;
+    return undefined;
+  };
+
+  /**
+   * A head a read found, kept where it is higher than the one seen: never from a read asked before a rebase the anchors'
+   * log knows, which may have found the chain as it was. Past what they may take, the one raised longest ago goes.
+   */
+  const raiseHead = (name: string, chain: Chain, { seq, hash }: HeadSeen, asked: number): void => {
+    if (seq < 1n || !speaks()) return;
+    const held = headOf(name, chain);
+    if ((held !== undefined && held.seq >= seq) || anchors?.rebasedAfter(chain, new Date(asked)) === true) return;
+    if (held === undefined) heldBytes += HEAD_BYTES;
+    heads.delete(name);
+    heads.set(name, { seq, hash: Buffer.from(hash), at: asked });
+    for (const oldest of heads.keys()) {
+      if (heads.size <= mostHeads) break;
+      heads.delete(oldest);
+      heldBytes -= HEAD_BYTES;
+    }
+  };
+
+  /** Where the digest covers the chain to, from its first event: a head a walk read (an anchor's, or past it), read back at a start. */
+  const coveredHead = (name: string): HeadSeen | undefined => {
+    const held = chainOf(name);
+    // Given way whole, or coming back: it reads as before the digest until its walk is back (`covers`).
+    if (held === undefined || held.gaveWay === 2 || held.gen % 2 === 1) return undefined;
+    const covered = held.covered;
+    return covered === undefined || covered.seq < 1n ? undefined : { seq: covered.seq, hash: covered.hash };
+  };
+
   return Object.freeze({
+    heads(chain: Chain): HeadWatch | undefined {
+      if (!speaks() || anchors?.holds(chain) === false) return undefined;
+      const name = chainName(chain);
+      const asked = now().getTime();
+      const own = headOf(name, chain);
+      const covered = coveredHead(name);
+      const seen = own === undefined || (covered !== undefined && covered.seq > own.seq) ? covered : own;
+      return Object.freeze({
+        seen: seen === undefined ? undefined : Object.freeze({ seq: seen.seq, hash: seen.hash }),
+        saw: (head: HeadSeen) => {
+          raiseHead(name, chain, head, asked);
+        },
+      });
+    },
     latest(chain: Chain, type: string, id: string): bigint | undefined {
       if (!speaks() || anchors?.holds(chain) === false) return undefined;
       const held = chainOf(chainName(chain));
       if (held === undefined) return undefined;
       const [high, low] = fingerprintOf(subjectKey(type, id));
       let place = held.tables[GROWING_SUBJECTS.has(type) ? 1 : 0].get(high, low) ?? 0;
-      // A request's newest by the days it was known by too (AT13d): the highest of them, a day let go only lowering it.
-      if (type === REQUEST_SUBJECT) {
-        for (const { table } of held.requests.values()) place = Math.max(place, table.get(high, low) ?? 0);
+      // A dated fact's newest by the days it was known by too (AT13d/g): the highest, a day let go only lowering it.
+      if (datedType(chainName(chain), type)) {
+        for (const { table } of held.dated.values()) place = Math.max(place, table.get(high, low) ?? 0);
       }
       return place === 0 ? undefined : BigInt(place);
     },
@@ -1243,7 +1395,7 @@ export function createDigestLog({
     bytesHeld: () => heldBytes,
     memoryHeld() {
       let objects = 0;
-      for (const held of chains.values()) objects += held.tables[0].size + held.tables[1].size + requestsSize(held);
+      for (const held of chains.values()) objects += held.tables[0].size + held.tables[1].size + datedSize(held);
       return { bytes: heldBytes, mostBytes, chains: chains.size, objects };
     },
   });

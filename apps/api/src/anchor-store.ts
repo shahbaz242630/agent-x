@@ -9,6 +9,7 @@
 // A `web` copy (AT13b) reads the same store and never writes it (`anchorsReadOf`): its identity is given only the
 // anchors' reader role in production (modules/evidence.bicep), and the store it is handed refuses every write besides,
 // so no path in the anchors' log or the digest can add a file from a copy that doesn't lead.
+import { LONGEST_ABSOLUTE_SECONDS } from '@agentx/core/modules/identity';
 import { APPROVAL_HORIZON_MS } from '@agentx/core/modules/spend-requests';
 import type { Clock } from '@agentx/core/shared-kernel';
 import { type AnchorLog, createAnchorLog, createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
@@ -143,6 +144,8 @@ function keptIn(
     mostBytes: Math.floor(log.memoryHeld().mostBytes / 2),
     // An approval older than this is never handed off (AT13d): so a request's facts needn't be kept past it.
     forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
+    // No session is used longer than this past its sign-in (AT13g): so its signed ends needn't be kept past it.
+    forgetSessionEndsAfterMs: LONGEST_ABSOLUTE_SECONDS * 1000,
   });
   kept.digest = digest;
   return { log, digest };

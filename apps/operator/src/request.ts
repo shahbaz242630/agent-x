@@ -154,7 +154,7 @@ export const chainRestoreRequest = (
 
 /** What a request file holds to move a chain's anchor on after a sanctioned change to it (4D2e E11): only ever a file. */
 export const CHAIN_REBASE_USAGE =
-  'chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> --id <new rebase ID>';
+  'chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> --id <new rebase ID> [--after-restore <repair ID>]';
 
 /** A chain's head as a rebase names it (4D2e E11): its number, from 1, and its hash in lower-case hex. */
 export const HEAD_SEQ = /^[1-9]\d{0,18}$/;
