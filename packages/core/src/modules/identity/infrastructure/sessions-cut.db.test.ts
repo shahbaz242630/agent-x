@@ -431,6 +431,49 @@ describe(`AT13h, S208: a cut platform chain signs everyone out once, signed, ins
     expect(await allEndedRecords()).toBe(records);
   });
 
+  it('the answer deleted below the anchor, its place known to the digest (AT13c): a session from before it refused, with the alarm', async () => {
+    const old = await signedIn();
+    const row = await keep(old.sessionId);
+    clock.advanceBy(1000);
+    const { seq } = await platform.recordAlone(
+      app,
+      sessionsAllEndedEvent({ held: { seq: 1n, hash: Buffer.alloc(32) }, found: 1n }, clock.now()),
+    );
+    // The digest's walk read it: only its place, as a copy past a restart keeps it.
+    const known = { latest: (_: unknown, type: string) => (type === SESSIONS_ALL_ENDED ? seq : undefined) };
+    const placesOnly = createSessions({
+      ids,
+      clock,
+      timeouts: TIMEOUTS,
+      keys,
+      logger: testLogger(capture),
+      digest: () => known,
+    });
+    // Standing: refused quietly, by the record itself.
+    expect(await placesOnly.holder(app, old.cookie)).toBeUndefined();
+    expect(alarms()).toEqual([]);
+    const [record] = await asOwner(
+      'select pg_catalog.row_to_json(e) as kept from platform_controls.audit_events e where e.seq = $1::bigint',
+      [seq.toString()],
+    );
+    await asOwner('delete from platform_controls.audit_events where seq = $1::bigint', [seq.toString()]);
+    try {
+      await putBack(old.sessionId, row);
+      expect(await placesOnly.holder(app, old.cookie)).toBeUndefined();
+      expect(alarms()).toEqual([expect.objectContaining({ check: 'session', reason: 'ended', rowId: old.sessionId })]);
+      // Positive control: held to nothing, the record gone, the row put back is believed.
+      expect(await copy(await newDigest(), false).holder(app, old.cookie)).toBe(old.userId);
+    } finally {
+      // The chain made whole again for the tests after.
+      await asOwner(
+        `insert into platform_controls.audit_events
+           select * from pg_catalog.json_populate_record(null::platform_controls.audit_events, $1::json)`,
+        [JSON.stringify(record?.kept)],
+      );
+      await asOwner('delete from identity.sessions where id = $1', [old.sessionId]);
+    }
+  });
+
   it('a sign-in held behind the cut by its own check of the chain goes ahead once an answer was recorded after it', async () => {
     // An answer recorded before the check got anywhere: never one to let a later cut pass.
     await platform.recordAlone(
