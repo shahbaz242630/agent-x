@@ -2988,7 +2988,10 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
       const request = await ask(acting, w, { amount: ALLOWED() });
       const { anchors, digest } = await digestedNow(w);
       const platform = { kind: 'platform' } as const;
-      const head = { seq: 7n, hash: Buffer.alloc(32, 7), macKeyVersion: 1 };
+      // The platform chain's own head (TR-1: the digest's coverage head is one the pause's read is held to).
+      const walked = await chain.checkFromAnchor(app, CHAIN_START);
+      if (!walked.ok) throw new Error('the platform chain should check out');
+      const head = { seq: walked.seq, hash: walked.hash, macKeyVersion: walked.macKeyVersion };
       anchors.keep(signAnchor(keys, platform, head, clock.now()));
       checkStatesWith(digest);
       try {

@@ -874,6 +874,12 @@ export const PLAIN_WORDS = {
     broke: 'That payment was not sent and waits, its money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
   },
+  'handoff.held_before_sending': {
+    happened: 'An approved payment was ready for the bank, but a last check of the audit records raised a doubt.',
+    broke:
+      'It was not sent. Its money stays held, it is marked unknown in about 10 minutes, and the bank check settles it.',
+    next: 'Read the reason. A cut or fork means someone changed the database: follow the incident runbook. A store reason: check the witness store.',
+  },
   'handoff.queue_stale': {
     happened: 'Approved payments have waited over 15 minutes without being handed to the bank, for no known reason.',
     broke: 'Those payments are not sent; their money stays held.',
@@ -1152,6 +1158,11 @@ export const PLAIN_WORDS = {
     happened: 'The sign-in records were found cut back, but signing everyone out once could not be saved.',
     broke: 'Nobody can use the console on this copy of the server for now.',
     next: 'It is tried again within a minute. Check the database, then follow the incident runbook.',
+  },
+  'identity.sign_out_unwitnessed': {
+    happened: 'Someone signed out, but the record of it did not reach the witness store in time.',
+    broke: 'Nothing: they are signed out. The record is still queued and goes out as soon as the store answers.',
+    next: 'Nothing if it is rare. If it repeats, check the witness store: a write failure line will say more.',
   },
   'identity.step_up_challenge_sweep_failed': {
     happened: 'The hourly clean-up of expired identity re-checks failed.',

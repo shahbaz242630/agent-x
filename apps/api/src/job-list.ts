@@ -12,6 +12,7 @@ import { backgroundDownloadsDue, SEAL_GRACE_MS } from '@agentx/core/modules/acti
 import {
   checkStatesWith,
   createAuditTrail,
+  createChainFrontier,
   holdHistoryDue,
   holdOrganisation,
   HOLDS_WAITING_EVERY_MS,
@@ -425,6 +426,22 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
           ...(anchorLog === undefined ? {} : { pin: anchorLog.pin.bind(anchorLog) }),
           digest,
         },
+        // Tx A walks from each chain's path frontier, held to every head witnessed, and the gate before each partner
+        // call (TR-1 F): where the witness log is kept. The frontier goes back to the anchor at a rebase the log read.
+        ...(witness === undefined
+          ? {}
+          : {
+              witnessing: {
+                witness,
+                frontier: createChainFrontier({
+                  anchors: {
+                    latest: (chain) => anchorStore.latest(chain),
+                    rebasedAfter: (chain, at) => anchorLog?.rebasedAfter(chain, at) ?? false,
+                  },
+                  now: () => systemClock.now(),
+                }),
+              },
+            }),
       }),
     );
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
