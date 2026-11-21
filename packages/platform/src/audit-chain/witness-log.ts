@@ -107,6 +107,11 @@ export interface WitnessLog extends ChainWitness {
    * began after its commit and failed). Never throws.
    */
   refreshWhole(): Promise<boolean>;
+  /**
+   * Whether this process's heads go out: no heads Put failing since the last one that went, and no `now` head waiting
+   * past the wait (TR-1, plan §1.4 #2: hand-offs wait while the store takes no writes, rather than commit and be held).
+   */
+  writesSound(): boolean;
   /** When the last refresh that ended whole began: none before one has. */
   freshAt(): Date | undefined;
   /** Those heads let go: each confirmed on the chain (the anchor check's walk passed through it, or its probe read it). */
@@ -271,6 +276,8 @@ export function createWitnessLog({
   let failedWrites = 0;
   let lastFailedAt = 0;
   let writeFailingSince: number | undefined;
+  // A heads Put failed and none has gone since (a snapshot's failure is not one: it holds no head back).
+  let headsPutFailing = false;
 
   let state: 'unread' | 'read' = 'unread';
   let freshAt: Date | undefined;
@@ -426,10 +433,12 @@ export function createWitnessLog({
         queued.done();
       }
       writeFailingSince = undefined;
+      headsPutFailing = false;
       failedWrites = 0;
       return true;
     } catch (error) {
       queue = [...taking, ...queue];
+      headsPutFailing = true;
       failedWrites += 1;
       lastFailedAt = now().getTime();
       failed('write', error);
@@ -714,6 +723,14 @@ export function createWitnessLog({
       return (await nextRefresh()).whole;
     },
     freshAt: () => freshAt,
+    writesSound(): boolean {
+      if (headsPutFailing) return false;
+      const waitedSince = now().getTime() - waitMs;
+      for (const waiting of unconfirmed.values()) {
+        for (const { head } of waiting) if (head.at <= waitedSince) return false;
+      }
+      return true;
+    },
     prune(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void {
       const name = nameOf(chain);
       const list = held.get(name);

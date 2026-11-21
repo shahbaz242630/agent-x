@@ -37,14 +37,25 @@ import type { Logger } from '@agentx/platform/observability';
 /** How long the gate waits for the store and its walks before it gives up, the payment not sent. */
 export const GATE_DEADLINE_MS = 10_000;
 
+/** A chain's walk Tx A made: where it began (the frontier) and what it read to the head. */
+export interface Walked {
+  readonly start: FrontierStart;
+  readonly walk: WalkedWithin;
+}
+
+/** A walk, where both its start and its reading are there. */
+export const walkedOf = (start: FrontierStart | undefined, walk: WalkedWithin | undefined): Walked | undefined =>
+  start === undefined || walk === undefined ? undefined : { start, walk };
+
 /** What Tx A walked and wrote, for the gate: its head, and each chain's walk from where it started. */
 export interface WitnessedTxA {
   readonly orgId: string;
   readonly requestId: string;
   /** The head Tx A moved the organisation's chain to (`H_A`); none where its write left none to witness. */
   readonly head: { readonly seq: bigint; readonly hash: Buffer } | undefined;
-  readonly org: { readonly start: FrontierStart; readonly walk: WalkedWithin };
-  readonly platform: { readonly start: FrontierStart; readonly walk: WalkedWithin };
+  /** Each chain's walk; one missing (a Tx A not held to the frontier) can't be judged: `not_walked`. */
+  readonly org: Walked | undefined;
+  readonly platform: Walked | undefined;
 }
 
 export interface HandoffWitnessGate {
@@ -104,7 +115,8 @@ export function createHandoffWitnessGate({
 
   /** The organisation's witnessed heads against Tx A's walk, its own head and, above, a walk from the head it locked. */
   const orgDoubt = async (
-    { orgId, org }: WitnessedTxA,
+    orgId: string,
+    org: Walked,
     head: NonNullable<WitnessedTxA['head']>,
   ): Promise<Doubt | undefined> => {
     const chain: Chain = { kind: 'organisation', orgId };
@@ -126,7 +138,7 @@ export function createHandoffWitnessGate({
   };
 
   /** The platform's witnessed heads against Tx A's walk to `P`, and above it a walk from `P` that must hold no pause. */
-  const platformDoubt = async ({ platform: walked }: WitnessedTxA): Promise<Doubt | undefined> => {
+  const platformDoubt = async (walked: Walked): Promise<Doubt | undefined> => {
     const pending = witness.pending(PLATFORM);
     const judged = judgeWitnessed(pending, walked.start, walked.walk, 'unjudged');
     if (judged.kind === 'cut') return { reason: 'platform_cut_back', fork: { chain: 'platform', seq: judged.seq } };
@@ -143,17 +155,19 @@ export function createHandoffWitnessGate({
   /** The gate's own judgement: a doubt, or none and the payment goes. */
   const doubtOf = async (txA: WitnessedTxA): Promise<Doubt | undefined> => {
     const chain: Chain = { kind: 'organisation', orgId: txA.orgId };
-    if (txA.head === undefined) return { reason: 'no_head' };
+    const { head, org, platform } = txA;
+    if (head === undefined) return { reason: 'no_head' };
+    if (org === undefined || platform === undefined) return { reason: 'not_walked' };
     // Tx A's head out, and a read of the store begun after the commit, at once. Its commit noted it already (`now`,
     // its Put under way): waited for, never a second line; one not noted is noted now.
-    const { seq, hash } = txA.head;
+    const { seq, hash } = head;
     const noted = witness.pending(chain).some((seen) => seen.seq === seq && seen.hash.equals(hash));
-    const out = noted ? witness.settled([chain]) : witness.now(chain, txA.head);
+    const out = noted ? witness.settled([chain]) : witness.now(chain, head);
     const [put, read] = await Promise.allSettled([out, witness.refreshWhole()]);
     if (put.status === 'rejected') return { reason: 'witness_unconfirmed' };
     if (read.status === 'rejected' || !read.value) return { reason: 'witness_unread' };
     if (witness.beyondMemory(chain) || witness.beyondMemory(PLATFORM)) return { reason: 'witness_pending' };
-    return (await orgDoubt(txA, txA.head)) ?? (await platformDoubt(txA));
+    return (await orgDoubt(txA.orgId, org, head)) ?? (await platformDoubt(platform));
   };
 
   /** doubtOf within the deadline: past it, or failing, a doubt of its own. */

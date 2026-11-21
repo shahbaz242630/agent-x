@@ -68,8 +68,11 @@ export interface FrontierAnchors {
 export interface ChainFrontier {
   /** Where the chain's next walk starts: F where it stands, else the latest anchor. None with no anchor yet. */
   startOf(chain: Chain): FrontierStart | undefined;
-  /** F raised to where a walk from `start` reached, the stretch kept with it, where that is higher than F now. */
-  raise(chain: Chain, start: FrontierStart, walk: WalkedWithin): void;
+  /**
+   * F raised to where a walk from `start` reached, the stretch kept with it, where that is higher than F now. No walk
+   * (a read not asked to walk), nothing.
+   */
+  raise(chain: Chain, start: FrontierStart, walk: WalkedWithin | undefined): void;
 }
 
 /** A chain's key here: the platform's, or an organisation's ID in lower case, as the chains' writers name it. */
@@ -140,7 +143,9 @@ export function createChainFrontier({
       return fresh;
     },
 
-    raise(chain: Chain, start: FrontierStart, { head, path }: WalkedWithin): void {
+    raise(chain: Chain, start: FrontierStart, walk: WalkedWithin | undefined): void {
+      if (walk === undefined) return;
+      const { head, path } = walk;
       const name = chainName(chain);
       const kept = byChain.get(name);
       if (kept !== undefined && kept.from.seq >= head.seq) return;
