@@ -183,7 +183,7 @@ export const HEARTBEAT_STALE_MS = 5 * 60_000;
  * How old the witness log's last whole read may be when Tx A begins its checks (TR-1 F.2): the jobs copy reads it every
  * 10 s, so older is a store that isn't answering, and a stop another copy wrote may be unread here.
  */
-export const WITNESS_FRESH_MS = 30_000;
+const WITNESS_FRESH_MS = 30_000;
 
 /** How often a run sweeps for transactions left waiting: often enough for UNKNOWN_AFTER_MS, few database calls. */
 const SWEEP_EVERY_MS = 60_000;

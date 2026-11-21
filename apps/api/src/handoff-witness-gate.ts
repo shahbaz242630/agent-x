@@ -35,7 +35,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 /** How long the gate waits for the store and its walks before it gives up, the payment not sent. */
-export const GATE_DEADLINE_MS = 10_000;
+const GATE_DEADLINE_MS = 10_000;
 
 /** A chain's walk Tx A made: where it began (the frontier) and what it read to the head. */
 export interface Walked {
