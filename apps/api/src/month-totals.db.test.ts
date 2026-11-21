@@ -18,6 +18,8 @@ import {
   MONTH_TOTALS,
   monthTotalId,
   monthTotalOf,
+  WINDOWS_CUTOVER_ACTION,
+  WINDOWS_CUTOVER_SUBJECT,
 } from '@agentx/core/modules/limit-reservations';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
@@ -512,9 +514,9 @@ describe('in the lock order (11a: after a request and its reservation, before th
     open(undefined);
     await voiding;
 
-    // Full before the void: weighed after it, against the total it gave back to.
-    // At the approval threshold, so sent for approval: capacity held either way.
-    expect((await deciding).decision).toBe('REQUIRE_APPROVAL');
+    // Full before the void: weighed after it, against the total it gave back to. Its payee's window, read behind the
+    // total's lock since GM-1b, no longer counts the voided request either: allowed, capacity held.
+    expect((await deciding).decision).toBe('ALLOW');
     expect(await heldIn(w)).toBe(2n * max);
   });
 
@@ -609,16 +611,25 @@ describe('the holdings check', () => {
 });
 
 describe('an organisation made before GM-1a, until its cutover', () => {
-  /** Its cutover event, as the job records it: here so it can decide, then taken away again as before GM-1a. */
+  /**
+   * Its cutover event, as the job records it: here so it can decide, then taken away again as before GM-1a. The
+   * payee windows' too (GM-1b), which stays: these tests are the month totals'.
+   */
   const cutOverByHand = (w: World) =>
-    withSignedStates(app, w.org, quiet(), (tx) =>
-      createAuditTrail({ keys, ids }).record(tx, w.org, {
-        actor: { type: 'system', id: 'test' },
-        action: CUTOVER_ACTION,
-        subject: { type: CUTOVER_SUBJECT, id: w.org, version: 1 },
-        details: {},
-      }),
-    );
+    withSignedStates(app, w.org, quiet(), async (tx) => {
+      const trail = createAuditTrail({ keys, ids });
+      for (const [action, type] of [
+        [CUTOVER_ACTION, CUTOVER_SUBJECT],
+        [WINDOWS_CUTOVER_ACTION, WINDOWS_CUTOVER_SUBJECT],
+      ] as const) {
+        await trail.record(tx, w.org, {
+          actor: { type: 'system', id: 'test' },
+          action,
+          subject: { type, id: w.org, version: 1 },
+          details: {},
+        });
+      }
+    });
   /**
    * The organisation as one before GM-1a with capacity held: the totals its decisions made, their events and the
    * cutover's taken away by the owner, its reservations and signed requests left.
@@ -881,7 +892,9 @@ describe('an organisation made before GM-1a, until its cutover', () => {
     // And on every pass after, no alarm for its reservation (decision 49).
     await visit(w);
     expect(lines('holdings_check.passed').at(-1)).toMatchObject({ totalsMismatched: 0, totalsMissing: 0 });
-    expect(lines('audit.integrity_failed')).toEqual([]);
+    // Its payee's windows were filled by the GM-1b decision that made it here, which a decision before E1 never was:
+    // their alarm is this test's making, not the totals'.
+    expect(lines('audit.integrity_failed').filter(({ subjectType }) => subjectType !== 'payee_window')).toEqual([]);
   });
 
   it('logs a cutover that fails and goes on, the hold-off waited by its own timer', async () => {

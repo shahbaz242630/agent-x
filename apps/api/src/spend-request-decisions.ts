@@ -25,10 +25,13 @@
 // - 7: the agent's month FOR NO KEY UPDATE, serialising the monthly check
 //   (decision 4: the agent's, under all its mandates);
 // - then the checks, in one statement of their own after the locks, never the
-//   locking one, on the month's lock's trip (4D2d P12, 4D2e C7; with the mandate's split check on, the payee's
-//   reservations in its rolling window, across agents: D5, serialised by the
-//   supplier's lock); the
-//   request (8); its reservation and claim (11); its two signed events (12).
+//   locking one, on the month's lock's trip (4D2d P12, 4D2e C7), with the
+//   month's signed total (11a, GM-1a) and the payee's signed split windows
+//   (11b, GM-1b: what its reservations across agents hold, hour by hour; the
+//   split weighed from them with the mandate's split check on, D5) gathered
+//   for change behind them, though new rows no one else holds come before
+//   them in the order: the request (8); its reservation and claim (11); then
+//   the total's, the windows' and its own signed events, in one step (12).
 //
 // Whatever the organisation can't give (no mandate, another organisation's
 // supplier or source, a suspended agent) is still a request, decided DENY or
@@ -48,6 +51,9 @@ import type { AlongsideChange, AuditTables, SignedStates } from '@agentx/core/mo
 import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   AGENT_ZONES,
+  heldAdded,
+  hourOf,
+  keptFromHour,
   keptZoneOf,
   type LimitReservationsTables,
   MONTH_TOTALS,
@@ -56,8 +62,17 @@ import {
   monthTotalOf,
   monthTotalsCutOver,
   monthTotalToSend,
+  type Payee,
+  type PayeeWindowCheck,
+  payeeWindowId,
+  payeeWindowKeys,
+  payeeWindowsCutOver,
+  payeeWindowsOf,
+  payeeWindowToSend,
   reserveStatement,
   sealNewZone,
+  splitHeldIn,
+  windowFromHour,
   zoneInForce,
 } from '@agentx/core/modules/limit-reservations';
 import {
@@ -83,6 +98,7 @@ import {
   claimAnswered,
   claimStatement,
   type DecisionMonthTotal,
+  type DecisionWindows,
   monthLockedAndTotalsWeighed,
   totalsWeighed,
   type HeldAs,
@@ -98,7 +114,7 @@ import {
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
 import { supplierOf } from '@agentx/core/modules/suppliers';
-import { type Clock, type IdGenerator, type Money, money, periodOf, windowStart } from '@agentx/core/shared-kernel';
+import { type Clock, type IdGenerator, type Money, money, periodOf } from '@agentx/core/shared-kernel';
 import {
   AGENT_BRAKE,
   brakeShared,
@@ -393,35 +409,85 @@ const currencyWeighed = ({ mandate, asked }: ReadToWeigh): string =>
   mandate?.perOrderLimit.currency ?? asked.amount.currency;
 
 /**
- * What to read in one statement after the supplier's and the month's locks (4D2d P12). The split total only where it
- * is weighed: the mandate's split check on, for a supplier of the organisation's.
+ * What to read in one statement after the supplier's and the month's locks (4D2d P12), and the payee's split windows
+ * (GM-1b): whose (a supplier of the organisation's, under a mandate, which alone may hold capacity), and from which
+ * hour they are weighed, only where the split is weighed (the mandate's split check on), else null.
  */
 function totalsToWeigh(read: ReadToWeigh) {
   const { now, agent, mandate, supplier, order, month, except } = read;
   const currency = currencyWeighed(read);
   return {
     month: month === null ? null : { agentId: agent.id, month, currency, except },
-    split:
-      mandate?.splitCheck === true && supplier !== null
-        ? {
-            supplierId: supplier.id,
-            payeeKey: supplier.payeeKey,
-            since: windowStart(now, mandate.splitWindowHours),
-            currency,
-          }
-        : null,
     order: order === null ? null : { ...order, except },
+    payee:
+      supplier === null || month === null ? null : { supplierId: supplier.id, payeeKey: supplier.payeeKey, currency },
+    splitFrom: mandate?.splitCheck === true && supplier !== null ? windowFromHour(now, mandate.splitWindowHours) : null,
   };
 }
 
 /** The engine's input from what was read and those totals: one way for a decision and for weigh, so the two never weigh apart. */
 function inputWith(
   read: ReadToWeigh,
-  { spent, split, claims }: Awaited<ReturnType<typeof totalsWeighed>>,
+  { spent, split, claims }: Awaited<ReturnType<typeof totalsWeighed>> & { readonly split: bigint },
 ): DecisionInput {
   const currency = currencyWeighed(read);
   return inputOf({ ...read, spent: money(spent, currency), split: money(split, currency), claims });
 }
+
+/**
+ * What the payee's window holds from `fromHour` on (null: the split not weighed, nothing), from its signed windows
+ * (GM-1b), read as asked in order of ID with `alsoLocked` (an approval's own sealed windows, which its reject gives
+ * back to: never locked after these out of order): the simulator's (`share`), an approval's (for change at its
+ * confirm), a carry's. A window that can't be believed is INTEGRITY_FAILED; one missing holds nothing once the
+ * organisation is cut over, and is ORGANISATION_BUSY before.
+ */
+export async function splitWeighed(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  { payee, fromHour }: { readonly payee: Payee | null; readonly fromHour: number | null },
+  lock: 'share' | 'change',
+  alsoLocked: readonly string[] = [],
+): Promise<bigint> {
+  if (payee === null || fromHour === null) return 0n;
+  const rows = await payeeWindowsRead(tx, states, orgId, [payee], lock, alsoLocked);
+  return splitHeldIn(known(rows.get(payeeText(payee))), fromHour);
+}
+
+/** A payee's key as text, to find its rows by. */
+export const payeeText = ({ supplierId, payeeKey, currency }: Payee): string =>
+  `${supplierId.toLowerCase()}|${payeeKey ?? ''}|${currency}|${payeeKey === null ? 'none' : 'key'}`;
+
+/**
+ * Each payee's windows (payeeWindowKeys' order), with `alsoLocked`, read as asked in one pass in order of ID: by
+ * payeeText. INTEGRITY_FAILED for any that can't be believed; one missing holds nothing once the organisation is cut
+ * over (one look at its log for all), ORGANISATION_BUSY before.
+ */
+export async function payeeWindowsRead(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  payees: readonly Payee[],
+  lock: 'share' | 'change',
+  alsoLocked: readonly string[] = [],
+): Promise<ReadonlyMap<string, readonly PayeeWindowCheck[]>> {
+  const idsOf = (payee: Payee) => payeeWindowKeys(payee).map((key) => payeeWindowId(orgId, key));
+  const read = await payeeWindowsOf(tx, states, orgId, [...payees.flatMap(idsOf), ...alsoLocked], lock);
+  const checks = [...read.values()];
+  if (checks.some(({ outcome }) => outcome === 'tampered')) throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (checks.some(({ outcome }) => outcome === 'none')) {
+    const counted = await payeeWindowsCutOver(tx, states, orgId);
+    if (counted === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+    if (counted === 'not_yet') throw new MandateRefused(503, 'ORGANISATION_BUSY');
+  }
+  return new Map(payees.map((payee) => [payeeText(payee), idsOf(payee).map((id) => known(read.get(id)))]));
+}
+
+/** A value a read above answers for what it was asked: one missing is something past the app. */
+const known = <Value>(value: Value | undefined): Value => {
+  if (value === undefined) throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  return value;
+};
 
 /** The policies in force for the agent's mandate, as the engine weighs them. */
 export interface PoliciesWeighed {
@@ -440,9 +506,10 @@ export interface PoliciesWeighed {
  * simulator only reads them, and `rules` lets it put proposed policies in
  * place of those in force. `except`: an approval's own request (Phase 3 B4b),
  * whose claim isn't counted; the split total still counts it, as over the
- * threshold it only asks for an approval. The month's signed total is the
- * caller's to read and hand to `inputWith` (monthSpentWeighed, GM-1a): an
- * approval may read it only once its request is locked.
+ * threshold it only asks for an approval. The month's signed total and the
+ * payee's signed split windows are the caller's to read and hand to
+ * `inputWith` (monthSpentWeighed, GM-1a; splitWeighed with `split`, GM-1b):
+ * an approval may read them only once its request is locked.
  */
 export async function weigh(
   tx: DecisionTx,
@@ -473,12 +540,14 @@ export async function weigh(
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
   const read = { asked, now, agent, mandate, policies, source, supplier, order, month, except };
-  // The split total and claims now; the month's signed total by the caller (GM-1a): an approval reads it only once its
-  // request is locked (8), as the total comes after it in the lock order (11a).
-  const others = await totalsWeighed(tx, { ...totalsToWeigh(read), month: null });
+  // The claims now; the month's signed total and the payee's windows by the caller (GM-1a, GM-1b): an approval reads
+  // them only once its request is locked (8), as they come after it in the lock order (11a, 11b).
+  const toWeigh = totalsToWeigh(read);
+  const others = await totalsWeighed(tx, { ...toWeigh, month: null });
   return {
-    inputWith: (spent: bigint) => inputWith(read, { ...others, spent }),
+    inputWith: (spent: bigint, split: bigint) => inputWith(read, { ...others, spent, split }),
     totalOf: month === null ? null : { agentId: agent.id, month, currency: currencyWeighed(read) },
+    split: { payee: toWeigh.payee, fromHour: toWeigh.splitFrom },
     mandate,
     supplier,
     order,
@@ -487,17 +556,64 @@ export async function weigh(
   };
 }
 
-/** The keys a month's total is made under (0110): its ID, and its agent, month and currency. */
-const TOTAL_KEYS: ReadonlySet<unknown> = new Set(['month_totals_pkey', 'one_total_a_month']);
+/**
+ * The keys a month's total is made under (0110): its ID, and its agent, month and currency; and a payee window's
+ * (0112): its ID, and its supplier, key and currency.
+ */
+const TOTAL_KEYS: ReadonlySet<unknown> = new Set([
+  'month_totals_pkey',
+  'one_total_a_month',
+  'payee_windows_pkey',
+  'one_window_a_payee',
+]);
 
 /**
- * A month's total made by another while this decision read the month empty (its organisation's cutover committing
- * just then, GM-1a review): ORGANISATION_BUSY, so the agent asks again and is weighed against it. Any other error as
- * it was.
+ * A month's total or a payee window made by another while this decision read it empty (its organisation's cutover
+ * committing just then, GM-1a review): ORGANISATION_BUSY, so the agent asks again and is weighed against it. Any
+ * other error as it was.
  */
 export function totalMadeMeanwhile(error: unknown): unknown {
   const pg = error as { readonly code?: unknown; readonly constraint?: unknown } | null;
   return pg?.code === '23505' && TOTAL_KEYS.has(pg.constraint) ? new MandateRefused(503, 'ORGANISATION_BUSY') : error;
+}
+
+/**
+ * What a decision weighs once its supplier is held: its month's lock and the totals on one trip, each its own
+ * statement, so the totals see what its holder committed: the month's the signed total (GM-1a) and the split window
+ * the payee's signed windows (GM-1b), each locked for the change a capacity held makes to it. Under no mandate, no
+ * month: the claims alone, nothing held.
+ */
+async function decisionWeighed(tx: DecisionTx, states: SignedStates, orgId: string, read: ReadToWeigh) {
+  const toWeigh = totalsToWeigh(read);
+  if (toWeigh.month === null) {
+    return { totals: { ...(await totalsWeighed(tx, toWeigh)), split: 0n }, monthTotal: null, windows: [] };
+  }
+  const weighed = await monthLockedAndTotalsWeighed(
+    tx,
+    states,
+    { orgId, at: read.now, payee: toWeigh.payee },
+    { ...toWeigh, month: toWeigh.month },
+  );
+  const monthTotal = monthTotalWeighed(weighed.monthTotal);
+  const windows = windowsWeighed(weighed.windows);
+  const split =
+    toWeigh.splitFrom === null
+      ? 0n
+      : splitHeldIn(
+          windows.map(({ read: row }) => row),
+          toWeigh.splitFrom,
+        );
+  return { totals: { ...weighed, spent: monthTotal.spent, split }, monthTotal, windows };
+}
+
+/** A decision's payee windows as read, each with what it is written from (GM-1b). */
+type WindowsWeighed = Extract<DecisionWindows, { readonly outcome: 'read' }>['rows'];
+
+/** A decision's payee windows as weighed: refused while any can't be believed, or before its organisation's cutover. */
+function windowsWeighed(windows: DecisionWindows): WindowsWeighed {
+  if (windows.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (windows.outcome === 'busy') throw new MandateRefused(503, 'ORGANISATION_BUSY');
+  return windows.rows;
 }
 
 /** A decision's month's total as weighed: refused while it can't be believed, or before its organisation's cutover. */
@@ -696,13 +812,15 @@ export function createSpendRequestDecisions({
       month,
       order,
       monthTotal,
+      windows: payeeRows,
     }: {
       readonly mandateId: string;
       readonly month: string;
       readonly order: NonNullable<ReadToWeigh['order']>;
       readonly monthTotal: Extract<DecisionMonthTotal, { readonly outcome: 'held' | 'none' }>;
+      readonly windows: WindowsWeighed;
     },
-  ): Promise<{ readonly held: HeldAs; readonly totalHeld: AlongsideChange }> {
+  ): Promise<{ readonly held: HeldAs; readonly alongside: readonly AlongsideChange[] }> {
     const { orgId, id: requestId, amount, createdAt: now } = request;
     // In the cap's currency alone, as decide denies any other (CURRENCY_NOT_ALLOWED).
     if (monthTotal.key.currency !== amount.currency) throw new Error('capacity held in another currency');
@@ -716,7 +834,22 @@ export function createSpendRequestDecisions({
       monthTotal.spent + amount.minor,
       now,
     );
-    const [, , claimAnswer, ...totalAnswers] = await sendTogether(tx, [
+    // Its amount added at its own hour to each of its payee's windows (GM-1b), the hours no window counts let go.
+    const hour = hourOf(now);
+    const keptFrom = keptFromHour(now);
+    const windows = payeeRows.map(({ key, read }) =>
+      payeeWindowToSend(
+        tx,
+        states,
+        orgId,
+        key,
+        read,
+        heldAdded(read.outcome === 'held' ? read.held : new Map(), hour, amount.minor, keptFrom),
+        now,
+      ),
+    );
+    const changes = [total, ...windows];
+    const [, , claimAnswer, ...changeAnswers] = await sendTogether(tx, [
       insertRequestStatement(tx, request),
       reserveStatement(tx, {
         orgId,
@@ -732,22 +865,33 @@ export function createSpendRequestDecisions({
         reservedAt: now,
       }),
       claimStatement(tx, claim),
-      ...total.statements,
+      ...changes.flatMap(({ statements }) => statements),
     ]);
     const claimed = await claimAnswered(tx, claim, claimAnswer.rows.length === 1);
     // The supplier held and its payee key its own alone: see the top of this file.
     if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
-    return {
-      held: { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) },
-      totalHeld: {
-        sent: total.sent,
-        rows: (totalAnswers.at(-1)?.rows ?? []) as readonly Readonly<Record<string, unknown>>[],
+    // Each change's write is the last of its statements: its answer is the row it left.
+    let at = 0;
+    const alongside = changes.map(({ statements, sent }, index): AlongsideChange => {
+      at += statements.length;
+      return {
+        sent,
+        rows: (changeAnswers[at - 1]?.rows ?? []) as readonly Readonly<Record<string, unknown>>[],
         change: {
           actor: { type: 'agent', id: request.agentId },
-          action: 'month_total.held',
+          action: index === 0 ? 'month_total.held' : 'payee_window.held',
           details: { requestId: requestId.toLowerCase(), amountMinor: amount.minor.toString() },
         },
+      };
+    });
+    return {
+      held: {
+        month,
+        reservedAt: now,
+        payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }),
+        windows: payeeRows.map(({ key }) => payeeWindowId(orgId, key)),
       },
+      alongside,
     };
   }
 
@@ -778,18 +922,7 @@ export function createSpendRequestDecisions({
     // The month named at the instant asked, however long the locks take.
     const month = zone === null ? null : periodOf(now, zone.zone).month;
     const read = { asked, now, agent, mandate, policies, source, supplier, order, month };
-    const toWeigh = totalsToWeigh(read);
-    // Its lock and the totals on one trip, each its own statement, so the totals see what its holder committed: the
-    // month's the signed total (GM-1a), locked for the change a capacity held makes to it.
-    const weighed =
-      toWeigh.month === null
-        ? null
-        : await monthLockedAndTotalsWeighed(tx, states, { orgId, at: now }, { ...toWeigh, month: toWeigh.month });
-    const monthTotal = weighed === null ? null : monthTotalWeighed(weighed.monthTotal);
-    const totals =
-      weighed === null || monthTotal === null
-        ? await totalsWeighed(tx, toWeigh)
-        : { ...weighed, spent: monthTotal.spent };
+    const { totals, monthTotal, windows } = await decisionWeighed(tx, states, orgId, read);
     const input = inputWith(read, totals);
     const made = decide(input);
     const requestId = ids.next();
@@ -825,17 +958,18 @@ export function createSpendRequestDecisions({
     };
 
     let held: HeldAs | null = null;
-    let totalHeld: AlongsideChange | undefined;
+    let alongside: readonly AlongsideChange[] = [];
     if (holdsCapacity(made.decision)) {
       // Capacity is held only on a mandate in force, by a supplier of the organisation's (decide's checks).
-      if (mandate === null || month === null || order === null || monthTotal === null) {
+      if (mandate === null || month === null || order === null || monthTotal === null || windows.length === 0) {
         throw new Error('capacity held with nothing weighed');
       }
-      ({ held, totalHeld } = await capacityHeld(tx, states, request, {
+      ({ held, alongside } = await capacityHeld(tx, states, request, {
         mandateId: mandate.id,
         month,
         order,
         monthTotal,
+        windows,
       }).catch((error: unknown) => {
         throw totalMadeMeanwhile(error);
       }));
@@ -852,7 +986,7 @@ export function createSpendRequestDecisions({
         actor: { type: 'agent', id: agent.id },
       });
     }
-    const answer = await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held, totalHeld);
+    const answer = await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held, alongside);
     // Every admin and approver is told it waits (partner decision 2, Phase 3); the email reads it as it is sent.
     // Told after it is signed: the notice's record takes the chain head's lock too, which comes last (S206 V4, ADR-006 §6).
     if (made.decision === 'REQUIRE_APPROVAL') {

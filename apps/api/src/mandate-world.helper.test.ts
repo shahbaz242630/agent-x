@@ -198,6 +198,7 @@ export function mandateWorld({
     supplierName = 'Gulf Office Supplies LLC',
     orgName = 'Acme Trading LLC',
     madeBeforeMonthTotals = false,
+    madeBeforePayeeWindows = false,
   }: {
     readonly capChosen?: boolean;
     readonly suppliers?: number;
@@ -206,11 +207,14 @@ export function mandateWorld({
     readonly orgName?: string;
     /** Made as an organisation was before GM-1a: its `organization.created` says nothing of month totals, so it waits for its cutover. */
     readonly madeBeforeMonthTotals?: boolean;
+    /** Made as one was between GM-1a and GM-1b: born counting month totals, its payee windows waiting for their cutover. */
+    readonly madeBeforePayeeWindows?: boolean;
   } = {}): Promise<World> {
     const now = clock().now();
     const org = ids.next();
     await withSignedStates(app(), org, quiet(), async (tx, states) => {
-      if (!madeBeforeMonthTotals) return createOrganization(tx, states, { id: org, name: orgName, actor: OPERATOR });
+      if (!madeBeforeMonthTotals && !madeBeforePayeeWindows)
+        return createOrganization(tx, states, { id: org, name: orgName, actor: OPERATOR });
       await registerOrganization(tx, org);
       await tx
         .insertInto(ORGANIZATIONS.table)
@@ -222,7 +226,11 @@ export function mandateWorld({
         { orgId: org, id: org },
         'new',
         { status: 'ACTIVE' },
-        { actor: OPERATOR, action: 'organization.created', details: {} },
+        {
+          actor: OPERATOR,
+          action: 'organization.created',
+          details: madeBeforeMonthTotals ? {} : { monthTotals: 'signed' },
+        },
       );
       await states.startIntegrityHold(tx, org, OPERATOR);
       return recorded;

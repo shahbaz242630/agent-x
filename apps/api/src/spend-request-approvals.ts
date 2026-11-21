@@ -59,8 +59,9 @@
 // agent (3) and the key it asked with (3a), found by the request's IDs alone
 // (an unlocked read); its mandate and policies (4), source (5), supplier (6),
 // and the month its capacity is held in (7) (the confirm's locks; the ask
-// reads them FOR SHARE and locks no month); the request (8); the chain head
-// (12). Its reservation and claim are judged, never locked (approveRequest).
+// reads them FOR SHARE and locks no month); the request (8); its month's
+// total (11a) and, with the split weighed, its payee's windows (11b), for
+// change at the confirm; the chain head (12). Its reservation and claim are judged, never locked (approveRequest).
 import { agentKeyOf } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
@@ -78,6 +79,7 @@ import {
   requestOf,
   type SpendRequestRecord,
   waitedOut,
+  windowsHeldOf,
 } from '@agentx/core/modules/spend-requests';
 import { type Clock, type IdGenerator, money, type ReasonCode } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
@@ -94,6 +96,7 @@ import {
   type DecisionTables,
   monthSpentWeighed,
   notFrozen,
+  splitWeighed,
   weigh,
 } from './spend-request-decisions.ts';
 import { DECIDING_ROLES } from './spend-request-rejects.ts';
@@ -401,9 +404,12 @@ export async function weighedAgain(
     throw new MandateRefused(503, 'INTEGRITY_FAILED');
   }
 
-  const made = decide(
-    weighed.inputWith(await approvalSpent(tx, states, { orgId, requestId, decides }, request, weighed)),
-  );
+  const spent = await approvalSpent(tx, states, { orgId, requestId, decides }, request, weighed);
+  // Then its payee's windows (11b, GM-1b), after the total: for change at the confirm, with its own sealed windows,
+  // which a reject gives back to, so none is locked after the others out of order.
+  const own = decides && held !== null ? windowsHeldOf(orgId, request, held).map(({ id }) => id) : [];
+  const split = await splitWeighed(tx, states, orgId, weighed.split, decides ? 'change' : 'share', own);
+  const made = decide(weighed.inputWith(spent, split));
   const supplierNow = await supplierMoveOf(tx, states, orgId, weighed.supplier, against.supplierVersionId);
   const unchanged =
     key.outcome === 'found' &&

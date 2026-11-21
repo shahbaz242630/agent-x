@@ -71,9 +71,10 @@ export async function createOrganization(
     { orgId: id, id },
     'new',
     { status: ORGANIZATION.initial },
-    // Born counting its agents' months in signed totals (GM-1a): no month held before it to open
-    // (limit-reservations' monthTotalsCutOver reads this detail; the module map keeps it from importing it).
-    { actor, action: 'organization.created', details: { monthTotals: 'signed' } },
+    // Born counting its agents' months in signed totals (GM-1a) and its payees' split windows in signed windows
+    // (GM-1b): nothing held before it to open (limit-reservations' monthTotalsCutOver and payeeWindowsCutOver read
+    // these details; the module map keeps it from importing them).
+    { actor, action: 'organization.created', details: { monthTotals: 'signed', payeeWindows: 'signed' } },
   );
   await states.startIntegrityHold(tx, id, actor);
   return recorded;

@@ -543,6 +543,8 @@ export interface SignedStates {
    * transaction took it earlier). The events are as those two would record,
    * sharing one time. A move its machine refuses throws: nothing
    * is signed, so the caller's transaction must not commit the row.
+   * `alongside`: other rows' changes sent already (changeToSend), their events first, in the order given (GM-1a's
+   * month total, GM-1b's payee windows).
    */
   recordNewAndMove<State extends string, Event extends string>(
     tx: AuditTransaction,
@@ -552,7 +554,7 @@ export interface SignedStates {
     change: SignedChange,
     event: NoInfer<Event>,
     moveChange: SignedChange,
-    alongside?: AlongsideChange,
+    alongside?: readonly AlongsideChange[],
   ): Promise<SignedStatusChanged<State>>;
   /**
    * A change to another row, not run (GM-1a: a decision's month total): its
@@ -1954,13 +1956,13 @@ export function createSignedStates({
       change: SignedChange,
       event: NoInfer<Event>,
       moveChange: SignedChange,
-      alongside?: AlongsideChange,
+      alongside: readonly AlongsideChange[] = [],
     ): Promise<SignedStatusChanged<State>> {
       sealsStatus(table);
       noSealGiven(change);
       noSealGiven(moveChange);
       // Judged first: a row that didn't take its write as asked fails everything here, with its alarm.
-      const other = alongside === undefined ? undefined : sentChange(tx, key.orgId, alongside);
+      const others = alongside.map((each) => sentChange(tx, key.orgId, each));
       const first = await written(tx, table, key, 'new', set);
       const firstFields = new Map(first.fields);
       const moved = await movedFrom(tx, table, key, event, firstFields);
@@ -1973,29 +1975,38 @@ export function createSignedStates({
         { version: first.version, eventId: null, fields: firstFields },
         { [STATUS]: moved.to },
       );
-      // The other row's event goes first, its pointer in the same statement as this row's (`also`).
+      // The other rows' events go first, in order, each one's pointer in the same statement as this row's (`also`).
       const { recorded, along, alsoAlong } = await trail.recordAllAlong(
         tx,
         key.orgId,
         [
-          ...(other === undefined ? [] : [sealedEvent(other.table, other.key, other.row, other.change)]),
+          ...others.map((other) => sealedEvent(other.table, other.key, other.row, other.change)),
           sealedEvent(table, key, first, change),
           sealedEvent(table, key, row, withMove(moveChange, moved)),
         ],
         (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
-        other === undefined
+        others.length === 0
           ? {}
           : {
-              also: ([eventId], gate) =>
-                signedRowPointing(other.table, other.key, { version: other.row.version, eventId: eventId ?? '' }, gate),
+              also: (eventIds, gate) =>
+                others.map((other, at) =>
+                  signedRowPointing(
+                    other.table,
+                    other.key,
+                    { version: other.row.version, eventId: eventIds[at] ?? '' },
+                    gate,
+                  ),
+                ),
             },
       );
       const last = recorded.at(-1);
       if (last === undefined) throw new Error('Two events asked and none recorded');
-      const [otherRecorded] = recorded;
-      if (other !== undefined && otherRecorded !== undefined) {
-        pointedState(tx, other.table, other.key, other.row, otherRecorded, alsoAlong);
-      }
+      others.forEach((other, at) => {
+        const otherRecorded = recorded[at];
+        if (otherRecorded !== undefined) {
+          pointedState(tx, other.table, other.key, other.row, otherRecorded, alsoAlong[at]);
+        }
+      });
       const state = pointedState(tx, table, key, row, last, along);
       return Object.freeze({
         outcome: 'changed',

@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { seedRows } from '../../../seed-rows.helper.test.ts';
 import type { AuditTables } from '../../audit/index.ts';
 import { RESERVATION } from '../domain/reservation.ts';
-import { type MonthToSum, monthSpentRead, monthsSpent, splitHeld } from './reservations.ts';
+import { type MonthToSum, monthSpentRead, monthsSpent } from './reservations.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -501,10 +501,6 @@ describe("a reservation's request (`held_for_its_request`, D2's review)", () => 
   });
 });
 
-/** The split total for the supplier (and payee key) given, since `since`, as a decision reads it (D5). */
-const splitOf = (org: Org, supplierId: string, payeeKey: string | null, since = AT, currency = 'AED') =>
-  inOrg(org, (tx) => splitHeld(tx, { supplierId, payeeKey, since, currency }));
-
 describe("an agent's month total (0110, GM-1a)", () => {
   /** A total row for the agent's month, as the audit module's record adds one before sealing it. */
   const totalRow = (org: Org, overrides: Record<string, unknown> = {}) => ({
@@ -664,10 +660,6 @@ describe('the totals in one currency (G4)', () => {
       inOrg(org, (tx) => monthSpent(tx, { agentId: org.agent, month: MONTH, currency }));
 
     expect([await spent('AED'), await spent('USD'), await spent('EUR')]).toEqual([25_000n, 25_000n, 0n]);
-    expect([
-      await splitOf(org, org.supplier, null, AT, 'AED'),
-      await splitOf(org, org.supplier, null, AT, 'USD'),
-    ]).toEqual([25_000n, 25_000n]);
   });
 });
 
@@ -760,48 +752,6 @@ describe("the month's total from its index alone (0081, S180)", () => {
         }),
       ]);
     }
-  });
-});
-
-describe('the split total (`splitHeld`, D5)', () => {
-  it('adds up the supplier’s reservations still holding capacity, reserved since the window began', async () => {
-    const org = await organisation();
-    await period(org);
-    await reserve(org);
-    await withoutPayments(async () => {
-      await moved(org, 'FINALISED');
-      await moved(org, 'RELEASED');
-    });
-    const other = await organisation();
-    await period(other);
-    await reserve(other);
-
-    // HELD and FINALISED count, RELEASED never; another organisation's never.
-    expect(await splitOf(org, org.supplier, null)).toBe(50_000n);
-    // The window's first instant counts; one reserved before it doesn't.
-    expect(await splitOf(org, org.supplier, null, new Date(AT.getTime() + 1))).toBe(0n);
-  });
-
-  it('counts the payee key’s under another supplier record, and the supplier’s own under any key or none', async () => {
-    const org = await organisation('payee-1');
-    await period(org);
-    await reserve(org, { payee_key: 'payee-1' });
-    // The key moved to a new supplier record past the app, as a re-created supplier would take it.
-    await database
-      .as('admin')
-      .query('update suppliers.suppliers set payee_key = null where org_id = $1 and id = $2', [org.id, org.supplier]);
-    await reserve(org);
-    const recreated = await seedRows(database.as('admin'), AT).supplier(org.id, 'payee-1');
-
-    expect(await splitOf(org, recreated.id, 'payee-1')).toBe(25_000n);
-    expect(await splitOf(org, org.supplier, null)).toBe(50_000n);
-    // Given a new key, the supplier still counts its own, whatever key each was made under.
-    expect(await splitOf(org, org.supplier, 'payee-2')).toBe(50_000n);
-    // Another organisation's supplier may hold the same key (keys are per organisation): its orders never count.
-    const other = await organisation('payee-1');
-    await period(other);
-    await reserve(other, { payee_key: 'payee-1' });
-    expect(await splitOf(org, recreated.id, 'payee-1')).toBe(25_000n);
   });
 });
 

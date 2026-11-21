@@ -18,7 +18,7 @@ const SEAL = { mac: 'ab'.repeat(32), keyVersion: 1 };
 
 const request = (
   status: SpendRequestStatus,
-  held: RequestHolding['held'] = { month: '2026-10', reservedAt: AT, payee: SEAL, bankKeyed: true },
+  held: RequestHolding['held'] = { month: '2026-10', reservedAt: AT, payee: SEAL, bankKeyed: true, windows: null },
 ) => ({
   agentId: 'agent',
   mandateId: 'mandate',
@@ -143,6 +143,7 @@ describe('what a request holds (E1)', () => {
       reservedAt: AT,
       payee: 'none',
       bankKeyed: false,
+      windows: null,
     });
     // G5's decisions seal `possibleDuplicate`, whichever it was: their claims' bank keys are compared.
     for (const possibleDuplicate of [false, true]) {
@@ -156,6 +157,18 @@ describe('what a request holds (E1)', () => {
     expect(heldOf({ heldMonth: '2026-10' })).toBeNull();
     expect(heldOf({ heldAt: AT.toISOString() })).toBeNull();
     expect(heldOf({ heldMonth: 202610, heldAt: AT.toISOString() })).toBeNull();
+  });
+
+  it('reads the payee windows a decision sealed (GM-1b): none before GM-1b, nor for text not in their form', () => {
+    const windows = (sealed: unknown) =>
+      heldOf({ heldMonth: '2026-10', heldAt: AT.toISOString(), payeeWindows: sealed });
+    const a = '0199a0f0-0000-8000-8000-00000000a001';
+    const b = '0199a0f0-0000-8000-8000-00000000b001';
+    expect(windows(a)?.windows).toEqual([a]);
+    expect(windows(`${a},${b}`)?.windows).toEqual([a, b]);
+    for (const odd of [undefined, 7, '', a.toUpperCase(), `${a},`, `${a};${b}`, `${a},not-an-id`]) {
+      expect(windows(odd)?.windows).toBeNull();
+    }
   });
 
   it('reads the payee seal a decision sealed (E1b): none before E1b, unreadable if not whole', () => {

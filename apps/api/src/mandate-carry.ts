@@ -26,8 +26,9 @@
 //
 // Reads (partner, S116: no row-by-row reads): what all the requests share is
 // read once, each set in one statement where it can be: the draft and the
-// policies; the sources and suppliers, one read each; the months' totals in
-// one statement, the split totals one per supplier, the order claims in one.
+// policies; the sources and suppliers, one read each; the months' signed
+// totals, the payees' signed split windows (GM-1b) in one pass in order of ID,
+// the order claims in one.
 // Each request is then weighed in memory by the engine, through the same
 // input a decision builds (inputOf). Only its own signed state is read alone:
 // at the confirm it is locked for the change it is about to make, as a
@@ -45,11 +46,17 @@ import { type AuditActor, type AuditDetails, type SignedStates, type VerifiedSta
 import { type SourceCheck, sourceOf } from '@agentx/core/modules/funding-sources';
 import { changeHashOf } from '@agentx/core/modules/identity';
 import {
+  hourOf,
   lockAgentPeriod,
   lockReservationsOf,
   monthTotalId,
   monthTotalOrder,
-  splitHeld,
+  PAYEE_WINDOWS,
+  payeeWindowId,
+  payeeWindowKeys,
+  splitHeldLess,
+  windowFromHour,
+  type WindowTake,
 } from '@agentx/core/modules/limit-reservations';
 import { type Decision, decide, type DecisionMade } from '@agentx/core/modules/policies';
 import {
@@ -66,9 +73,10 @@ import {
   SPEND_REQUESTS,
   type SpendRequestRecord,
   type SpendRequestStatus,
+  windowsHeldOf,
 } from '@agentx/core/modules/spend-requests';
 import { type SupplierRecord, supplierOf } from '@agentx/core/modules/suppliers';
-import { money, type ReasonCode, windowStart } from '@agentx/core/shared-kernel';
+import { money, type ReasonCode } from '@agentx/core/shared-kernel';
 import type { DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { z } from 'zod';
@@ -80,6 +88,8 @@ import {
   inputOf,
   monthSpentWeighed,
   type MandateWeighed,
+  payeeText,
+  payeeWindowsRead,
   type PoliciesWeighed,
 } from './spend-request-decisions.ts';
 
@@ -341,14 +351,16 @@ export async function requestsHeld(
 export interface HeldOutside {
   readonly spent: ReadonlyMap<string, bigint>;
   readonly split: ReadonlyMap<string, bigint>;
-  readonly since: Date;
+  /** The first hour the split window counts, whole (GM-1b: the windows' hours). */
+  readonly fromHour: number;
   readonly orders: readonly OrderClaimsSeen[];
 }
 
 /**
  * Outside the requests weighed: each month's total, each payee's split total
- * since the window opened (none with the split check off: the engine weighs
- * no split then), and each request's order claims, in the requests' order.
+ * from the window's first hour (none with the split check off: the engine
+ * weighs no split then), and each request's order claims, in the requests'
+ * order.
  */
 export async function outsideOf(
   tx: CarryTx,
@@ -381,10 +393,22 @@ export async function outsideOf(
       .reduce((sum, { amount }) => sum + amount, 0n);
     spent.set(month, await monthSpentWeighed(tx, states, orgId, key, decides ? 'change' : 'share', own));
   }
-  const since = windowStart(now, mandate.splitWindowHours);
-  const split = mandate.splitCheck
-    ? await splitTotalsOutside(tx, suppliers, { since, currency, except: inPlan })
-    : new Map<string, bigint>();
+  // Then the payees' signed windows (11b, GM-1b), less what the requests left out hold in them: at a confirm, with
+  // the windows the requests weighed hold capacity in, which their cancels give back to, all in one pass in order of
+  // ID, so none is locked after another out of order.
+  const fromHour = windowFromHour(now, mandate.splitWindowHours);
+  const weighedIds = new Set(requests.map(({ id }) => id.toLowerCase()));
+  const ownLocked = decides
+    ? leftHeld.filter(({ requestId }) => weighedIds.has(requestId.toLowerCase())).flatMap(({ windows }) => windows)
+    : [];
+  const split = await splitTotalsOutside(tx, states, orgId, {
+    suppliers,
+    currency,
+    fromHour: mandate.splitCheck ? fromHour : null,
+    takes: leftHeld.flatMap(({ windows }) => windows),
+    lock: decides ? 'change' : 'share',
+    alsoLocked: ownLocked.map(({ id }) => id),
+  });
   const orders = await claimsOnEach(
     tx,
     requests.map((request) => ({
@@ -395,7 +419,7 @@ export async function outsideOf(
     })),
     inPlan,
   );
-  return { spent, split, since, orders };
+  return { spent, split, fromHour, orders };
 }
 
 /**
@@ -411,7 +435,7 @@ async function heldByLeftOut(
   requests: readonly SpendRequestRecord[],
   held: ReadonlyMap<string, HeldSealed>,
   leftOut: readonly string[],
-): Promise<readonly { readonly month: string; readonly currency: string; readonly amount: bigint }[]> {
+): Promise<readonly LeftHeld[]> {
   const weighed = new Map(requests.map((request) => [request.id, request]));
   const others = leftOut.filter((id) => !weighed.has(id.toLowerCase()));
   const read: Awaited<ReturnType<typeof requestsOf>> =
@@ -423,10 +447,28 @@ async function heldByLeftOut(
     const found = read.get(id);
     const request = weighed.get(id) ?? (found?.outcome === 'found' ? found.request : integrityFailed());
     if (!isPending(request.status)) return [];
-    const month = weighed.has(id) ? held.get(asked)?.month : decided.get(id)?.held?.month;
-    if (month === undefined) return [];
-    return [{ month, currency: request.amount.currency, amount: request.amount.minor }];
+    const sealed = weighed.has(id) ? held.get(asked) : decided.get(id)?.held;
+    if (sealed === undefined || sealed === null) return [];
+    return [
+      {
+        requestId: request.id,
+        month: sealed.month,
+        currency: request.amount.currency,
+        amount: request.amount.minor,
+        // The payee windows it holds capacity in, at its sealed hour (GM-1b).
+        windows: windowsHeldOf(orgId, request, sealed),
+      },
+    ];
   });
+}
+
+/** What a request left out of the totals holds: its month and amount, and the payee windows it is in. */
+interface LeftHeld {
+  readonly requestId: string;
+  readonly month: string;
+  readonly currency: string;
+  readonly amount: bigint;
+  readonly windows: readonly WindowTake[];
 }
 
 /** One request as weighed in order: the engine's answer, and whether it stays, counted against the younger ones. */
@@ -455,7 +497,7 @@ export function weighedInOrder(
   stays: (request: SpendRequestRecord, made: DecisionMade) => boolean,
 ): readonly WeighedInOrder[] {
   const currency = mandate.perOrderLimit.currency;
-  const { since } = outside;
+  const { fromHour } = outside;
   const carried: { readonly request: SpendRequestRecord; readonly order: OrderClaimsSeen }[] = [];
   return requests.map((request, at) => {
     const { month } = known(held.get(request.id));
@@ -478,7 +520,8 @@ export function weighedInOrder(
         ),
         split: money(
           (outside.split.get(supplier.id) ?? 0n) +
-            sumOf(toItsPayee.filter((other) => known(held.get(other.request.id)).reservedAt >= since)),
+            // Counted by whole hours, as the windows count them (GM-1b).
+            sumOf(toItsPayee.filter((other) => hourOf(known(held.get(other.request.id)).reservedAt) >= fromHour)),
           currency,
         ),
         claims: {
@@ -498,15 +541,52 @@ export function weighedInOrder(
   });
 }
 
-/** The split total of each supplier's payee outside the plan, one statement a supplier. */
+/**
+ * The split total of each supplier's payee outside the plan, from its signed windows (GM-1b) from `fromHour` on (none
+ * asked, null: the split check off), less what the requests left out hold in them (`takes`): all the payees' windows
+ * and `alsoLocked` read in one pass, in order of ID, locked as asked. A window holding less than they do is
+ * INTEGRITY_FAILED, alarmed; with the split check off, only `alsoLocked` is read, for the cancels to come.
+ */
 async function splitTotalsOutside(
   tx: CarryTx,
-  suppliers: ReadonlyMap<string, SupplierRecord>,
-  { since, currency, except }: { since: Date; currency: string; except: readonly string[] },
+  states: SignedStates,
+  orgId: string,
+  {
+    suppliers,
+    currency,
+    fromHour,
+    takes,
+    lock,
+    alsoLocked,
+  }: {
+    readonly suppliers: ReadonlyMap<string, SupplierRecord>;
+    readonly currency: string;
+    readonly fromHour: number | null;
+    readonly takes: readonly WindowTake[];
+    readonly lock: 'share' | 'change';
+    readonly alsoLocked: readonly string[];
+  },
 ): Promise<ReadonlyMap<string, bigint>> {
   const totals = new Map<string, bigint>();
-  for (const [id, { payeeKey }] of suppliers) {
-    totals.set(id, await splitHeld(tx, { supplierId: id, payeeKey, since, currency, except }));
+  if (fromHour === null) {
+    if (alsoLocked.length > 0) await payeeWindowsRead(tx, states, orgId, [], lock, alsoLocked);
+    return totals;
+  }
+  const payees = [...suppliers].map(([supplierId, { payeeKey }]) => ({ supplierId, payeeKey, currency }));
+  const rows = await payeeWindowsRead(tx, states, orgId, payees, lock, alsoLocked);
+  for (const payee of payees) {
+    const ids = payeeWindowKeys(payee).map((key) => payeeWindowId(orgId, key));
+    const read = known(rows.get(payeeText(payee)));
+    const split = splitHeldLess(
+      ids.map((id, index) => ({ id, read: known(read[index]) })),
+      fromHour,
+      takes,
+    );
+    if (split === 'short') {
+      for (const id of ids) states.mismatch(PAYEE_WINDOWS.subject, { orgId, id });
+      return integrityFailed();
+    }
+    totals.set(payee.supplierId, split);
   }
   return totals;
 }

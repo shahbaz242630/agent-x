@@ -421,17 +421,18 @@ export interface AuditTrail {
     /**
      * `headHeld` (S206 V4): where this transaction has already moved the chain's head, go on from the head it left,
      * with no read of the head of its own: one trip, not two, for events that follow a change's own (a notice's record).
-     * `also` (GM-1a): a second data-modifying statement in the same write, given every event's ID in their order, so
-     * another row's pointer goes in with its own event (a month's total with its request's); its rows as `alsoAlong`.
+     * `also` (GM-1a, GM-1b): more data-modifying statements in the same write, given every event's ID in their order,
+     * so other rows' pointers go in with their own events (a month's total and a payee's windows with its request's);
+     * each one's rows in `alsoAlong`, in the same order.
      */
     options?: {
       readonly headHeld?: boolean;
-      readonly also?: (eventIds: readonly string[], gate: RawBuilder<unknown>) => RawBuilder<unknown>;
+      readonly also?: (eventIds: readonly string[], gate: RawBuilder<unknown>) => readonly RawBuilder<unknown>[];
     },
   ): Promise<{
     readonly recorded: readonly RecordedAuditEvent[];
     readonly along: readonly Readonly<Record<string, unknown>>[] | undefined;
-    readonly alsoAlong: readonly Readonly<Record<string, unknown>>[] | undefined;
+    readonly alsoAlong: readonly (readonly Readonly<Record<string, unknown>>[] | undefined)[];
   }>;
   /**
    * The object's latest signed state (ADR-012 §2): of the events about it,
@@ -1059,21 +1060,33 @@ function writerFor(
       if (along !== undefined) {
         // The row's pointer too, only once the events are written (4D2d P8): the statement it came with, run here.
         const gate = sql`exists (select from written)`;
-        // A second row's statement too (GM-1a: a month's total), given every event's ID in their order.
-        const also = along.also?.(
-          sealedEvents.map(({ id }) => id),
-          gate,
+        // Other rows' statements too (GM-1a: a month's total; GM-1b: a payee's windows), given every event's ID in their
+        // order, each a statement of its own, read back by its place.
+        const also =
+          along.also?.(
+            sealedEvents.map(({ id }) => id),
+            gate,
+          ) ?? [];
+        // Each named by its place alone (`also_0`, …), never by anything the caller wrote.
+        const alsoWith = also.reduce<RawBuilder<unknown>>(
+          (before, statement, index) => sql`${before}, ${sql.id(alsoName(index))} as (${statement})`,
+          sql``,
         );
-        const { rows } = await sql<{ written: bigint; along: unknown; also_along: unknown }>`
+        const alsoRead = also.reduce<RawBuilder<unknown>>(
+          (before, _, index) =>
+            sql`${before}, (select pg_catalog.json_agg(pg_catalog.row_to_json(b)) from ${sql.id(alsoName(index))} b) as ${sql.id(alsoReadName(index))}`,
+          sql``,
+        );
+        const { rows } = await sql<Record<string, unknown> & { written: bigint; along: unknown }>`
           with moved as (${move})${sign}, written as (${insert} returning 1),
-          along as (${along.statement(last.id, gate)})${also === undefined ? sql`` : sql`, also_along as (${also})`}
+          along as (${along.statement(last.id, gate)})${alsoWith}
           select (select pg_catalog.count(*) from written) as written,
                  (select pg_catalog.json_agg(pg_catalog.row_to_json(a)) from along a) as along
-                 ${also === undefined ? sql`` : sql`, (select pg_catalog.json_agg(pg_catalog.row_to_json(b)) from also_along b) as also_along`}
+                 ${alsoRead}
         `.execute(tx);
         const [row] = rows;
         along.rows = rowsAlong({ row_json: row?.along });
-        along.alsoRows = rowsAlong({ row_json: row?.also_along });
+        along.alsoRows = also.map((_, index) => rowsAlong({ row_json: row?.[alsoReadName(index)] }));
         return moved(row?.written === allWritten, head);
       }
       const written = await sql`with moved as (${move})${sign} ${insert}`.execute(tx);
@@ -1082,13 +1095,18 @@ function writerFor(
   };
 }
 
+/** The name of `also`'s statement at `index` in an event's write, and of the rows read back from it: by place alone. */
+const alsoName = (index: number): string => `also_${String(index)}`;
+const alsoReadName = (index: number): string => `also_along_${String(index)}`;
+
 /** A statement an event's write carries (recordAlong): built with the event's ID, and the rows it gave once run. */
 interface Along {
   readonly statement: (eventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>;
-  /** A second statement, given every event's ID in their order (recordAllAlong's `also`). */
-  readonly also?: ((eventIds: readonly string[], gate: RawBuilder<unknown>) => RawBuilder<unknown>) | undefined;
+  /** More statements, given every event's ID in their order (recordAllAlong's `also`). */
+  readonly also?:
+    ((eventIds: readonly string[], gate: RawBuilder<unknown>) => readonly RawBuilder<unknown>[]) | undefined;
   rows?: readonly Readonly<Record<string, unknown>>[] | undefined;
-  alsoRows?: readonly Readonly<Record<string, unknown>>[] | undefined;
+  alsoRows?: readonly (readonly Readonly<Record<string, unknown>>[] | undefined)[];
 }
 
 /**
@@ -1557,12 +1575,12 @@ export function createAuditTrail({
       statement: (lastEventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>,
       options?: {
         readonly headHeld?: boolean;
-        readonly also?: (eventIds: readonly string[], gate: RawBuilder<unknown>) => RawBuilder<unknown>;
+        readonly also?: (eventIds: readonly string[], gate: RawBuilder<unknown>) => readonly RawBuilder<unknown>[];
       },
     ) {
       const along: Along = { statement, also: options?.also };
       const recorded = await recordAllAs(false, tx, orgId, events, along, options?.headHeld === true);
-      return Object.freeze({ recorded, along: along.rows, alsoAlong: along.alsoRows });
+      return Object.freeze({ recorded, along: along.rows, alsoAlong: along.alsoRows ?? [] });
     },
 
     async verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {

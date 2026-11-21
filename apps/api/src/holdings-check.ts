@@ -35,16 +35,22 @@ import {
 } from '@agentx/core/modules/audit';
 import {
   checkMonthTotals,
+  checkPayeeWindows,
   type LimitReservationsTables,
   monthTotalsCutOver,
   MOST_TOTALS_CHECKED_A_PAGE,
+  MOST_WINDOWS_CHECKED_A_PAGE,
+  payeeWindowsCutOver,
   totalsMissing,
   type TotalsChecked,
+  type WindowsChecked,
+  windowsMissing,
 } from '@agentx/core/modules/limit-reservations';
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import {
   checkHoldings,
   cutOverMonthTotals,
+  cutOverPayeeWindows,
   MOST_CHECKED_A_PAGE,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
@@ -125,11 +131,16 @@ export function createHoldingsCheck({
   const progress = new Map<string, string>();
   /** When this process's first run started, which it does once it holds the jobs' lease (job-list.ts). */
   let firstRunAt: number | undefined;
+  /** Whether the hold-off has been waited out whole: once, for the month totals' and the payee windows' cutovers alike. */
+  let heldOff = false;
   /** Waits until CUTOVER_HOLD_OFF_MS has passed since the first run started: at once after that. */
   const cutoverHeldOff = async (signal: AbortSignal | undefined): Promise<void> => {
     firstRunAt ??= clock.now().getTime();
+    if (heldOff) return;
     const left = firstRunAt + cutoverHoldOffMs - clock.now().getTime();
     if (left > 0) await wait(left, signal);
+    // A wait cut short by the stop signal is waited again by the next run.
+    heldOff = signal?.aborted !== true;
   };
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
 
@@ -171,6 +182,62 @@ export function createHoldingsCheck({
   };
 
   /**
+   * The organisation cut over to signed payee windows, if it isn't yet (GM-1b), once its month totals are: its own
+   * transaction, after theirs, before its pages. The same hold-off, waited once. A failure is logged and left for the
+   * next run, its decisions refused busy meanwhile.
+   */
+  const cutOverWindowsIn = async (orgId: string, log: Logger, signal: AbortSignal | undefined): Promise<void> => {
+    const stopped = (): boolean => signal?.aborted === true;
+    try {
+      const now = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        payeeWindowsCutOver(tx, states, orgId),
+      );
+      if (now === 'cut_over' || stopped()) return;
+      await cutoverHeldOff(signal);
+      if (stopped()) return;
+      const trail = createAuditTrail({ keys, ids });
+      const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        cutOverPayeeWindows(tx, states, orgId, {
+          payments: paymentHoldsOf,
+          record: (event) => trail.record(tx, orgId, event),
+          at: clock.now(),
+        }),
+      );
+      if (done.outcome === 'cut_over')
+        log.info('payee_windows.cut_over', { opened: done.opened, mismatched: done.mismatched });
+      if (done.outcome === 'tampered') log.warn('payee_windows.cutover_held', {});
+    } catch (error) {
+      log.error('payee_windows.cutover_failed', { err: error });
+    }
+  };
+
+  /**
+   * The organisation's payee windows held to their reservations (GM-1b), a page a transaction, after its month
+   * totals: each window's mismatch alarmed. Counts what it checked.
+   */
+  const checkWindowsIn = async (orgId: string, log: Logger) => {
+    let after: string | null = null;
+    let windows = 0;
+    let mismatched = 0;
+    let tampered = 0;
+    const at = clock.now();
+    do {
+      const from: string | null = after;
+      const checked: WindowsChecked = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        checkPayeeWindows(tx, states, orgId, { after: from, limit: MOST_WINDOWS_CHECKED_A_PAGE, at }),
+      );
+      windows += checked.windows;
+      mismatched += checked.mismatched;
+      tampered += checked.tampered;
+      after = checked.next;
+    } while (after !== null);
+    const missing = await withSignedStates(database, orgId, services(log), (tx, states) =>
+      windowsMissing(tx, states, orgId, at),
+    );
+    return { windows, windowsMismatched: mismatched, windowsTampered: tampered, windowsMissing: missing };
+  };
+
+  /**
    * The organisation's month totals held to their reservations (GM-1a), a page a transaction, once its requests'
    * pass has ended: each total's mismatch alarmed. Counts what it checked.
    */
@@ -198,7 +265,10 @@ export function createHoldingsCheck({
   /** Checks the organisation's next pages, up to its share; false if the signal stopped it. */
   const checkIn = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
     const log = logger.child({ orgId });
-    if (progress.get(orgId) === undefined) await cutOverIn(orgId, log, signal);
+    if (progress.get(orgId) === undefined) {
+      await cutOverIn(orgId, log, signal);
+      await cutOverWindowsIn(orgId, log, signal);
+    }
     let requests = 0;
     let mismatched = 0;
     let tampered = 0;
@@ -215,8 +285,9 @@ export function createHoldingsCheck({
         if (checked.next === null) {
           progress.delete(orgId);
           const totals = await checkTotalsIn(orgId, log);
+          const windows = await checkWindowsIn(orgId, log);
           done(orgId);
-          log.info('holdings_check.passed', { requests, mismatched, tampered, ...totals });
+          log.info('holdings_check.passed', { requests, mismatched, tampered, ...totals, ...windows });
           return true;
         }
         progress.set(orgId, checked.next);

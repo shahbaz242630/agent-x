@@ -120,7 +120,7 @@ export function periodOf(at: Date, zone: string): Period {
 }
 
 /** The longest split-check window: 31 days. */
-const MOST_WINDOW_HOURS = 31 * 24;
+export const MOST_WINDOW_HOURS = 31 * 24;
 
 /**
  * Where a rolling window ending at `at` begins (ADR-006 §9: the split check's,

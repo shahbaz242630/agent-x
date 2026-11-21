@@ -44,11 +44,17 @@ export interface HeldSealed {
   readonly payee: PayeeSeal | 'none' | 'unreadable';
   /** Whether it was decided by G5's engine, which writes the claim's bank key (0043): its sealed `possibleDuplicate`. */
   readonly bankKeyed: boolean;
+  /**
+   * The payee windows its capacity was added to (GM-1b, 0112), by ID: an ending gives back to these, whatever the
+   * unsealed reservation says. Null for a decision made before GM-1b, counted in its supplier's window alone.
+   */
+  readonly windows: readonly string[] | null;
 }
 
-/** What a decision that holds capacity seals (signRequest's `held`): always a payee seal of its own. */
-export interface HeldAs extends Omit<HeldSealed, 'payee' | 'bankKeyed'> {
+/** What a decision that holds capacity seals (signRequest's `held`): always a payee seal and its windows. */
+export interface HeldAs extends Omit<HeldSealed, 'payee' | 'bankKeyed' | 'windows'> {
   readonly payee: PayeeSeal;
+  readonly windows: readonly string[];
 }
 
 /**
@@ -126,7 +132,21 @@ export function heldOf(details: Readonly<Record<string, unknown>> | undefined): 
     reservedAt: new Date(at),
     payee: payeeSealOf(details),
     bankKeyed: typeof details?.possibleDuplicate === 'boolean',
+    windows: windowsOf(details?.payeeWindows),
   };
+}
+
+/** A window's ID as signRequest seals it: a UUID in lower case. */
+const WINDOW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The window IDs a decision sealed (`payeeWindows`, comma between): null for none (decided before GM-1b). The chain's
+ * MAC keeps the event as the app wrote it, so text not in that form is no list of windows at all: null too.
+ */
+function windowsOf(sealed: unknown): readonly string[] | null {
+  if (typeof sealed !== 'string') return null;
+  const ids = sealed.split(',');
+  return ids.every((id) => WINDOW_ID.test(id)) ? ids : null;
 }
 
 /** The payee seal the details hold: none before E1b; unreadable if either half is there but not whole. */

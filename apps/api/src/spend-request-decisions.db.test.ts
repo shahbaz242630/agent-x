@@ -2123,32 +2123,25 @@ describe('what is weighed once the locks are held, in one statement (4D2d P12)',
         .where('agent_id', '=', acting.agentId)
         .executeTakeFirstOrThrow();
       const asked = { agentId: acting.agentId, month, currency: 'AED' };
-      const window = { supplierId, payeeKey: null, since: new Date(0), currency: 'AED' };
       const order = { supplierId, payeeKey: null, reference: 'INV-1' };
 
-      expect(await totalsWeighed(tx, { month: asked, split: window, order })).toEqual({
+      // The split is no longer read from the reservations: the payee's signed windows hold it (GM-1b).
+      expect(await totalsWeighed(tx, { month: asked, order })).toEqual({
         spent: 100_000n,
-        split: 100_000n,
         claims: { duplicate: true, possible: false },
       });
-      expect(await totalsWeighed(tx, { month: asked, split: null, order: null })).toEqual({
+      expect(await totalsWeighed(tx, { month: asked, order: null })).toEqual({
         spent: 100_000n,
-        split: 0n,
         claims: { duplicate: false, possible: false },
       });
-      expect(await totalsWeighed(tx, { month: null, split: window, order: null })).toMatchObject({
+      expect(await totalsWeighed(tx, { month: null, order })).toEqual({
         spent: 0n,
-        split: 100_000n,
-      });
-      expect(await totalsWeighed(tx, { month: null, split: null, order })).toEqual({
-        spent: 0n,
-        split: 0n,
         claims: { duplicate: true, possible: false },
       });
       // A lookalike: another form the rail would carry alike.
-      expect(
-        await totalsWeighed(tx, { month: null, split: null, order: { ...order, reference: 'INV_1' } }),
-      ).toMatchObject({ claims: { duplicate: false, possible: true } });
+      expect(await totalsWeighed(tx, { month: null, order: { ...order, reference: 'INV_1' } })).toMatchObject({
+        claims: { duplicate: false, possible: true },
+      });
     });
   });
 
@@ -2156,9 +2149,8 @@ describe('what is weighed once the locks are held, in one statement (4D2d P12)',
     // A transaction any use of which would fail.
     const none = null as unknown as Parameters<typeof totalsWeighed>[0];
 
-    expect(await totalsWeighed(none, { month: null, split: null, order: null })).toEqual({
+    expect(await totalsWeighed(none, { month: null, order: null })).toEqual({
       spent: 0n,
-      split: 0n,
       claims: { duplicate: false, possible: false },
     });
   });
@@ -2246,15 +2238,22 @@ describe('the split check (D5, SEC-LIM-04)', () => {
     expect(decidedOf(await ask(acting, other)).decision).toBe('ALLOW');
   });
 
-  it('counts an order only while it is in the window', async () => {
-    const { w, acting } = await ready({ terms: SPLIT_TERMS });
+  it('counts an order only while its hour is in the window: whole hours, the edge counted (GM-1b)', async () => {
+    const { w, mandateId, acting } = await ready({ terms: SPLIT_TERMS });
     expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+    const next = asking(w, { amount: AED(600_000n), orderReference: 'INV-2' });
 
+    // A minute past the day: the window starts in the hour the order was made in, which it counts whole (weighed by
+    // the simulator, which holds nothing).
     clock.advanceBy(DAY_MS + 60_000);
+    expect(simulatedOf(await simulated(w, mandateId ?? '', next)).made).toMatchObject({
+      decision: SPLIT.decision,
+      reasons: SPLIT.reasons,
+    });
 
-    expect(decidedOf(await ask(acting, asking(w, { amount: AED(600_000n), orderReference: 'INV-2' }))).decision).toBe(
-      'ALLOW',
-    );
+    // An hour on: that hour is out of the window.
+    clock.advanceBy(HOUR_MS);
+    expect(decidedOf(await ask(acting, next)).decision).toBe('ALLOW');
   });
 
   it('adds up every agent’s orders to the supplier', async () => {
