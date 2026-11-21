@@ -337,7 +337,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   checkStatesWith(digest);
   // Anchors in memory alone: the witness log lets a head go once anchored past it there too (TR-1).
   if (anchorLog === undefined)
-    witness?.useAnchors({ rebasedAfter: () => false, latest: (chain) => anchorStore.latest(chain) });
+    witness?.useAnchors({ rebasedAfter: () => false, latest: anchorStore.latest.bind(anchorStore) });
   // The platform chain's walks keep its signed states in the digest too (AT13c): the pause, the sessions' signed ends.
   const platform = createPlatformChain({ keys, ids: uuidV7Ids, subjectOf: platformSubjectOf });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
