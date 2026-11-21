@@ -27,6 +27,7 @@ import {
   THROWAWAY_NAME_RULE,
   throwawayAnchorsContainer,
   throwawayIdOf,
+  throwawayWitnessContainer,
   throwawayServerOfHost,
 } from '../../tooling/load/throwaway.ts';
 
@@ -356,11 +357,14 @@ const SAYS_DIMENSIONS = [{ name: 'Says', operator: 'Include', values: ['*'] }];
 
 /**
  * The integrity alarm's events (ADR-012 §2): an audit chain that failed its
- * check, and a check that broke. Our logger writes each event name exactly, so
+ * check, and a check that broke; and two signs of the owner's hand on the jobs
+ * (TR-1): their lease taken while their own term still ran, and a hand-off held
+ * back before the partner was called because a chain or the platform pause
+ * didn't match a witnessed head. Our logger writes each event name exactly, so
  * the match keeps its case.
  */
 const INTEGRITY_LINES =
-  'where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed")';
+  'where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed", "jobs.lease_taken_early", "handoff.held_before_sending")';
 
 /**
  * A token the login service refused (partner, S88): every call to it logs one
@@ -406,10 +410,11 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
  * The anchors' store can't be read after a start, has gone long unread or unwritten, or was never named (4D2e E, PL-58);
  * a file too large for this process, the check behind on its turns, or past the organisations it notes (E6): capacity, never tamper.
  * And a production web copy that can't read the anchors past the alert limit, or hold them (AT13b): its decisions go on
- * without the digest.
+ * without the digest. And the witness log (TR-1) failing to write or read past the alert limit, never named, or holding
+ * more heads than memory: stops answer to be retried and payments wait until it is back.
  */
 const ANCHOR_STORE_LINES =
-  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on", "audit.web_anchors_read_failing", "audit.web_anchors_beyond_memory")';
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on", "audit.web_anchors_read_failing", "audit.web_anchors_beyond_memory", "audit.witness_write_failing", "audit.witness_read_failing", "audit.witness_store_not_set", "audit.witness_beyond_memory")';
 
 /**
  * The fewest days of point-in-time restore a deployment keeps (ADR-002). In production, also twice the days the full pass
@@ -785,6 +790,9 @@ function stageGCopyIn(snapshot: Snapshot): string | undefined {
 /** The copy's own anchors container, for a copy's server: modules/evidence.bicep's `audit-anchors` is staging's alone. */
 const copyAnchorsOf = (copy: string): string => throwawayAnchorsContainer(throwawayIdOf(copy) ?? '');
 
+/** The copy's own witness log (TR-1), for a copy's server: modules/evidence.bicep's `audit-witness` is staging's alone. */
+const copyWitnessOf = (copy: string): string => throwawayWitnessContainer(throwawayIdOf(copy) ?? '');
+
 /**
  * Every app that serves traffic (ADR-002 Amendment G2d): the API, Zitadel and
  * its login pages. The worker joins in Phase 4.
@@ -1140,9 +1148,13 @@ const isCopiedKey = (snapshot: Snapshot, secret: PredictedResource, value: unkno
 /** The audit exports' role's one data action: Put Blob of a file not there yet (Microsoft), never overwrite or read. */
 const EVIDENCE_WRITE = 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action';
 
-/** The two containers of the write-once store (modules/evidence.bicep): the audit exports', the chains' anchors' (4D2e E, PL-58). */
+/**
+ * The three containers of the write-once store (modules/evidence.bicep): the audit exports', the chains' anchors' (4D2e E,
+ * PL-58), and the witness log's (TR-1).
+ */
 const EVIDENCE_CONTAINER = 'audit-exports';
 const ANCHOR_CONTAINER = 'audit-anchors';
+const WITNESS_CONTAINER = 'audit-witness';
 
 /**
  * The anchors' role's two data actions: Put Blob of a file not there yet, and
@@ -1155,6 +1167,15 @@ const ANCHOR_ACTIONS = [
 
 /** The anchors' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors');
+
+/**
+ * The witness log's role (TR-1): the anchors' two data actions on a container of its own. Put Blob of a file not there
+ * yet, Get Blob and List Blobs, which reading the other copies' heads needs. Never overwrite or delete.
+ */
+const WITNESS_ACTIONS = ANCHOR_ACTIONS;
+
+/** The witness log's custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
+const witnessRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-witness');
 
 /**
  * A read-only role on a store's container: Get Blob and List Blobs alone. The chain repair's read of the anchors and
@@ -1504,12 +1525,13 @@ const required: Check = (snapshot, _expected, add) => {
     // The audit exports' store and the activity downloads', each with its own blob service and container.
     ["Storage accounts, the audit exports' and the activity downloads'", TYPES.storage, 2, 2],
     ['blob services, one in each Storage account', TYPES.blobService, 2, 2],
-    // And on Stage G's run, its copy's own anchors (apps.bicep `throwawayAnchors`), which load-database judges.
+    // And on Stage G's run, its copy's own anchors and witness log (apps.bicep `throwawayAnchors`, `throwawayWitness`),
+    // which load-database judges.
     [
-      'containers: the write-once store two, the activity downloads one',
+      'containers: the write-once store three, the activity downloads one',
       TYPES.container,
-      3,
-      3 + copyAnchorsContainers(snapshot).length,
+      4,
+      4 + copyAnchorsContainers(snapshot).length + copyWitnessContainers(snapshot).length,
     ],
   ];
   for (const [what, type, least, most] of counts) {
@@ -2615,8 +2637,11 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * 4D2e E9, and a rebase, E11). The anchors container has a second role, reading
  * alone, to the chain repair's identity (4D2e E10). The app that holds the jobs,
  * the operator's job and the chain repair's job alone are told where the anchors
- * are, each as its own identity, which its role is given to (`storeSettingsProblems`). None can
- * overwrite or delete. The account's immutability covers both. Its logs are
+ * are, each as its own identity, which its role is given to (`storeSettingsProblems`). The witness log (TR-1)
+ * has a role of its own, adding a new file and reading, given on its container to the identities of the apps that
+ * run the API (`WITNESS_WRITERS`) and to the operator's, and the anchors' read-only role there to the chain repair's
+ * alone; each of those is told where it is as its own identity. None can
+ * overwrite or delete. The account's immutability covers all three. Its logs are
  * `resource-logs`'s.
  */
 const evidenceStore: Check = (snapshot, expected, add) => {
@@ -2720,6 +2745,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       workloads: ['chain-restore', ...ANCHOR_READERS[expected.environment]],
       called: "the anchors' read-only role",
       on: 'the anchors container',
+      // The same role on the witness log is judged below, as its own.
+      apart: containersNamed(snapshot, WITNESS_CONTAINER),
     },
     problem,
   );
@@ -2747,7 +2774,77 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     },
     problem,
   );
+  witnessProblems(snapshot, { environment: expected.environment, accounts, copy }, problem);
 };
+
+/**
+ * The witness log's part of `evidence-store` (TR-1): its role given on its container once to each app that runs the API
+ * (`WITNESS_WRITERS`) and to the operator's identity, the anchors' read-only role there to the chain repair's alone, and
+ * each of those, alone, told where it is as its own identity. On Stage G's copy the API and its jobs app are told the
+ * copy's own witness log, which load-database judges.
+ */
+function witnessProblems(
+  snapshot: Snapshot,
+  {
+    environment,
+    accounts,
+    copy,
+  }: {
+    readonly environment: Expectations['environment'];
+    readonly accounts: readonly PredictedResource[];
+    readonly copy: string | undefined;
+  },
+  problem: (resource: string, message: string) => void,
+): void {
+  const containers = containersNamed(snapshot, WITNESS_CONTAINER);
+  const writers = storeRoleProblems(
+    snapshot,
+    {
+      name: witnessRoleName(groupOf(snapshot)),
+      dataActions: WITNESS_ACTIONS,
+      containers,
+      workloads: [...WITNESS_WRITERS[environment], 'operator'],
+      called: "the witness log's role",
+      on: 'the witness container',
+      apart: copyWitnessContainers(snapshot),
+    },
+    problem,
+  );
+  const readers = storeRoleProblems(
+    snapshot,
+    {
+      name: anchorReaderRoleName(groupOf(snapshot)),
+      dataActions: ANCHOR_READ_ACTIONS,
+      containers,
+      workloads: ['chain-restore'],
+      called: "the witness log's read-only role",
+      on: 'the witness container',
+      // The same role on the anchors is judged above, as theirs.
+      apart: containersNamed(snapshot, ANCHOR_CONTAINER),
+    },
+    problem,
+  );
+  storeSettingsProblems(
+    snapshot,
+    {
+      prefix: WITNESS_SETTING_PREFIX,
+      url: 'AGENTX_AUDIT_WITNESS_URL',
+      clientId: 'AGENTX_AUDIT_WITNESS_CLIENT_ID',
+      accounts,
+      container: (workload) => (copy !== undefined && runsApi(workload) ? copyWitnessOf(copy) : WITNESS_CONTAINER),
+      holders: (workload) => {
+        // Every app that runs the API, at every AGENTX_ROLE: its `web` copies write chains too.
+        if (runsApi(workload) || isJobOf(workload, ['operator'])) return ownOf(workload, writers);
+        if (isJobOf(workload, ['chain-restore'])) return ownOf(workload, readers);
+        return undefined;
+      },
+      holder:
+        "every app that runs the API and the operator's job write the witness log, and the chain repair's job reads it",
+      store: 'store',
+    },
+    problem,
+  );
+}
 
 /** An app that runs the API (4D2e D13): `api`, or the `jobs` app apart from it (every API process is told AGENTX_ENV). */
 const runsApi = (workload: PredictedResource): boolean =>
@@ -2792,6 +2889,17 @@ const ANCHOR_READERS: Readonly<Record<Expectations['environment'], readonly stri
 };
 
 /**
+ * Who writes the witness log beside the operator, by environment (main.bicep `witnessWriters`, TR-1): every app that
+ * runs the API. Each copy that writes a chain, a `web` copy too, puts the head it wrote there before saying it was
+ * done, and reads the others'; so production's API, whose web copies only read the anchors, writes here. The same in
+ * both environments today; kept apart so a change to one is a change to this list.
+ */
+const WITNESS_WRITERS: Readonly<Record<Expectations['environment'], readonly string[]>> = {
+  production: ['api', 'jobs'],
+  staging: ['api', 'jobs'],
+};
+
+/**
  * The jobs that write to the evidence store and read the anchors, each as its
  * own identity: the operator's (E10c, 4D2e E9) and the chain repair's (4D2e E10).
  */
@@ -2807,6 +2915,9 @@ const isJobOf = (workload: PredictedResource, jobs: readonly string[]): boolean 
  * which read the anchors for a chain recovery plan or a repair, each
  * set it once, to the same value, and nothing else sets it. Apart, the operator
  * would read another epoch's files, or none, and plan against the wrong anchors.
+ * The witness log's files are named under it too (TR-1): a `web` copy told the
+ * witness log sets it as one told the anchors does, or it would write and read
+ * another epoch's heads.
  */
 const anchorEpoch: Check = (snapshot, _expected, add) => {
   const values = new Map<string, readonly string[]>();
@@ -2819,8 +2930,11 @@ const anchorEpoch: Check = (snapshot, _expected, add) => {
           .map((entry) => text(at(entry, 'value'))),
       );
     const set = settingsNamed('AGENTX_ANCHOR_EPOCH');
-    // A `web` copy told where the anchors are reads them (AT13b): the same epoch, or it would read another's files.
-    const readsAnchors = isWebCopy(workload) && settingsNamed('AGENTX_AUDIT_ANCHORS_URL').length > 0;
+    // A `web` copy told where the anchors are reads them (AT13b), and one told the witness log writes and reads heads
+    // named under the epoch (TR-1): the same epoch, or it would read another's files.
+    const readsAnchors =
+      isWebCopy(workload) &&
+      (settingsNamed('AGENTX_AUDIT_ANCHORS_URL').length > 0 || settingsNamed('AGENTX_AUDIT_WITNESS_URL').length > 0);
     if (readsAnchors) webCopies += 1;
     if (holdsJobs(workload) || isJobOf(workload, STORE_WRITERS) || readsAnchors) {
       values.set(workload.name, set);
@@ -2829,7 +2943,7 @@ const anchorEpoch: Check = (snapshot, _expected, add) => {
         rule: 'anchor-epoch',
         resource: workload.name,
         message:
-          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the web copies that read its anchors, the operator's job and the chain repair's",
+          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the web copies that read its anchors or write the witness log, the operator's job and the chain repair's",
       });
     }
   }
@@ -2843,7 +2957,7 @@ const anchorEpoch: Check = (snapshot, _expected, add) => {
       rule: 'anchor-epoch',
       resource: 'the deployment',
       message:
-        "must set AGENTX_ANCHOR_EPOCH once on the app that holds the jobs, once on each web copy that reads its anchors, once on the operator's job and once on the chain repair's, to the same value",
+        "must set AGENTX_ANCHOR_EPOCH once on the app that holds the jobs, once on each web copy that reads its anchors or writes the witness log, once on the operator's job and once on the chain repair's, to the same value",
     });
   }
 };
@@ -2855,6 +2969,12 @@ const nameOf = (resource: PredictedResource): string => resource.id.slice(resour
 const copyAnchorsContainers = (snapshot: Snapshot): readonly PredictedResource[] =>
   ofType(snapshot, TYPES.container).filter(
     (container) => !inDownloadsStore(snapshot, container) && /^audit-anchors-g-[a-z0-9]+$/.test(nameOf(container)),
+  );
+
+/** Stage G's copies' own witness logs (apps.bicep `throwawayWitness`, TR-1), by their name's shape alone. */
+const copyWitnessContainers = (snapshot: Snapshot): readonly PredictedResource[] =>
+  ofType(snapshot, TYPES.container).filter(
+    (container) => !inDownloadsStore(snapshot, container) && /^audit-witness-g-[a-z0-9]+$/.test(nameOf(container)),
   );
 
 /** One of the write-once store's containers, by its name: a role is given on it alone. */
@@ -2882,8 +3002,14 @@ function evidencePartsProblems(
       problem(service.name, 'must keep versions: version-level immutability keeps every one');
     }
   }
-  // Stage G's copy's own anchors are load-database's to judge: here, only that they are in this store.
-  const wanted = [EVIDENCE_CONTAINER, ANCHOR_CONTAINER, ...copyAnchorsContainers(snapshot).map(nameOf)];
+  // Stage G's copy's own anchors and witness log are load-database's to judge: here, only that they are in this store.
+  const wanted = [
+    EVIDENCE_CONTAINER,
+    ANCHOR_CONTAINER,
+    WITNESS_CONTAINER,
+    ...copyAnchorsContainers(snapshot).map(nameOf),
+    ...copyWitnessContainers(snapshot).map(nameOf),
+  ];
   for (const container of ofType(snapshot, TYPES.container).filter(ours)) {
     if (
       !blobServices.some((service) => wanted.some((name) => container.id === `${service.id}/containers/${name}`)) ||
@@ -2895,7 +3021,7 @@ function evidencePartsProblems(
   const known: readonly string[] = [TYPES.storage, TYPES.blobService, TYPES.container];
   for (const resource of snapshot.predictedResources.filter(ours)) {
     if (resource.type.toLowerCase().startsWith('microsoft.storage/') && !known.includes(resource.type)) {
-      problem(resource.name, `is a ${resource.type}: the store holds its two containers and nothing else`);
+      problem(resource.name, `is a ${resource.type}: the store holds its three containers and nothing else`);
     }
   }
 }
@@ -2984,6 +3110,9 @@ const EVIDENCE_SETTING_PREFIX = 'AGENTX_EVIDENCE_';
 
 /** How the API is told where to keep the chains' anchors (apps.bicep `anchorStoreSettings`). */
 const ANCHOR_SETTING_PREFIX = 'AGENTX_AUDIT_ANCHORS_';
+
+/** How every copy that writes a chain is told where the witness log is (apps.bicep `apiWitnessSettings`, TR-1). */
+const WITNESS_SETTING_PREFIX = 'AGENTX_AUDIT_WITNESS_';
 
 /** How the API is told where to keep the activity downloads (apps.bicep `activityDownloadsSettings`). */
 const DOWNLOADS_SETTING_PREFIX = 'AGENTX_ACTIVITY_DOWNLOADS_';
@@ -3848,7 +3977,7 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
         rule: 'audit-integrity-alert',
         resource: environment.name,
         message:
-          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, every 5 minutes, watching every minute and firing on the first window (ADR-012 §2)",
+          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed, audit.anchor_check_crashed, jobs.lease_taken_early or handoff.held_before_sending line, every 5 minutes, watching every minute and firing on the first window (ADR-012 §2, TR-1)",
       });
     }
   }
@@ -4133,7 +4262,7 @@ const anchorStoreAlert: Check = (snapshot, _expected, add) => {
         rule: 'anchor-store-alert',
         resource: environment.name,
         message:
-          "needs an enabled alert on this deployment's workspace that fires on any audit.anchor_store_unreadable, audit.anchor_store_unwritable, audit.anchor_store_read_failing or audit.anchor_store_not_set line, watching every window and firing on the first",
+          "needs an enabled alert on this deployment's workspace that fires on any audit.anchor_store_unreadable, audit.anchor_store_unwritable, audit.anchor_store_read_failing or audit.anchor_store_not_set line, or the witness log's audit.witness_write_failing, audit.witness_read_failing, audit.witness_store_not_set or audit.witness_beyond_memory (TR-1), watching every window and firing on the first",
       });
     }
   }
@@ -4653,8 +4782,18 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const keptAnchors = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
   const readAnchors = customRoleId(groupOf(snapshot), anchorReaderRoleName(groupOf(snapshot)));
   const readPlans = customRoleId(groupOf(snapshot), planReaderRoleName(groupOf(snapshot)));
+  const witness = customRoleId(groupOf(snapshot), witnessRoleName(groupOf(snapshot)));
   // The watch's role is `job-watch`'s to check.
-  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors, readPlans, watchRoleId(snapshot)]);
+  const stores = new Set([
+    release,
+    evidence,
+    downloads,
+    keptAnchors,
+    readAnchors,
+    readPlans,
+    witness,
+    watchRoleId(snapshot),
+  ]);
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
@@ -4772,6 +4911,7 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
     anchorRoleName(groupOf(snapshot)),
     anchorReaderRoleName(groupOf(snapshot)),
     planReaderRoleName(groupOf(snapshot)),
+    witnessRoleName(groupOf(snapshot)),
     downloadsRoleName(groupOf(snapshot)),
     // The watch's is `job-watch`'s.
     watchRoleName(groupOf(snapshot)),
@@ -6125,6 +6265,7 @@ const loadDatabase: Check = (snapshot, _expected, add) => {
   }
   stageGJobsProblems(snapshot, copy, problem);
   copyAnchorsProblems(snapshot, copy, problem);
+  copyWitnessProblems(snapshot, copy, problem);
 };
 
 /** Stage G's jobs: on a copy, each once, running its own script and part; never without one. */
@@ -6182,6 +6323,47 @@ function copyAnchorsProblems(
     problem(
       'the deployment',
       `must give the anchors' role on ${wanted} once, to the jobs app; it gives ${String(given.length)}`,
+    );
+  }
+}
+
+/** Who writes the copy's witness log (apps.bicep `throwawayWitness`): both apps that run the API on its run. */
+const COPY_WITNESS_WRITERS: readonly string[] = ['api', 'jobs'];
+
+/**
+ * The copy's own witness log (TR-1): its container in the write-once store, its witness role there once to each app
+ * that runs the API on the copy (the API's `web` copies and its jobs app both write the copy's chains), to no one else.
+ */
+function copyWitnessProblems(
+  snapshot: Snapshot,
+  copy: string | undefined,
+  problem: (resource: string, message: string) => void,
+): void {
+  const containers = copyWitnessContainers(snapshot);
+  const wanted = copy === undefined ? undefined : copyWitnessOf(copy);
+  for (const container of containers.filter((each) => nameOf(each) !== wanted)) {
+    problem(container.name, 'must be the witness container of the Stage G copy the API reaches, and only on its run');
+  }
+  if (wanted !== undefined && !containers.some((container) => nameOf(container) === wanted)) {
+    problem('the deployment', `needs Stage G's copy's own witness container, ${wanted}: never staging's audit-witness`);
+  }
+  const ids = new Set(containers.map((container) => container.id));
+  const role = customRoleId(groupOf(snapshot), witnessRoleName(groupOf(snapshot)));
+  const given = ofType(snapshot, TYPES.roleAssignment).filter((assignment) => ids.has(scopeOf(assignment)));
+  const whose = given.map((assignment) => workloadOf(principalOf(snapshot, assignment)?.name ?? ''));
+  for (const [index, assignment] of given.entries()) {
+    if (roleOf(assignment) !== role || !COPY_WITNESS_WRITERS.includes(whose[index] ?? '')) {
+      problem(
+        assignment.name,
+        "must give the witness log's role on the copy's witness container to the API's and the jobs app's identities alone",
+      );
+    }
+  }
+  const once = COPY_WITNESS_WRITERS.every((workload) => whose.filter((each) => each === workload).length === 1);
+  if (wanted !== undefined && (given.length !== COPY_WITNESS_WRITERS.length || !once)) {
+    problem(
+      'the deployment',
+      `must give the witness log's role on ${wanted} once to the API and once to the jobs app; it gives ${String(given.length)}`,
     );
   }
 }

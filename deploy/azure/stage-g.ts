@@ -5,7 +5,7 @@
 //   node deploy/azure/stage-g.ts run <test> [--from <step>] one test of stageg.ts, step by step, to its report
 //   node deploy/azure/stage-g.ts status                    the copy, the jobs, the last step and its verdict
 //   node deploy/azure/stage-g.ts delete [<copy>]           the copy removed, the load jobs with it
-//   node deploy/azure/stage-g.ts delete --anchors          the copies' anchors containers, once their time is up
+//   node deploy/azure/stage-g.ts delete --anchors          the copies' anchors and witness containers, once their time is up
 //   node deploy/azure/stage-g.ts revoke                    Stage G's reads of the database logins taken back
 //
 // Stage G's identity reads staging's live logins (the owner's, the app's, the
@@ -60,6 +60,7 @@ import {
 import {
   THROWAWAY_ANCHORS_CONTAINER,
   throwawayAnchorsContainer,
+  throwawayWitnessContainer,
   throwawayHost,
   throwawayIdOf,
   throwawayServerProblem,
@@ -78,7 +79,7 @@ const USAGE = `Usage, from your own terminal window:
   node deploy/azure/stage-g.ts run <test> [--from <step>]  run one test step by step: ${STAGE_G_TESTS.join(', ')}
   node deploy/azure/stage-g.ts status                     the copy, the jobs, the last step and its verdict
   node deploy/azure/stage-g.ts delete [<copy>]            remove the copy and the load jobs
-  node deploy/azure/stage-g.ts delete --anchors           remove old copies' anchors containers once their time is up
+  node deploy/azure/stage-g.ts delete --anchors           remove old copies' anchors and witness containers once their time is up
   node deploy/azure/stage-g.ts revoke                     take back Stage G's reads of the database logins, with no copy kept`;
 
 export type Request =
@@ -172,7 +173,7 @@ interface Copy {
   readonly last?: LastStep;
 }
 
-/** A copy's anchors container, kept until its files' time is up (apps.bicep: write-once, 3 days). */
+/** A copy's anchors or witness container, kept until its files' time is up (apps.bicep: write-once, 3 days). */
 interface Anchors {
   readonly container: string;
   readonly server: string;
@@ -938,14 +939,19 @@ async function remove(steps: StageGSteps, named: string | undefined): Promise<nu
   }
   steps.say(`${server} is gone.`);
   if (kept) takeReads(steps);
-  const anchors: Anchors = {
-    container: throwawayAnchorsContainer(id),
+  // Its anchors and its witness log (TR-1), each kept as long as the store keeps their files.
+  const lockedUntil = new Date(steps.now().getTime() + ANCHORS_KEPT_MS).toISOString();
+  const containers = [throwawayAnchorsContainer(id), throwawayWitnessContainer(id)].map((container): Anchors => ({
+    container,
     server,
-    lockedUntil: new Date(steps.now().getTime() + ANCHORS_KEPT_MS).toISOString(),
-  };
-  const others = state.anchors.filter(({ container }) => container !== anchors.container);
+    lockedUntil,
+  }));
+  const others = state.anchors.filter(({ container }) => !containers.some((each) => each.container === container));
   const { copy } = state;
-  keep(steps, { ...(copy === undefined || copy.server === server ? {} : { copy }), anchors: [...others, anchors] });
+  keep(steps, {
+    ...(copy === undefined || copy.server === server ? {} : { copy }),
+    anchors: [...others, ...containers],
+  });
   steps.say(
     [
       ...(kept
@@ -954,7 +960,7 @@ async function remove(steps: StageGSteps, named: string | undefined): Promise<nu
             `then resume staging's hand-offs:\n  ${RESUME_LINE}`,
           ]
         : []),
-      `The copy's anchors container ${anchors.container} stays until its files' 3 days are up: after ${uae(anchors.lockedUntil)}, run node deploy/azure/stage-g.ts delete --anchors.`,
+      `The copy's anchors and witness containers ${containers.map(({ container }) => container).join(' and ')} stay until their files' 3 days are up: after ${uae(lockedUntil)}, run node deploy/azure/stage-g.ts delete --anchors.`,
     ].join('\n'),
   );
   return 0;

@@ -61,7 +61,7 @@ import {
   uniqueSuffix
   workloads
 } from 'names.bicep'
-import { anchorContainerName, evidenceAccountName, evidenceContainerName } from 'modules/evidence.bicep'
+import { anchorContainerName, evidenceAccountName, evidenceContainerName, witnessContainerName } from 'modules/evidence.bicep'
 import { activityDownloadsAccountName, activityDownloadsContainerName } from 'modules/activity-downloads.bicep'
 
 targetScope = 'resourceGroup'
@@ -223,6 +223,9 @@ var split = loadRun || environment == 'production'
 var throwaway = loadRun && !empty(loadDatabaseHost)
 var appDatabaseHost = throwaway ? loadDatabaseHost : names.databaseHost
 var throwawayAnchorsName = 'audit-anchors-g-${last(sys.split(first(sys.split(loadDatabaseHost, '.')), '-'))}'
+// And its witness log (TR-1), for the same reason: the copy's heads in staging's
+// witness container would read to staging as chains cut below a witnessed head.
+var throwawayWitnessName = 'audit-witness-g-${last(sys.split(first(sys.split(loadDatabaseHost, '.')), '-'))}'
 
 // The restore drill's copy (S78): a point-in-time restore made under this name,
 // in the same subnet and private zone, which the operator's restore check reads
@@ -753,6 +756,55 @@ var jobsAnchorSettings = [
   }
 ]
 
+// Where every copy that writes a chain puts the heads it wrote and reads the
+// others' (TR-1): the write-once store's third container, each as its own
+// identity, which modules/evidence.bicep gives the witness role there (the
+// chain repair's the read-only role). Every app that runs the API is told, at
+// every AGENTX_ROLE: its `web` copies write chains too. On Stage G's copy the API
+// and its jobs app put the copy's heads in a container of their own
+// (`throwawayWitness`), never staging's. Read by the app only from TR-1's later
+// part; until then the settings are accepted and unused.
+var witnessUrl = 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${witnessContainerName()}'
+
+var throwawayWitnessUrl = 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${throwawayWitnessName}'
+
+// On Stage G's copy the API keeps no anchors (`keepsAnchors`), so the epoch its
+// witness files are named under comes with them here: the same one setting.
+var apiWitnessSettings = concat(throwaway ? [anchorEpochSetting] : [], [
+  {
+    name: 'AGENTX_AUDIT_WITNESS_URL'
+    value: throwaway ? throwawayWitnessUrl : witnessUrl
+  }
+  {
+    name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID'
+    value: apiIdentity.properties.clientId
+  }
+])
+
+var jobsWitnessSettings = [
+  {
+    name: 'AGENTX_AUDIT_WITNESS_URL'
+    value: throwaway ? throwawayWitnessUrl : witnessUrl
+  }
+  {
+    name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID'
+    value: jobsIdentity!.properties.clientId
+  }
+]
+
+// The operator's commands that write a chain (the hand-off pause above all) put
+// their heads there as its own identity; a rebase reads them.
+var operatorWitnessSettings = [
+  {
+    name: 'AGENTX_AUDIT_WITNESS_URL'
+    value: witnessUrl
+  }
+  {
+    name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID'
+    value: operatorIdentity.properties.clientId
+  }
+]
+
 // Where the operator reads the chains' anchors for a chain recovery plan (4D2e
 // E9) and adds a chain's rebase (E11), and the chain repair reads them (E10):
 // the same container, each as its own identity, the operator's able to add a new
@@ -812,6 +864,15 @@ var restoreStoreSettings = concat(
     }
     {
       name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
+      value: restorerIdentity.properties.clientId
+    }
+    // The witnessed heads a repair is checked against (TR-1), read alone.
+    {
+      name: 'AGENTX_AUDIT_WITNESS_URL'
+      value: witnessUrl
+    }
+    {
+      name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID'
       value: restorerIdentity.properties.clientId
     }
   ],
@@ -1447,6 +1508,8 @@ var jobsApp = {
   // would write over in staging's container.
   keepsDownloads: !throwaway
   keepsAnchors: true
+  // Puts the heads it writes in the witness log and reads the others' (TR-1).
+  witnesses: true
   minReplicas: 1
   maxReplicas: 1
   // As the API's: its runs end, then the lease is let go, within the stop deadline.
@@ -1578,6 +1641,9 @@ var apps = concat([
     // whose jobs keep its anchors in a container of its own the API isn't given:
     // its `web` copies decide as before the digest.
     keepsAnchors: !throwaway
+    // Puts the heads it writes in the witness log and reads the others' (TR-1), at
+    // every AGENTX_ROLE: its `web` copies write chains too.
+    witnesses: true
     // Hands Zitadel's processes their machine IDs, on its internal host alone (SA3e).
     handsOutMachineIds: true
     // AGENTX_ROLE all (unset) holds the jobs and counts its rate limits as the
@@ -1798,6 +1864,46 @@ resource throwawayAnchorsKept 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }
 
+// Stage G's copy's own witness log (TR-1), made and named as its anchors are:
+// the API's `web` copies and its jobs app both write the copy's chains, so both
+// identities are given the witness role there, as modules/evidence.bicep gives
+// staging's. Removed with the anchors (stage-g.ts delete --anchors).
+resource throwawayWitness 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = if (throwaway) {
+  parent: evidenceBlobs
+  name: throwawayWitnessName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// The witness log's custom role, as modules/evidence.bicep names it: add a new file, read and list; never overwrite or delete.
+var witnessRoleId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  guid(resourceGroup().id, 'audit-witness')
+)
+
+resource throwawayWitnessJobs 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (throwaway) {
+  scope: throwawayWitness
+  name: guid(throwawayWitness.id, jobsIdentity.id, witnessRoleId)
+  properties: {
+    roleDefinitionId: witnessRoleId
+    principalId: jobsIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'jobs writes and reads Stage G copy audit witness heads (deploy/azure/apps.bicep)'
+  }
+}
+
+resource throwawayWitnessApi 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (throwaway) {
+  scope: throwawayWitness
+  name: guid(throwawayWitness.id, apiIdentity.id, witnessRoleId)
+  properties: {
+    roleDefinitionId: witnessRoleId
+    principalId: apiIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'api writes and reads Stage G copy audit witness heads (deploy/azure/apps.bicep)'
+  }
+}
+
 resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
   for job in jobs: {
     name: jobName(environment, job.workload)
@@ -1856,7 +1962,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 value: '${secretsPath}/${file.reads}'
               }),
               job.evidence ? evidenceSettings : [],
-              (job.?readsAnchors ?? false) ? operatorAnchorSettings : [],
+              (job.?readsAnchors ?? false) ? concat(operatorAnchorSettings, operatorWitnessSettings) : [],
               (job.?restorerStores ?? false) ? restoreStoreSettings : [],
               (job.?callsApi ?? false) ? [loadApiSetting] : [],
               (job.?asksMachineId ?? false) ? [zitadelMachineWebhook] : []
@@ -1971,6 +2077,7 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
               app.sendsEmail ? emailSettings : app.signsIn ? zitadelOrigins : [],
               !app.keepsDownloads ? [] : app.workload == 'jobs' ? jobsDownloadsSettings : apiDownloadsSettings,
               !app.keepsAnchors ? [] : app.workload == 'jobs' ? jobsAnchorSettings : apiAnchorSettings,
+              !(app.?witnesses ?? false) ? [] : app.workload == 'jobs' ? jobsWitnessSettings : apiWitnessSettings,
               (app.?handsOutMachineIds ?? false) ? [machineIdsHostSetting] : [],
               (app.?asksMachineId ?? false) ? [zitadelMachineWebhook] : []
             )

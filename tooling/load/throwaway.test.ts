@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   sentinelOf,
   throwawayAnchorsContainer,
+  throwawayWitnessContainer,
   throwawayHost,
   throwawayIdOf,
   throwawayServerOfHost,
@@ -60,6 +61,7 @@ describe("Stage G's throwaway copy, by name", () => {
 
   it('names its own anchors container and a sentinel naming itself', () => {
     expect(throwawayAnchorsContainer('a1b2c3d4')).toBe('audit-anchors-g-a1b2c3d4');
+    expect(throwawayWitnessContainer('a1b2c3d4')).toBe('audit-witness-g-a1b2c3d4');
     expect(sentinelOf(COPY)).toBe(`agentx-stage-g-throwaway ${COPY}`);
   });
 });
