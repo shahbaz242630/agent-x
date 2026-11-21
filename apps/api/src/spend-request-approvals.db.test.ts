@@ -27,7 +27,13 @@
 // finds it changed (revoke-during-approval).
 import { AGENT_KEYS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
-import type { SignedStates } from '@agentx/core/modules/audit';
+import {
+  CHAIN_START,
+  checkStatesWith,
+  createAuditTrail,
+  createDigestLog,
+  type SignedStates,
+} from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import {
   acceptDraft,
@@ -40,6 +46,7 @@ import {
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
+  APPROVAL_HORIZON_MS,
   cancelRequest,
   checkHoldings,
   expireRequest,
@@ -460,6 +467,65 @@ describe('approving a spend request waiting for approval (B4b)', () => {
     expect(await asking(w.admin, asked.id)).toEqual(refused(409, 'REQUEST_EXPIRED'));
     expect(await statusOf(w, asked.id)).toBe('EXPIRED');
     expect(await holdingsOf(w, asked.id)).toEqual({ reservation: 'RELEASED', released: true });
+  });
+
+  it('AT13d: an approval rolled back by the owner once the digest forgot the request is refused REQUEST_EXPIRED, never approved again', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      const saved = await owner.saveRow(waiting.id);
+      expect(requestOfAnswer(await approved(w.admin, waiting.id)).status).toBe('APPROVED');
+      // Events after it, so the approval lies inside the walk, not at its end.
+      await withTenant(app, w.org, (tx) =>
+        createAuditTrail({ keys, ids }).record(tx, w.org, {
+          actor: OPERATOR,
+          action: 'probe.stepped',
+          subject: { type: 'probe', id: w.agent, version: 1 },
+          details: {},
+        }),
+      );
+      // The anchor check's walk kept in a digest that forgets a request's facts past the horizon, as job-list.ts keeps it.
+      const digest = createDigestLog({
+        keys,
+        logger: testLogger(),
+        now: () => clock.now(),
+        epoch: 1,
+        alertAfterMs: 60_000,
+        mostBytes: 64 * 1024 * 1024,
+        forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
+      });
+      const chain = { kind: 'organisation', orgId: w.org } as const;
+      const step = await createAuditTrail({ keys, ids }).checkFromAnchor(app, w.org, CHAIN_START);
+      if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
+      digest.record(chain, step.signed, clock.now(), { from: 0n, to: step });
+      expect(digest.latest(chain, SPEND_REQUESTS.subject, waiting.id)).toBeDefined();
+      // Its decision sealed now by the database's clock, so only the app's clock can age it: the horizon, the digest's
+      // day of margin and a few minutes on, the digest's next record forgets the request.
+      clock.advanceBy(APPROVAL_HORIZON_MS + 24 * HOUR_MS + 5 * 60_000);
+      digest.record(chain, new Map(), clock.now());
+      expect(digest.latest(chain, SPEND_REQUESTS.subject, waiting.id)).toBeUndefined();
+      // The approval's event deleted and the row put back as it was waiting: nothing the digest still holds says otherwise.
+      await owner.query('delete from audit.events where org_id = $1 and subject_id = $2 and action = $3', [
+        w.org,
+        waiting.id,
+        'spend_request.approved',
+      ]);
+      await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+      expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+      // Signed in now: the admin's session has long been idle.
+      const approver = await member(w.org, 'approver');
+
+      checkStatesWith(digest);
+      try {
+        expect(await asking(approver, waiting.id)).toEqual(refused(409, 'REQUEST_EXPIRED'));
+      } finally {
+        checkStatesWith(undefined);
+      }
+      expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
+    } finally {
+      await owner.end();
+    }
   });
 
   it('refuses one past the 24 hours its organisation chose when it was asked, one asked before keeping 72 (E6)', async () => {
