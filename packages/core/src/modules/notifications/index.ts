@@ -38,8 +38,6 @@ export {
   type Outbox,
   OUTBOX_RETENTION_DAYS,
   type OutboxTables,
-  sealNoticesFromBefore,
-  tookLegacySealPass,
 } from './infrastructure/outbox.ts';
 export { createNoticeCheck, NOTICE_DEADLINE_MS, type NoticeCheck } from './infrastructure/notice-check.ts';
 export {

@@ -21,6 +21,8 @@ export {
 export { actorEventsSince } from './infrastructure/actor-counts.ts';
 // What a chain that fails its check throws, for a module refusing a change on the trail's word (step-up, S206).
 export { CHAIN_START, ChainBroken, type CheckedPoint, type StateDigest } from '@agentx/platform/audit-chain';
+// How far past a horizon the digest forgets a fact (AT13d): an ending keeps a request's capacity past it (endings.ts).
+export { FORGET_MARGIN_MS as DIGEST_FORGET_MARGIN_MS } from '@agentx/platform/audit-chain';
 export {
   lockChainHead,
   REPAIR_ROLE,

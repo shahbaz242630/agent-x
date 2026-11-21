@@ -20,7 +20,7 @@ import {
 import { listedByShard, listedOrganizations, organisationsWithMarks } from '@agentx/core/modules/directory';
 import { mandateExpiryDue } from '@agentx/core/modules/mandates';
 import { createNoticeCheck } from '@agentx/core/modules/notifications';
-import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
+import { APPROVAL_HORIZON_MS, requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import {
   activeContactsFor,
   contactAddressFor,
@@ -46,7 +46,7 @@ import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
 import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
 import { platformSubjectOf } from './platform-subjects.ts';
-import { anchorsKeptOf } from './anchor-store.ts';
+import { anchorsKeptOf, anchorsReadOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
@@ -80,7 +80,6 @@ import {
 import { eachDay, owedPasses, rotation } from './org-passes.ts';
 import { createPersonSealCheck, PERSON_SEAL_CHECK_EVERY_MS } from './person-seal-check.ts';
 import { createPersonSeal, PERSON_SEAL_EVERY_MS } from './person-seal.ts';
-import { createLegacySealJob, LEGACY_SEAL_EVERY_MS } from './legacy-seal-job.ts';
 import { createSecuritySeal, SECURITY_SEAL_EVERY_MS } from './security-seal.ts';
 import { createSecurityTally, SECURITY_TALLY_EVERY_MS } from './security-tally.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
@@ -98,6 +97,7 @@ import { createRoundTripTiming, ROUND_TRIP_EVERY_MS, ROUND_TRIPS_A_RUN } from '.
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createWaitingRequests } from './waiting-requests.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS, waitingRejectionsDue } from './waiting-rejections.ts';
+import { createWebAnchorRead, WEB_ANCHORS_EVERY_MS } from './web-anchors.ts';
 
 /**
  * How long the anchor check of one chain, or its probe of every head, may hold its
@@ -251,6 +251,22 @@ export function eachProcessJobs({ keys, logger, database }: Booted, { recorder, 
 }
 
 /**
+ * A `web` copy's own (AT13b, web-anchors.ts): the anchors and the signed states' digest read from their store, read
+ * only, and every signed state this process reads held to that digest from here, as the jobs copy's are. Made but not
+ * started; the digest is given to core at once, read or not: until its first read it holds nothing, and every read goes
+ * on as before it. None where no store is named (development, test, Stage G's copy): reads as before the digest.
+ */
+export function webCopyJobs({ config, keys, logger }: Booted, { watch }: SharedParts): readonly Job[] {
+  // As the anchor check's own stale limit: what a store's reads may fail before that is the alert.
+  const alertAfterMs = config.audit.anchorSeconds * 3 * 1000;
+  const kept = anchorsReadOf(config, { keys, logger, clock: systemClock, alertAfterMs });
+  checkStatesWith(kept?.digest);
+  if (kept === undefined) return [];
+  const job = jobsWatchedBy(watch);
+  return [job('anchors_read', createWebAnchorRead({ ...kept, logger }), WEB_ANCHORS_EVERY_MS, QUICK_MS)];
+}
+
+/**
  * The `jobs` side, made but not started. The hand-off and the payment checks
  * come back too, for /health.
  */
@@ -282,6 +298,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       alertAfterMs: staleAfterMs,
       mostBytes: MEMORY_DIGEST_BYTES,
       leading,
+      forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
     });
   checkStatesWith(digest);
   // The platform chain's walks keep its signed states in the digest too (AT13c): the pause, the sessions' signed ends.
@@ -696,17 +713,6 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         retentionDays: config.securityEvents.retentionDays,
       }),
       SECURITY_TALLY_EVERY_MS,
-      LONG_MS,
-    ),
-    // The security rows from before 0105 given their MACs, once, where the anchor store is (S206 V6).
-    job(
-      'security_legacy_seal',
-      createLegacySealJob({
-        ...clocked,
-        anchors: anchorLog,
-        retentionDays: config.securityEvents.retentionDays,
-      }),
-      LEGACY_SEAL_EVERY_MS,
       LONG_MS,
     ),
     // Every organisation's marks of work held to what its own rows say (4D2e D6).

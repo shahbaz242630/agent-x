@@ -63,6 +63,8 @@ import type { LimitReservationsTables } from '@agentx/core/modules/limit-reserva
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { mandateOf, type MandatesTables, mandateVersionOf } from '@agentx/core/modules/mandates';
 import {
+  APPROVAL_HORIZON_MS,
+  approvedAtLooks,
   type AuthorityNow,
   decisionOf,
   type Pausable,
@@ -124,9 +126,15 @@ const choiceOf = (events: { readonly type: string; readonly actions: readonly st
 /**
  * The organisation's pending requests whose rows look stopped, after `after`
  * when given, not run: their IDs, each to be judged by the signed states of
- * what it names. The job's candidates, and its due read's.
+ * what it names. The job's candidates, and its due read's. With `lapsedToo`,
+ * the job's alone, approved ones whose approval looks past APPROVAL_HORIZON_MS
+ * too (AT13d): the hand-off voids those at its first look, every run it
+ * visits an organisation holding one; the job takes any it finds as it visits.
+ * Not the due read's: no write marks the job as an approval lapses (that wants
+ * a trigger of its own), so the hourly look would read every one as a mark
+ * missed.
  */
-const stoppedRows = (tx: VoidTx, orgId: string, now: Date, after: string | undefined) =>
+const stoppedRows = (tx: VoidTx, orgId: string, now: Date, after: string | undefined, lapsedToo: boolean) =>
   tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each judged through its signed states before anything moves
     .selectFrom('spend_requests.requests as r')
@@ -217,6 +225,14 @@ const stoppedRows = (tx: VoidTx, orgId: string, now: Date, after: string | undef
             most: MOST_CARRIED_CHANGES,
           }),
         ]),
+        ...(lapsedToo
+          ? [
+              where.and([
+                where('r.status', 'in', ['APPROVED', 'INSTRUCTION_READY']),
+                where(approvedAtLooks('r.org_id', 'r.id'), '<=', new Date(now.getTime() - APPROVAL_HORIZON_MS)),
+              ]),
+            ]
+          : []),
       ]);
     });
 
@@ -231,7 +247,7 @@ async function stoppedByTheirRows(
   most: number,
   after: string | undefined,
 ): Promise<readonly string[]> {
-  const rows = await stoppedRows(tx, orgId, now, after).orderBy('r.id').limit(most).execute();
+  const rows = await stoppedRows(tx, orgId, now, after, true).orderBy('r.id').limit(most).execute();
   return rows.map(({ id }) => id);
 }
 
@@ -289,7 +305,7 @@ export const requestVoidsDue = (tx: VoidTx, orgId: string, now: Date) =>
       .case()
       .when(
         eb.or([
-          eb.exists(stoppedRows(tx, orgId, now, undefined).limit(1)),
+          eb.exists(stoppedRows(tx, orgId, now, undefined, false).limit(1)),
           eb.exists(lapsedRows(tx, orgId, now, undefined).limit(1)),
         ]),
       )
@@ -376,6 +392,8 @@ export interface AuthorityRead {
   readonly supplier: SupplierRecord;
   /** The key its row names, read at its level (3a): the hand-off holds it to the request's signed state. */
   readonly agentKey: AgentKeyCheck;
+  /** Its decision's newest decided or approved event's sealed time: voidRequest ages an approved one by it (AT13d). */
+  readonly approvedAt: Date;
 }
 
 /**
@@ -485,8 +503,10 @@ export async function authorityOf(
       stopped.map(([which, { id, status }]) => [which, id, status] as const),
     ),
     cancelledBy,
+    at: now,
   };
-  return { named, authority, source: source.source, supplier: supplier.supplier, agentKey };
+  const { approvedAt } = decision;
+  return { named, authority, source: source.source, supplier: supplier.supplier, agentKey, approvedAt };
 }
 
 export interface RequestVoids {
@@ -522,8 +542,7 @@ export function createRequestVoids({
     key: { readonly orgId: string; readonly id: string },
   ): Promise<Voided> => {
     const now = clock.now();
-    const { named, authority } = await authorityOf(tx, states, key, now);
-    return voidRequest(tx, states, keys, key, { named, authority }, now);
+    return voidRequest(tx, states, keys, key, await authorityOf(tx, states, key, now), now);
   };
 
   /** Voids the request if its authority no longer stands, logging what came of it; whether it did. Never throws. */

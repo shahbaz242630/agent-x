@@ -31,7 +31,8 @@
 //    stop's chosen pause or cancel): a cause the voids job would void it for
 //    denies it now, as the voids job would (decision 3: a stop chosen to
 //    cancel, a mandate replaced and not carried, the supplier's payee changed,
-//    a source that can no longer fund); a stop chosen to pause, a freeze, a
+//    a source that can no longer fund, an approval sealed more than
+//    APPROVAL_HORIZON_MS ago: AT13d); a stop chosen to pause, a freeze, a
 //    mandate or agent not ACTIVE, a source or supplier not usable, or a carry
 //    that hasn't reached it yet, leaves it waiting, re-checked on the next run
 //    (PRD §5.3: on resume every waiting request is re-checked);
@@ -261,7 +262,10 @@ type Cleared =
  * stop chosen to pause (the voids job's own read leaves it standing), or a
  * carry that hasn't reached it yet (decision 3); each re-checked next run.
  */
-function waitingFor({ named, authority, source, supplier }: Omit<AuthorityRead, 'agentKey'>, now: Date): string {
+function waitingFor(
+  { named, authority, source, supplier }: Omit<AuthorityRead, 'agentKey' | 'approvedAt'>,
+  now: Date,
+): string {
   return [
     authority.organizationStatus !== 'ACTIVE' && 'organization',
     authority.agentStatus !== 'ACTIVE' && 'agent',
@@ -560,7 +564,7 @@ export function createHandoff({
     const pause = await handoffPauseOf(tx, 'share', { keys, logger: log, digest: anchoring?.digest });
     if (pause.outcome !== 'running') return { outcome: 'waiting', why: `pause_${pause.outcome}` };
     const now = clock.now();
-    const { named, authority, source, supplier, agentKey } = await authorityOf(tx, states, key, now);
+    const { named, authority, source, supplier, agentKey, approvedAt } = await authorityOf(tx, states, key, now);
     if (agentKey.outcome !== 'found') throw new Error(`A request's agent key can't be believed: ${id}`);
     // The payee as the supplier's verified version in force names it: one carried through a details change chosen to
     // pause (E3) has the same payee, so this is never the request's own, and never an agent's (PRD §6).
@@ -569,8 +573,9 @@ export function createHandoff({
       named.supplierVersionId === null
         ? ({ outcome: 'missing' } as const)
         : await versionOf(tx, states, { orgId, id: named.supplierVersionId }, supplier.id);
-    // A cause the voids job would void it for: denied now, its holdings freed, as that job would (decision 3).
-    const voided = await voidRequest(tx, states, keys, key, { named, authority }, now);
+    // A cause the voids job would void it for: denied now, its holdings freed, as that job would (decision 3); an
+    // approval past APPROVAL_HORIZON_MS among them (AT13d), aged by the sealed events, never a row's column.
+    const voided = await voidRequest(tx, states, keys, key, { named, authority, approvedAt }, now);
     if (voided.outcome === 'voided') return { outcome: 'denied', causes: voided.causes.join(',') };
     if (voided.outcome !== 'standing') return { outcome: 'not_approved' };
     const waiting = waitingFor({ named, authority, source, supplier }, now);

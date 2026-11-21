@@ -23,6 +23,7 @@ export {
 } from './domain/asked.ts';
 export { SPEND_REQUEST, type SpendRequestStatus } from './domain/spend-request.ts';
 export {
+  approvedAtLooks,
   checkHoldings,
   holdingsRecordChecks,
   type HoldingsChecked,
@@ -83,6 +84,7 @@ export {
   waitedOut,
 } from './domain/approval-wait.ts';
 export {
+  APPROVAL_HORIZON_MS,
   type AuthorityNow,
   isPending,
   isPendingChoice,

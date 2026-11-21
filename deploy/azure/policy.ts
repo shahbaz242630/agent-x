@@ -405,9 +405,11 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 /**
  * The anchors' store can't be read after a start, has gone long unread or unwritten, or was never named (4D2e E, PL-58);
  * a file too large for this process, the check behind on its turns, or past the organisations it notes (E6): capacity, never tamper.
+ * And a production web copy that can't read the anchors past the alert limit, or hold them (AT13b): its decisions go on
+ * without the digest.
  */
 const ANCHOR_STORE_LINES =
-  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on")';
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on", "audit.web_anchors_read_failing", "audit.web_anchors_beyond_memory")';
 
 /**
  * The fewest days of point-in-time restore a deployment keeps (ADR-002). In production, also twice the days the full pass
@@ -2714,8 +2716,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorReaderRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_READ_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workloads: ['chain-restore'],
-      called: "the chain repair's read of the anchors",
+      workloads: ['chain-restore', ...ANCHOR_READERS[expected.environment]],
+      called: "the anchors' read-only role",
       on: 'the anchors container',
     },
     problem,
@@ -2731,10 +2733,15 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       container: (workload) => (copy !== undefined && holdsJobs(workload) ? copyAnchorsOf(copy) : ANCHOR_CONTAINER),
       holders: (workload) => {
         if (holdsJobs(workload) || isJobOf(workload, ['operator'])) return ownOf(workload, keepers);
-        return isJobOf(workload, ['chain-restore']) ? ownOf(workload, readers) : undefined;
+        if (isJobOf(workload, ['chain-restore'])) return ownOf(workload, readers);
+        // A `web` copy reads the anchors its jobs keep (AT13b), as whichever role its identity holds there (production's
+        // reader role; staging's API keeps them out of a load run). Not on Stage G's copy, whose jobs keep their own.
+        return copy === undefined && isWebCopy(workload)
+          ? [...ownOf(workload, keepers), ...ownOf(workload, readers)]
+          : undefined;
       },
       holder:
-        "the app that holds the jobs and the operator's job keep the chains' anchors and the chain repair's job reads them",
+        "the app that holds the jobs and the operator's job keep the chains' anchors, and the API's web copies and the chain repair's job read them",
       store: 'store',
     },
     problem,
@@ -2753,6 +2760,13 @@ function holdsJobs(workload: PredictedResource): boolean {
   return role === 'all' || role === 'jobs';
 }
 
+/** An API app at AGENTX_ROLE web (4D2e D13): it serves and holds no job. */
+function isWebCopy(workload: PredictedResource): boolean {
+  if (workload.type !== TYPES.app) return false;
+  const settings = apiSettingsOf(workload);
+  return settings !== undefined && roleIn(settings) === 'web';
+}
+
 /** Of a store's identities, the workload's own: a workload is told only the identity it runs as, its role given to it. */
 const ownOf = (workload: PredictedResource, identities: readonly PredictedResource[]): readonly PredictedResource[] =>
   identities.filter((identity) => workloadOf(identity.name) === jobWorkloadOf(workload.name));
@@ -2765,6 +2779,15 @@ const ownOf = (workload: PredictedResource, identities: readonly PredictedResour
 const ANCHOR_KEEPERS: Readonly<Record<Expectations['environment'], readonly string[]>> = {
   production: ['jobs'],
   staging: ['api', 'jobs'],
+};
+
+/**
+ * Who reads the chains' anchors and keeps none, beside the chain repair (main.bicep `anchorReaders`, AT13b): production's
+ * API, whose `web` copies hold their decisions to the signed states' digest the jobs keep there. Staging's API keeps them.
+ */
+const ANCHOR_READERS: Readonly<Record<Expectations['environment'], readonly string[]>> = {
+  production: ['api'],
+  staging: [],
 };
 
 /**
@@ -2786,31 +2809,40 @@ const isJobOf = (workload: PredictedResource, jobs: readonly string[]): boolean 
  */
 const anchorEpoch: Check = (snapshot, _expected, add) => {
   const values = new Map<string, readonly string[]>();
+  let webCopies = 0;
   for (const workload of workloadsIn(snapshot)) {
-    const set = containersOf(workload).flatMap((container) =>
-      list(at(container, 'env'))
-        .filter((entry) => at(entry, 'name') === 'AGENTX_ANCHOR_EPOCH')
-        .map((entry) => text(at(entry, 'value'))),
-    );
-    if (holdsJobs(workload) || isJobOf(workload, STORE_WRITERS)) {
+    const settingsNamed = (name: string): string[] =>
+      containersOf(workload).flatMap((container) =>
+        list(at(container, 'env'))
+          .filter((entry) => at(entry, 'name') === name)
+          .map((entry) => text(at(entry, 'value'))),
+      );
+    const set = settingsNamed('AGENTX_ANCHOR_EPOCH');
+    // A `web` copy told where the anchors are reads them (AT13b): the same epoch, or it would read another's files.
+    const readsAnchors = isWebCopy(workload) && settingsNamed('AGENTX_AUDIT_ANCHORS_URL').length > 0;
+    if (readsAnchors) webCopies += 1;
+    if (holdsJobs(workload) || isJobOf(workload, STORE_WRITERS) || readsAnchors) {
       values.set(workload.name, set);
     } else if (set.length > 0) {
       add({
         rule: 'anchor-epoch',
         resource: workload.name,
         message:
-          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the operator's job and the chain repair's",
+          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the web copies that read its anchors, the operator's job and the chain repair's",
       });
     }
   }
   const said = [...values.values()];
   const first = said[0]?.[0];
-  if (said.length !== 1 + STORE_WRITERS.length || said.some((set) => set.length !== 1 || set[0] !== first)) {
+  if (
+    said.length !== 1 + webCopies + STORE_WRITERS.length ||
+    said.some((set) => set.length !== 1 || set[0] !== first)
+  ) {
     add({
       rule: 'anchor-epoch',
       resource: 'the deployment',
       message:
-        "must set AGENTX_ANCHOR_EPOCH once on the app that holds the jobs, once on the operator's job and once on the chain repair's, to the same value",
+        "must set AGENTX_ANCHOR_EPOCH once on the app that holds the jobs, once on each web copy that reads its anchors, once on the operator's job and once on the chain repair's, to the same value",
     });
   }
 };
@@ -5269,9 +5301,6 @@ export const ALLOWED_TYPES: readonly string[] = [
   // AZ11's endpoint and its zone group, allowed a foundation ahead of them (AZ11a, as #627's alerts were).
   'Microsoft.Network/privateEndpoints',
   'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
-  // AZ32 (c)'s stray sep-agentx-staging-apps, unattached since Azure refused it on the apps subnet (S207): goes from
-  // here and guardrails.bicep together at the next access run after it's deleted (a note there would ask for one now).
-  'Microsoft.Network/serviceEndpointPolicies',
   'Microsoft.Network/virtualNetworks',
   'Microsoft.OperationalInsights/workspaces',
   'Microsoft.OperationalInsights/workspaces/savedSearches',

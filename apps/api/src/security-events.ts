@@ -32,7 +32,7 @@ import {
   type OrgEventsToRead,
   type OrgSecurityEvent,
 } from '@agentx/core/modules/security-events';
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -70,15 +70,12 @@ export function createSecurityEventPages({
   database,
   keys,
   ids,
-  clock,
   logger,
   directory,
 }: {
   readonly database: Database<SecurityEventsReadTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
-  /** What the security seal's rule for a row from before 0105 reads by (org-events.ts). */
-  readonly clock: Clock;
   readonly logger: Logger;
   /** The login service's names; undefined when none is set up, and people are named from the kept copy. */
   readonly directory: DirectoryNames | undefined;
@@ -87,7 +84,7 @@ export function createSecurityEventPages({
   return {
     async page(orgId, asked, correlationId) {
       // Each row's MAC checked as it is read (S206 V6).
-      const checked = { keys, clock, logger: logger.child({ correlationId }) };
+      const checked = { keys, logger: logger.child({ correlationId }) };
       const read = await work.answered(orgId, correlationId, async (tx, states) => {
         const page = await heldSecurityEventsPage(tx, states, keys, orgId, asked, checked);
         if (page === 'tampered') throw new SecurityEventsRefused(503, 'INTEGRITY_FAILED');

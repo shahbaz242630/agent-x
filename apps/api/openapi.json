@@ -142,6 +142,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "APPROVAL_LAPSED",
+                    "description": "The request was approved more than 7 days ago (time it was paused counts) and not yet paid, so it was cancelled before it reached the bank, and the money held for it was freed. The agent asks again with a new request if it is still needed."
+                  },
+                  {
+                    "type": "string",
                     "const": "APPROVAL_REJECTED",
                     "description": "A person at your organisation rejected this request, so it will not be paid. Its reservation was released; ask again only if what you need has changed."
                   },

@@ -108,9 +108,11 @@ type Stop = (w: World, mandateId: string) => Promise<unknown>;
 
 /**
  * Every cause a void may give (VOID_CAUSES), and each way voidCauses reaches it: a stop chosen to cancel, or a row
- * moved to a new version. A consent run out by time is its own test below: no write makes it.
+ * moved to a new version. A consent run out by time is its own test below: no write makes it. Nor does an approval
+ * lapsing (AT13d): the hand-off voids it at its first look (handoff.db.test.ts), the job as it visits for anything
+ * (request-voids.db.test.ts), and no mark claims it.
  */
-const WAYS: Readonly<Record<VoidCause, readonly (readonly [string, Stop])[]>> = {
+const WAYS: Readonly<Record<Exclude<VoidCause, 'APPROVAL_LAPSED'>, readonly (readonly [string, Stop])[]>> = {
   ORG_FROZEN: [['the organisation frozen', (w, mandateId) => moved(w, mandateId, 'organization', 'cancel')]],
   AGENT_SUSPENDED: [['the agent suspended', STOPS['the agent suspended']]],
   MANDATE_NOT_IN_FORCE: [
@@ -130,7 +132,9 @@ const WAYS: Readonly<Record<VoidCause, readonly (readonly [string, Stop])[]>> = 
   SUPPLIER_CHANGED: [['the supplier’s details changed', STOPS['the supplier’s details changed']]],
 };
 
-const EVERY_WAY = VOID_CAUSES.flatMap((cause) => WAYS[cause].map(([what, stop]) => [what, cause, stop] as const));
+const MARKED_CAUSES = VOID_CAUSES.filter((cause) => cause !== 'APPROVAL_LAPSED');
+
+const EVERY_WAY = MARKED_CAUSES.flatMap((cause) => WAYS[cause].map(([what, stop]) => [what, cause, stop] as const));
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -160,8 +164,9 @@ beforeEach(async () => {
 });
 
 describe('every cause a void may give marks the voids as its stop commits', () => {
-  it('walks every member of VOID_CAUSES, each by at least one way', () => {
-    expect(new Set(EVERY_WAY.map(([, cause]) => cause))).toEqual(new Set(VOID_CAUSES));
+  it('walks every member of VOID_CAUSES a write makes, each by at least one way: all but an approval lapsing', () => {
+    expect(new Set(EVERY_WAY.map(([, cause]) => cause))).toEqual(new Set(MARKED_CAUSES));
+    expect(VOID_CAUSES).toEqual([...MARKED_CAUSES, 'APPROVAL_LAPSED']);
   });
 
   it.each(EVERY_WAY)(

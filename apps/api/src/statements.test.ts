@@ -127,13 +127,13 @@ const wordsHash = (words: Readonly<Record<string, string>>): string =>
 describe('each set of words keeps its version (CO3)', () => {
   // A change to a set's words changes its hash here: raise its version with it, then pin the new pair.
   const PINNED: Readonly<Record<StatementId, readonly [version: number, hash: string]>> = {
-    suspend: [4, 'cb8ec543f7589ec5'],
-    reactivate: [3, 'e80551f61530572b'],
-    freeze: [3, 'e8ba90c94a99e318'],
-    unfreeze: [2, 'd1a925047af7cbfa'],
-    payee: [3, 'c46ec74995255d33'],
-    supplier_details: [2, '52c4aa926f704008'],
-    consent_expiry: [1, '54d5ef0d4458adbb'],
+    suspend: [5, 'a4a0770d9ac0729a'],
+    reactivate: [4, '223f9d8eacd6e353'],
+    freeze: [4, '0124de39bbd8a591'],
+    unfreeze: [3, 'cadba9387791ed14'],
+    payee: [4, '5baacf1b6dfc18e9'],
+    supplier_details: [3, 'b360edca3fd1cd0f'],
+    consent_expiry: [2, 'b63bdebad5edda75'],
     old_key: [1, 'c2707e20fcf29743'],
     supersede: [2, '897b3fe414a361ba'],
     monthly_cap: [1, '2663db9dac21f125'],

@@ -565,7 +565,6 @@ resource allowedTypes 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
             'Microsoft.Network/privateDnsZones/virtualNetworkLinks'
             'Microsoft.Network/privateEndpoints'
             'Microsoft.Network/privateEndpoints/privateDnsZoneGroups'
-            'Microsoft.Network/serviceEndpointPolicies'
             'Microsoft.Network/virtualNetworks'
             'Microsoft.OperationalInsights/workspaces'
             'Microsoft.OperationalInsights/workspaces/savedSearches'

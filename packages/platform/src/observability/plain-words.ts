@@ -324,8 +324,28 @@ export const PLAIN_WORDS = {
   },
   'audit.anchor_store_not_set': {
     happened: 'This API was started with no store named for the audit anchors.',
-    broke: 'Anchors are in memory alone: a restart forgets them, and a history wound back meanwhile goes unseen.',
+    broke: 'A copy running the jobs forgets every anchor at a restart; a web copy decides without the digest.',
     next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_ANCHORS_URL: playbook section H.',
+  },
+  'audit.web_anchors_read_failed': {
+    happened: 'A web copy of the API could not read the audit anchors or their digest just now.',
+    broke: 'Its decisions go on with what it read before. Payments are not affected: they are checked at the hand-off.',
+    next: 'Nothing if it passes: it tries again each minute. If it keeps failing, a lasting warning follows.',
+  },
+  'audit.web_anchors_read_failing': {
+    happened: 'A web copy of the API has kept failing to read the audit anchors or their digest.',
+    broke: 'Its decisions go on with today’s checks, without the digest. Payments are not affected.',
+    next: 'Check the API identity’s anchors reader role on the anchors container, and that the foundation deploy has run.',
+  },
+  'audit.web_anchors_beyond_memory': {
+    happened: 'A web copy of the API could not hold the audit anchors in memory.',
+    broke: 'Its decisions go on with today’s checks, without the digest. Payments are not affected.',
+    next: 'Give the API a larger heap, as the line counts, then restart it. Nothing was tampered with.',
+  },
+  'audit.anchor_store_write_refused': {
+    happened: 'An API copy that only reads the audit anchors tried to write a file to their store.',
+    broke: 'Nothing: the write was refused before it left the process, and the store is unchanged.',
+    next: 'This is a bug in the API: report it with this line. Only the copy that runs the jobs writes anchors.',
   },
   'audit.anchor_store_read_failed': {
     happened:
@@ -1067,16 +1087,6 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet. A list past its limit stops working; a hold clearing only gets slower.',
     next: 'Find out why the organisation has so many, and tell the developer.',
   },
-  'identity.session_last_use_unsealed': {
-    happened: 'A console sign-in from before the last-use seal came back, so it was ended.',
-    broke: 'That person is signed out and signs in again once; nothing else is affected.',
-    next: 'Expected for a while after the release that added the seal. Long after it, treat it as tampering.',
-  },
-  'identity.session_last_use_mismatch': {
-    happened: "A console sign-in's last-use seal did not match, so it was ended.",
-    broke: 'That person signs in again; nothing else is affected.',
-    next: 'Expected during a release or after a rollback (then clear the seals per the incident playbook before rolling forward). Otherwise treat it as tampering.',
-  },
   'identity.session_sweep_failed': {
     happened: 'The hourly clean-up of ended sign-in sessions failed.',
     broke: 'Some old sign-in sessions were not deleted this time; none can be used again.',
@@ -1179,27 +1189,6 @@ export const PLAIN_WORDS = {
     happened: 'An email notice could not be sent this time.',
     broke: 'Its recipient has not been told yet; a notice that can never be sent is given up at once.',
     next: 'It is tried again later, up to 8 tries in all. If many fail, check the email service and the login service.',
-  },
-  'notification.legacy_seal_failed': {
-    happened: 'The background pass that seals old email notices failed, perhaps on a slow database.',
-    broke: 'Those notices wait unsent; the API itself carries on as usual.',
-    next: 'The next start tries again. Any still unsent a day on raises the alarm.',
-  },
-  'notification.legacy_seal_unanchored': {
-    happened: 'Old email notices were sealed, but the platform chain could not be anchored right after.',
-    broke: 'That record stays unanchored until the anchor check next succeeds.',
-    next: 'Look at the anchor store now: is it reachable and writable? The pass does not run again.',
-  },
-  'notification.legacy_seal_no_anchor': {
-    happened:
-      'Old email notices were not sealed: the anchor store held no anchor of the platform chain to check it by.',
-    broke: 'Those notices wait unsent, and the next start tries again.',
-    next: 'Check the anchor store is set and readable. Any still unsent a day on raises the alarm.',
-  },
-  'notification.legacy_seal_incomplete': {
-    happened: 'At start, some old email notices could not be sealed: an organisation’s records could not be read.',
-    broke: 'Those notices wait unsent, and the next start tries again.',
-    next: 'Restart the API once the database is quiet. Any still unsent a day on raises the alarm.',
   },
   'notification.recipient_not_member': {
     happened: 'An email was due to someone who had left the organisation, or lost the role it was for.',
@@ -1343,6 +1332,11 @@ export const PLAIN_WORDS = {
     broke: "That organisation's requests stay waiting for now; nothing was rejected on what could not be read.",
     next: 'It is tried again in about 5 minutes. If it keeps failing, check the integrity alarms for that organisation.',
   },
+  'spend_request.capacity_kept': {
+    happened: 'A spend request decided or approved about 8 days ago or more ended without giving its amount back.',
+    broke: 'That amount stays counted as used until its month and payee window roll over. Nothing was paid.',
+    next: 'Nothing for one after a long pause. Many in one organisation may mean tampering: check its alarms.',
+  },
   'request_void.failed': {
     happened:
       'A pending spend request could not be cancelled after something it uses was stopped with its requests cancelled.',
@@ -1400,21 +1394,6 @@ export const PLAIN_WORDS = {
     happened: 'Security counts could not be saved to the database.',
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
-  },
-  'security.legacy_seal_failed': {
-    happened: 'The API could not seal the security records from before this release.',
-    broke: 'Those older records are not shown or counted until sealed; the API and new records are unaffected.',
-    next: 'The next start takes the sealing up again. If it keeps failing, check the database and the platform audit chain.',
-  },
-  'security.legacy_seal_stalled': {
-    happened: 'The sealing of older security records found its lock taken twice running, an hour apart.',
-    broke: 'Old records stay unsealed; a row edited meanwhile may hide.',
-    next: 'Find which database session holds the lock, and treat it as an incident.',
-  },
-  'security.legacy_seal_unanchored': {
-    happened: 'A record of the older security records’ sealing could not be anchored at once.',
-    broke: 'Until the next anchor check anchors it, that record could be removed without the next sealing noticing.',
-    next: 'Nothing to do if the next anchor check succeeds. If anchoring keeps failing, check the anchor store.',
   },
   'security_event_seal.failed': {
     happened: 'The daily seal of the security records could not be made or checked this run.',

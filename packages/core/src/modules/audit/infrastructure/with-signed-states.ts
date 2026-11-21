@@ -180,7 +180,8 @@ const unrecorded = new Map<string, Map<string, Found>>();
 const recording = new Map<string, number>();
 /**
  * The signed states' digest every read here is held to (AT13, audit-trail.ts): the one the process that keeps the anchors
- * keeps, given at boot (`checkStatesWith`); none in a process that keeps none, whose reads are as before it.
+ * keeps, or the one a `web` copy reads from the same store (AT13b), given at boot (`checkStatesWith`); none in a process
+ * with neither, whose reads are as before it.
  */
 let stateDigest: Pick<StateDigest, 'latest'> | undefined;
 

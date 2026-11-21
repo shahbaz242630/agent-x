@@ -38,6 +38,7 @@ import {
   actorEventsSince,
   type AuditDetails,
   type AuditTables,
+  DIGEST_FORGET_MARGIN_MS,
   type SignedChange,
   type SignedStates,
   type TamperSign,
@@ -60,13 +61,13 @@ import {
   windowsGivenBack,
   type WindowTake,
 } from '../../limit-reservations/index.ts';
-import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
+import { DAY_MS, HOUR_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { waitedOut } from '../domain/approval-wait.ts';
 import type { HeldSealed } from '../domain/holdings.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
-import { type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
+import { APPROVAL_HORIZON_MS, type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
-import { decisionOf, decisionsOf, NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
+import { type Decided, decisionOf, decisionsOf, NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -261,14 +262,20 @@ export type Voided =
  * source and supplier as they now stand, read by the caller through their
  * signed states before this, in ADR-006's order (levels 2–6); `named`, the
  * IDs it read them
- * by, which must be the request's own.
+ * by, which must be the request's own; `approvedAt`, its decision's
+ * `approvedAt` as the caller read it (Decided): an approved one's age past
+ * APPROVAL_HORIZON_MS voids it too (AT13d).
  */
 export async function voidRequest(
   tx: EndingsTransaction,
   states: SignedStates,
   keys: KeyProvider,
   key: { readonly orgId: string; readonly id: string },
-  { named, authority }: { readonly named: SubjectsNamed; readonly authority: AuthorityNow },
+  {
+    named,
+    authority,
+    approvedAt,
+  }: { readonly named: SubjectsNamed; readonly authority: AuthorityNow; readonly approvedAt: Date },
   now: Date,
 ): Promise<Voided> {
   const read = await requestOf(tx, states, key, 'change');
@@ -286,7 +293,10 @@ export async function voidRequest(
     throw new Error(`A spend request was judged by another's authority: ${key.id}`);
   }
   const against = decidedAgainst(read.state);
-  const causes = voidCauses({ mandateId: request.mandateId, ...against }, authority);
+  // Its status as this verified read locks it: one still waiting has no approval to age. Read by the caller before the
+  // lock, an approval committed between the two leaves its decision's time here: older, so never kept past the horizon.
+  const approved = request.status === 'APPROVAL_REQUIRED' ? null : approvedAt;
+  const causes = voidCauses({ mandateId: request.mandateId, ...against, approvedAt: approved }, authority);
   if (causes.length === 0) return { outcome: 'standing' };
   await voidedWith(tx, states, keys, key, causes, now);
   return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };
@@ -305,7 +315,7 @@ export const voidedWith = (
   key: { readonly orgId: string; readonly id: string },
   causes: readonly ReasonCode[],
   now: Date,
-  total: 'own' | 'caller' = 'own',
+  total: Total = 'own',
 ) =>
   endHolding(
     tx,
@@ -452,7 +462,10 @@ export async function voidPendingOf(
   await lockClaimsOf(tx, pending);
   // Their month totals (11a, GM-1a), each locked once, in order of ID, before any move takes the head: two brakes
   // whose requests share totals take them alike, never crosswise.
-  const held = await heldInOf(tx, states, orgId, found);
+  // Those past what the digest remembers keep their capacity (capacityKept): their totals, windows and reservations
+  // aren't touched, and their endings say so.
+  const { giving: held, kept } = capacityOf(states, await heldInOf(tx, states, orgId, found), now);
+  const keptOf = new Map(kept.map(({ requestId, amount }) => [requestId, amount]));
   const totals = await lockedTotalsOf(tx, states, orgId, held);
   // Then their payee windows (11b, GM-1b), each once, in order of ID, after every total.
   const takes = held.flatMap(({ windows }) => windows);
@@ -463,7 +476,10 @@ export async function voidPendingOf(
     takes.map(({ id }) => id),
     'change',
   );
-  for (const id of pending) await voidedWith(tx, states, keys, { orgId, id }, [cause], now, 'caller');
+  for (const id of pending) {
+    const amount = keptOf.get(id);
+    await voidedWith(tx, states, keys, { orgId, id }, [cause], now, amount === undefined ? 'caller' : { kept: amount });
+  }
   // One record a total, for every request of the batch it held.
   for (const { key, total, of } of totals) {
     const amount = of.reduce((sum, request) => sum + request.amount, 0n);
@@ -603,7 +619,7 @@ async function endHolding(
   event: 'expire' | 'cancel' | 'deny',
   at: Date,
   change: SignedChange,
-  total: 'own' | 'caller' = 'own',
+  total: Total = 'own',
 ): Promise<void> {
   await lockReservationsOf(tx, [key.id]);
   await lockClaimsOf(tx, [key.id]);
@@ -614,28 +630,88 @@ async function endHolding(
   // Read for change already by every caller, in this transaction: the same row, verified again.
   // Its payee windows likewise (11b, GM-1b), after the total.
   const held = total === 'own' ? await lockedTotalOf(tx, states, key, 'change') : null;
-  const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, change);
+  const own = held === null ? undefined : capacityOf(states, [held], at);
+  const kept = typeof total === 'object' ? total.kept : own?.kept[0]?.amount;
+  // Past what the digest remembers its capacity is kept (capacityKept), and its signed ending says so: so its
+  // reservation still HELD is believed by the holdings check, and the books stay level.
+  const ending = kept === undefined ? change : keptBy(change, kept);
+  const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, ending);
   movedAsRead(moved, `A spend request read as open didn't ${event}`);
-  if (held !== null) {
+  if (held !== null && own !== undefined && own.giving.length > 0) {
     await givenBack(tx, states, key.orgId, held, { at, change: givenBackBy(change, [held]) });
     await windowsGivenBack(tx, states, key.orgId, held.windowsRead, held.windows, {
       at,
       change: windowsGivenBackBy(change),
     });
   }
-  await releaseReservationsOf(tx, { requestId: key.id, at });
+  // Kept, its reservation stays HELD: its month total and windows still count it, so they and it agree.
+  if (kept === undefined) await releaseReservationsOf(tx, { requestId: key.id, at });
   await releaseClaim(tx, { requestId: key.id, releasedAt: at });
 }
+
+/**
+ * Who gives an ending's capacity back: the ending itself (`own`), its caller (a brake's batch, `caller`), or no one, as
+ * its caller found it kept (`kept`, its amount): the ending then says so.
+ */
+type Total = 'own' | 'caller' | { readonly kept: bigint };
+
+/** An ending's change saying its capacity was kept (AT13d): the holdings check reads it, sealed. */
+const keptBy = (change: SignedChange, amount: bigint): SignedChange => ({
+  ...change,
+  details: { ...change.details, capacityKept: true, keptAmountMinor: amount.toString() },
+});
 
 /**
  * Where a request's capacity is held: its month's total, by its signed state and sealed decision, and its amount;
  * and the payee windows it was added to, at the hour its decision sealed (GM-1b).
  */
-interface HeldIn {
+export interface HeldIn {
   readonly requestId: string;
   readonly key: MonthTotalKey;
   readonly amount: bigint;
   readonly windows: readonly WindowTake[];
+  /** Its sealed approval, approved (Decided's `approvedAt`), else its sealed decision: what capacityKept ages. */
+  readonly sealedAt: Date;
+}
+
+/** Room for the app's clock and Postgres's beside the digest's own margin: the skip errs on keeping capacity. */
+const CLOCKS_MS = HOUR_MS;
+
+/**
+ * Whether a request ending at `at` keeps its capacity in its month total and payee windows (AT13d, review of #756):
+ * sealed past what the digest remembers, an owner could have rolled a paid or ended one back to pending, and giving
+ * its amount back again would let a new request past a cap. Its reservation stays HELD, counted by them as before, and
+ * its signed ending says so (keptBy), so the holdings check finds the books level; its order claim is released.
+ */
+export const capacityKept = (sealedAt: Date, at: Date): boolean =>
+  at.getTime() - sealedAt.getTime() >= APPROVAL_HORIZON_MS + DIGEST_FORGET_MARGIN_MS - CLOCKS_MS;
+
+/** What capacityKept ages a request by: its sealed approval once approved, its sealed decision while it waits. */
+export const sealedAtOf = (
+  status: SpendRequestRecord['status'],
+  { decidedAt, approvedAt }: Pick<Decided, 'decidedAt' | 'approvedAt'>,
+): Date => (status === 'APPROVAL_REQUIRED' ? decidedAt : approvedAt);
+
+/** Those whose capacity goes back at an ending at `at`, and those that keep it, each kept said as its own warning. */
+export function capacityOf(
+  states: Pick<SignedStates, 'logger'>,
+  held: readonly HeldIn[],
+  at: Date,
+): { readonly giving: readonly HeldIn[]; readonly kept: readonly HeldIn[] } {
+  const giving: HeldIn[] = [];
+  const kept: HeldIn[] = [];
+  for (const request of held) {
+    if (!capacityKept(request.sealedAt, at)) {
+      giving.push(request);
+      continue;
+    }
+    kept.push(request);
+    states.logger.warn('spend_request.capacity_kept', {
+      requestId: request.requestId,
+      sealedAt: request.sealedAt.toISOString(),
+    });
+  }
+  return { giving, kept };
 }
 
 /**
@@ -656,12 +732,21 @@ async function heldInOf(
     orgId,
     requests.map(({ id }) => id),
   );
-  return requests.flatMap((request) => {
-    const held = decided.get(request.id)?.held;
-    if (held === undefined || held === null) return [];
-    const key = { agentId: request.agentId, month: held.month, currency: request.amount.currency };
-    return [{ requestId: request.id, key, amount: request.amount.minor, windows: windowsHeldOf(orgId, request, held) }];
-  });
+  return requests.flatMap((request) => heldIn(orgId, request, decided.get(request.id)));
+}
+
+/** Where the request's capacity is held, by its decision as sealed (heldInOf): none for no decision, or none sealed. */
+export function heldIn(
+  orgId: string,
+  request: Pick<SpendRequestRecord, 'id' | 'agentId' | 'supplierId' | 'amount' | 'status'>,
+  decision: Pick<Decided, 'held' | 'decidedAt' | 'approvedAt'> | undefined,
+): readonly HeldIn[] {
+  if (decision === undefined || decision.held === null) return [];
+  const held = decision.held;
+  const key = { agentId: request.agentId, month: held.month, currency: request.amount.currency };
+  const sealedAt = sealedAtOf(request.status, decision);
+  const windows = windowsHeldOf(orgId, request, held);
+  return [{ requestId: request.id, key, amount: request.amount.minor, windows, sealedAt }];
 }
 
 /**

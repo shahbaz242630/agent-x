@@ -29,9 +29,18 @@
 // having voided only a batch, the request-voids job the rest. A pause, or a
 // reactivation that names no cancel, never does.
 //
+// An approval stands APPROVAL_HORIZON_MS unpaid (AT13d, partner decision of 21
+// Nov; R-15): past it the request is void (APPROVAL_LAPSED), and the agent asks
+// again with a new request. Its age runs from its approval as the audit chain
+// sealed it (the newest of its decided and approved events: a person's approval,
+// or the policy's own at its decision), never a row's column, to the time it is
+// judged; one still waiting for approval has none, and expires by its own wait.
+// So no version of a request older than the horizon can be handed off, which is
+// what lets the signed states' digest forget its request past it.
+//
 // Each cause found is kept with the void, in the order the engine checks
 // them; none and the request stands.
-import type { ReasonCode } from '../../../shared-kernel/index.ts';
+import { DAY_MS, type ReasonCode } from '../../../shared-kernel/index.ts';
 import type { SpendRequestStatus } from './spend-request.ts';
 
 /** The statuses a request holds capacity in before hand-off: each one a cascade ends (0046's index). */
@@ -64,11 +73,26 @@ export const PAUSED_IN = {
   supplier: ['SUSPENDED', 'UNVERIFIED'],
 } as const satisfies Record<Pausable, readonly string[]>;
 
+/**
+ * How long an approval stands unpaid (AT13d): long enough for a hand-off held by a pause of a few days, short enough
+ * that the digest needn't keep a request's facts for good (R-15).
+ */
+export const APPROVAL_HORIZON_MS = 7 * DAY_MS;
+
+/** Whether an approval sealed at `approvedAt` has lapsed by `at`: at the horizon exactly it has, erring on refusing. */
+export const approvalLapsed = (approvedAt: Date, at: Date): boolean =>
+  at.getTime() - approvedAt.getTime() >= APPROVAL_HORIZON_MS;
+
 /** What a request was decided under, as its signed state names it. */
 export interface DecidedUnder {
   readonly mandateId: string | null;
   readonly mandateVersionId: string | null;
   readonly supplierVersionId: string | null;
+  /**
+   * When it was approved, as the chain sealed it (its newest decided or approved event, Postgres's clock): null while
+   * it waits for approval, which has no approval to age.
+   */
+  readonly approvedAt: Date | null;
 }
 
 /** The authority behind it as it now stands, each read through its signed state: none for one not found. */
@@ -113,6 +137,8 @@ export interface AuthorityNow {
   readonly paused: ReadonlySet<Pausable>;
   /** Those stopped since the request's decision by a stop chosen to cancel, whatever they are now (F1 G1). */
   readonly cancelledBy: ReadonlySet<Pausable>;
+  /** When it is judged (the app's clock): what an approval's age runs to (AT13d). */
+  readonly at: Date;
 }
 
 /** Every cause a void may give, in the engine's order: what the voids' marks must each answer (4D2e D9). */
@@ -123,6 +149,7 @@ export const VOID_CAUSES = [
   'SOURCE_NOT_USABLE',
   'SUPPLIER_NOT_VERIFIED',
   'SUPPLIER_CHANGED',
+  'APPROVAL_LAPSED',
 ] as const satisfies readonly ReasonCode[];
 export type VoidCause = (typeof VOID_CAUSES)[number];
 
@@ -158,5 +185,11 @@ export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly V
     const carried = decided.supplierVersionId !== null && supplier.pausedFrom.includes(decided.supplierVersionId);
     if (!carried) causes.push('SUPPLIER_CHANGED');
   }
+  causes.push(...lapsedOf(decided, now));
   return causes;
+}
+
+/** APPROVAL_LAPSED for an approval past the horizon by the time it is judged; none for one waiting. */
+function lapsedOf({ approvedAt }: DecidedUnder, { at }: AuthorityNow): readonly VoidCause[] {
+  return approvedAt !== null && approvalLapsed(approvedAt, at) ? ['APPROVAL_LAPSED'] : [];
 }

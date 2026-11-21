@@ -25,7 +25,7 @@ import type { Notice, NoticeRole } from '../domain/notice.ts';
 import { CHAIN_START, createAuditTrail } from '../../audit/index.ts';
 import { createNoticeCheck, NOTICE_CHECK_PASSED } from './notice-check.ts';
 import { queuedSeal } from './notice-seals.ts';
-import { createOutbox, MOST_ATTEMPTS, type OutboxTables, sealNoticesFromBefore } from './outbox.ts';
+import { createOutbox, MOST_ATTEMPTS, type OutboxTables } from './outbox.ts';
 import { createNoticeSender, type Notifier } from './sender.ts';
 
 const server = inject('postgres');
@@ -566,43 +566,6 @@ describe(`SEC-DB-17 a queued warning, as the database's owner can change it (S20
     );
 
     expect(await checkAt(later(HOUR_MS))).toEqual([{ noticeId: id, reason: 'not_as_recorded' }]);
-  });
-
-  it('seals at a start only a notice with no seal and no record: one stripped of its seal stays refused', async () => {
-    const recorded = await queued();
-    const legacy = ids.next();
-    await asOwner(
-      `insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts,
-        next_attempt_at, before_seals) values ($1, $2, $3, 'second_factor_added', $3, $4, 0, $4, true)`,
-      [legacy, org, VICTIM, START],
-    );
-    await asOwner(
-      'update notifications.outbox set mac = null, mac_key_version = null, before_seals = true where id = $1',
-      [recorded],
-    );
-
-    // Records that can't be read say nothing of which notices have none: none is sealed.
-    const admin = database.as('admin');
-    await admin.query('revoke select on audit.events from agentx_app');
-    try {
-      expect(await app.transaction().execute((tx) => sealNoticesFromBefore(tx, app, keys))).toEqual({
-        sealed: 0,
-        complete: false,
-      });
-    } finally {
-      await admin.query('grant select on audit.events to agentx_app');
-    }
-    expect(await app.transaction().execute((tx) => sealNoticesFromBefore(tx, app, keys))).toEqual({
-      sealed: 1,
-      complete: true,
-    });
-    const sealed = await app.selectFrom('notifications.outbox').select(['id', 'mac']).orderBy('id').execute();
-    expect(sealed.map(({ id, mac }) => [id, mac !== null])).toEqual(
-      [
-        [recorded, false],
-        [legacy, true],
-      ].toSorted(([a], [b]) => String(a).localeCompare(String(b))),
-    );
   });
 
   it('refuses the release before’s notice with no seal, and its mark sent with no end seal, each whole', async () => {

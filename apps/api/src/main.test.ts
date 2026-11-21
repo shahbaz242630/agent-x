@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
+import { checkStatesWith, statesDigest } from '@agentx/core/modules/audit';
 import { type CheckedDeclaration, declarePartner, startedLive } from '@agentx/platform/config';
 import type { DatabaseConnectionOptions } from '@agentx/platform/db';
 import { API_PURPOSES } from '@agentx/platform/keys';
@@ -515,7 +516,6 @@ const EVERY_TIMER: [string, number][] = [
   ['person_seal_check', 1_800_000],
   ['security_seal', 1_800_000],
   ['security_tally', 300_000],
-  ['security_legacy_seal', 3_600_000],
   ['org_work_rediscovery', 3_600_000],
   ...EACH_PROCESS,
 ];
@@ -1185,6 +1185,37 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     expect((await server?.inject('/health'))?.json()).toEqual({ status: 'ok' });
     await stopped(host);
     expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'api.stopped' }));
+  });
+
+  it('`web` reads the anchors and the digest where a store is named, read only, and gives core the digest (AT13b)', async () => {
+    checkStatesWith(undefined);
+    const anchors = mkdtempSync(path.join(tmpdir(), 'agentx-api-anchors-'));
+    folders.push(anchors);
+    const { host, server } = await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_AUDIT_ANCHORS_DIR: anchors });
+    expect(server?.server.listening).toBe(true);
+    expect(phase2Jobs.scheduled).toEqual([['anchors_read', 60_000], ...EACH_PROCESS]);
+    expect(statesDigest()).toBeDefined();
+    // No anchor check, no lease: it reads, never keeps.
+    expect(anchorChecks.intervals).toEqual([]);
+    expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded']);
+    await stopped(host);
+    checkStatesWith(undefined);
+  });
+
+  it('`all` keeps its own anchors and digest alone: no read-only copy beside them, nor one in their place (AT13b)', async () => {
+    const anchors = mkdtempSync(path.join(tmpdir(), 'agentx-api-anchors-'));
+    folders.push(anchors);
+    for (const env of [ENV, { ...ENV, AGENTX_AUDIT_ANCHORS_DIR: anchors }]) {
+      checkStatesWith(undefined);
+      phase2Jobs.scheduled.length = 0;
+      const { host } = await start({ ...env, AGENTX_ROLE: 'all' });
+      expect(phase2Jobs.scheduled.map(([name]) => name)).not.toContain('anchors_read');
+      // The digest the anchor check records into, given by oneCopyJobs: never replaced by a web copy's, or by none.
+      expect(statesDigest()).toBeDefined();
+      expect((statesDigest() as { record?: unknown }).record).toEqual(expect.any(Function));
+      await stopped(host);
+    }
+    checkStatesWith(undefined);
   });
 
   it('`jobs` runs every job and no server, stays up with nothing listening, and stops cleanly', async () => {
