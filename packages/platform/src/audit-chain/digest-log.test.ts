@@ -769,6 +769,9 @@ describe('the digest’s fair share: many small organisations never push out a l
     expect(said(capture, 'audit.state_digest_chain_gave_way')).toEqual([
       expect.objectContaining({ orgId: ORG, what: 'chain' }),
     ]);
+    // Given way whole, it reads as before the digest: no walk is owed it.
+    expect(log.owed(CHAIN, 10n)).toBe(false);
+    expect(log.owed(THIRD, 10n)).toBe(true);
     expect(log.latest(THIRD, 'agent', '0199a0f0-0000-7000-8000-000000010000')).toBe(1n);
     expect(log.latest(OTHER, 'agent', '0199a0f0-0000-7000-8000-0000000103e8')).toBe(1001n);
   });
@@ -848,12 +851,14 @@ describe('a chain given way comes back once there is room again (AT13e)', () => 
     expect(log.covers(CHAIN, 700n)).toBe(false);
     expect(log.owed(CHAIN, 700n)).toBe(true);
 
-    // A restart agrees: back, covered, the requests held.
+    // A restart agrees: back, covered, the requests held, from the deltas alone as from a snapshot.
     time.held.at += 10 * MINUTE;
     await log.flush();
+    for (const name of namesUnder(fake.files, 'snapshots')) fake.files.delete(name);
     const again = await restartedWith(fake, time);
-    expect(again.log.covers(CHAIN, 600n)).toBe(true);
+    // Back as written, not coming back: past its coverage it waits, as any chain does.
     expect(again.log.covers(CHAIN, 700n)).toBe(false);
+    expect(again.log.covers(CHAIN, 600n)).toBe(true);
     expect(again.log.owed(CHAIN, 600n)).toBe(false);
     expect(again.log.latest(CHAIN, 'spend_request', FIRST_REQUEST)).toBe(1n);
     expect(said(again.capture, 'audit.state_digest_chain_gave_way')).toEqual([]);
@@ -921,6 +926,12 @@ describe('a chain given way comes back once there is room again (AT13e)', () => 
     expect(said(capture, 'audit.state_digest_chain_coming_back')).toHaveLength(1);
     expect(log.coverage(CHAIN)).toBeUndefined();
     expect(log.owed(CHAIN, 600n)).toBe(true);
+    expect(log.covers(CHAIN, 600n)).toBe(true);
+    time.held.at += 10 * MINUTE;
+    await log.flush();
+    const last = await restartedWith(fake, time);
+    expect(last.log.covers(CHAIN, 600n)).toBe(true);
+    expect(last.log.owed(CHAIN, 600n)).toBe(true);
   });
 });
 
@@ -932,7 +943,7 @@ describe('the digest’s mark lines, read (AT13e)', () => {
     const bad = named(1, '0199a0f0-0000-7000-8000-00000000f001');
     const good = named(2, '0199a0f0-0000-7000-8000-00000000f002');
     const chain = `organisation:${ORG}`;
-    fake.files.set(bad, closedFile(bad, [JSON.stringify({ c: chain, t: START.toISOString(), b: 5 })]));
+    fake.files.set(bad, closedFile(bad, [JSON.stringify({ c: chain, t: START.toISOString(), n: 3, b: 5 })]));
     fake.files.set(good, closedFile(good, [JSON.stringify({ c: chain, t: START.toISOString(), n: 1 })]));
     time.held.at += 6 * MINUTE;
     const restarted = digestOn(fake, { time, capture });
@@ -942,5 +953,26 @@ describe('the digest’s mark lines, read (AT13e)', () => {
     expect(restarted.log.covers(CHAIN, 9n)).toBe(true);
     expect(restarted.log.owed(CHAIN, 9n)).toBe(true);
     expect(restarted.log.owed(CHAIN, 0n)).toBe(false);
+  });
+
+  it('a stretch from before a newer generation, read first (a late delta of a copy that lost the lease), stands for nothing', async () => {
+    const { fake, time } = digestOn();
+    const at = (minutes: number) => String(9_999_999_999_999 - (START.getTime() + minutes * MINUTE)).padStart(13, '0');
+    const named = (minutes: number, id: string) => `e1/digests/deltas/${at(minutes)}-${id}`;
+    const late = named(2, '0199a0f0-0000-7000-8000-00000000f002');
+    const mark = named(1, '0199a0f0-0000-7000-8000-00000000f001');
+    const chain = `organisation:${ORG}`;
+    const hash = Buffer.alloc(32, 600 % 200).toString('hex');
+    // Named later, so read first: a walk's stretch from before the chain began coming back.
+    fake.files.set(
+      late,
+      closedFile(late, [JSON.stringify({ c: chain, t: START.toISOString(), f: '0', u: '600', h: hash, k: 1 })]),
+    );
+    fake.files.set(mark, closedFile(mark, [JSON.stringify({ c: chain, t: START.toISOString(), n: 1 })]));
+    time.held.at += 6 * MINUTE;
+    const restarted = digestOn(fake, { time });
+    await restarted.log.read();
+    expect(restarted.log.coverage(CHAIN)).toBeUndefined();
+    expect(restarted.log.owed(CHAIN, 600n)).toBe(true);
   });
 });

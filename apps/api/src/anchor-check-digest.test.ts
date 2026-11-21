@@ -126,6 +126,20 @@ describe('the anchor check keeping the platform chain’s signed states in the d
     expect(restarted.digest.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(5n);
     expect(restarted.digest.latest(PLATFORM, 'identity.session_ended', 'p/r')).toBe(2n);
   });
+
+  it('its digest files lost: the first whole walk after a start covers it from its first event, the anchor where it was', async () => {
+    const fake = createFakeWriteOnceStore();
+    const platform: { current: WalkedReport } = { current: { ...walk(4n, new Map([[PAUSE, 3n]])), walkedFrom: 0n } };
+    const chains = [{ chain: PLATFORM, verify: () => Promise.resolve(platform.current) }];
+    const first = process(fake, chainOf({ current: walk(1n) }), { chains });
+    await first.check.run();
+    for (const name of digestFiles(fake)) fake.files.delete(name);
+
+    const restarted = process(fake, chainOf({ current: walk(1n) }), { chains });
+    await restarted.check.run();
+    expect(restarted.digest.covers(PLATFORM, 4n)).toBe(true);
+    expect(restarted.digest.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(3n);
+  });
 });
 
 describe('the anchor check keeping the signed states’ digest (AT13)', () => {

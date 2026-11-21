@@ -142,6 +142,17 @@ async function keep(sessionId: string): Promise<unknown> {
   return kept?.kept;
 }
 
+/** The person's sessions all ended at `at`, as a role change does (membership-changes.ts), the end signed. */
+const allEnded = (userId: string, at: Date) =>
+  app.transaction().execute(async (tx) => {
+    await lockSessionsOf(tx, [userId]);
+    await endSessionsOf(tx, userId, at);
+    await createPlatformChain({ keys, ids }).record(
+      tx as unknown as PlatformTransaction,
+      sessionsEndedEvent(userId, at),
+    );
+  });
+
 /** The owner swaps the session's row for the one it kept, MACs and all. */
 async function swapRow(sessionId: string, kept: unknown): Promise<void> {
   await asOwner('delete from identity.sessions where id = $1', [sessionId]);
@@ -306,13 +317,7 @@ describe(`SEC-DB-14 R-15 the owner can't put back a session that was ended (S207
       return ended;
     });
 
-  /** The person's sessions all ended at `at`, as a role change does (membership-changes.ts), the end signed. */
-  const endAll = (userId: string, at: Date) =>
-    app.transaction().execute(async (tx) => {
-      await lockSessionsOf(tx, [userId]);
-      await endSessionsOf(tx, userId, at);
-      await platform.record(tx as unknown as PlatformTransaction, sessionsEndedEvent(userId, at));
-    });
+  const endAll = allEnded;
 
   const rowOf = (sessionId: string) =>
     app.selectFrom('identity.sessions').select('id').where('id', '=', sessionId).executeTakeFirst();
@@ -1247,15 +1252,14 @@ describe(`AT13c R-15 a signed end deleted below the platform chain's anchor, its
     }
   });
 
-  it("held to the digest: the person's sessions all ended, that end deleted, a session put back is none", async () => {
-    const signed = await signedIn();
+  it("held to the digest: the person's newest all-ended deleted, an older one left, a session put back is none", async () => {
+    const userId = await person();
+    // An end before the session's sign-in, which never touched it, stays: only the newest is taken away.
+    await allEnded(userId, new Date(START.getTime() - 1000));
+    const opened = await sessions().open(app, userId, { idpSessionId: 'V1_1', authTime: START, amr: PASSKEY });
+    const signed = { userId, ...opened };
     const kept = await keep(signed.sessionId);
-    const at = new Date(START.getTime() + 1000);
-    await app.transaction().execute(async (tx) => {
-      await lockSessionsOf(tx, [signed.userId]);
-      await endSessionsOf(tx, signed.userId, at);
-      await platform.record(tx as unknown as PlatformTransaction, sessionsEndedEvent(signed.userId, at));
-    });
+    await allEnded(userId, new Date(START.getTime() + 1000));
     const digest = await digested();
     const restore = await deletedEnd('identity.sessions_ended', 'person', signed.userId);
     try {
