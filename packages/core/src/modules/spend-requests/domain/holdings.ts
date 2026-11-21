@@ -143,7 +143,7 @@ const WINDOW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
  * The window IDs a decision sealed (`payeeWindows`, comma between): null for none (decided before GM-1b). The chain's
  * MAC keeps the event as the app wrote it, so text not in that form is no list of windows at all: null too.
  */
-function windowsOf(sealed: unknown): readonly string[] | null {
+export function windowsOf(sealed: unknown): readonly string[] | null {
   if (typeof sealed !== 'string') return null;
   const ids = sealed.split(',');
   return ids.every((id) => WINDOW_ID.test(id)) ? ids : null;

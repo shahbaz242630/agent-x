@@ -198,6 +198,7 @@ export function createHoldingsCheck({
       const trail = createAuditTrail({ keys, ids });
       const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
         cutOverPayeeWindows(tx, states, orgId, {
+          keys,
           payments: paymentHoldsOf,
           record: (event) => trail.record(tx, orgId, event),
           at: clock.now(),
@@ -220,9 +221,10 @@ export function createHoldingsCheck({
     let windows = 0;
     let mismatched = 0;
     let tampered = 0;
-    const at = clock.now();
     do {
       const from: string | null = after;
+      // Each page compared from its own time: a pass over many pages runs on as hours go by and windows let go.
+      const at = clock.now();
       const checked: WindowsChecked = await withSignedStates(database, orgId, services(log), (tx, states) =>
         checkPayeeWindows(tx, states, orgId, { after: from, limit: MOST_WINDOWS_CHECKED_A_PAGE, at }),
       );
@@ -232,7 +234,7 @@ export function createHoldingsCheck({
       after = checked.next;
     } while (after !== null);
     const missing = await withSignedStates(database, orgId, services(log), (tx, states) =>
-      windowsMissing(tx, states, orgId, at),
+      windowsMissing(tx, states, orgId, clock.now()),
     );
     return { windows, windowsMismatched: mismatched, windowsTampered: tampered, windowsMissing: missing };
   };

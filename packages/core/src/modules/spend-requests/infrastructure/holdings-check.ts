@@ -33,7 +33,13 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
 
 import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
-import { keptZonesOf, type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
+import {
+  keptZonesOf,
+  type LimitReservationsTables,
+  reservationsFor,
+  WINDOWS_NAMED_ACTION,
+  WINDOWS_NAMED_SUBJECT,
+} from '../../limit-reservations/index.ts';
 import { periodOf } from '../../../shared-kernel/index.ts';
 import { bankKeyOf } from '../domain/asked.ts';
 import { type ApprovalClock, approvalWaitOf, expiresAtOf } from '../domain/approval-wait.ts';
@@ -44,6 +50,7 @@ import {
   holdingsMatch,
   holdsNow,
   type PaymentHolds,
+  windowsOf,
 } from '../domain/holdings.ts';
 import { requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
@@ -194,27 +201,39 @@ export async function decisionsRead(
   ids: readonly string[],
 ): Promise<Map<string, Decided> | 'tampered'> {
   if (ids.length === 0) return new Map();
+  // With each one the windows' cutover named the windows of (GM-1b), on the same read.
   const history = await states.historyOf(tx, orgId, {
-    subjectTypes: [SPEND_REQUESTS.subject],
+    subjectTypes: [SPEND_REQUESTS.subject, WINDOWS_NAMED_SUBJECT],
     subjectIds: ids,
-    actions: ['spend_request.decided'],
-    limit: MOST_DECIDED_EVENTS * ids.length,
+    actions: ['spend_request.decided', WINDOWS_NAMED_ACTION],
+    limit: (MOST_DECIDED_EVENTS + 1) * ids.length,
   });
   if (history.outcome !== 'read') return 'tampered';
-  const decided = history.events.map(
-    ({ event, recordedAt, seq }) =>
-      [
-        event.subject.id.toLowerCase(),
-        { held: heldOf(event.details), decidedAt: recordedAt, waitHours: approvalWaitOf(event.details), seq },
-      ] as const,
-  );
+  const named = history.events.filter(({ event }) => event.action === WINDOWS_NAMED_ACTION);
+  const decided = history.events
+    .filter(({ event }) => event.action !== WINDOWS_NAMED_ACTION)
+    .map(
+      ({ event, recordedAt, seq }) =>
+        [
+          event.subject.id.toLowerCase(),
+          { held: heldOf(event.details), decidedAt: recordedAt, waitHours: approvalWaitOf(event.details), seq },
+        ] as const,
+    );
   // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.
   const counts = new Map<string, number>();
   for (const [id] of decided) counts.set(id, (counts.get(id) ?? 0) + 1);
   if ([...counts.values()].some((count) => count > MOST_DECIDED_EVENTS))
     throw new TooManyEventsToRead(MOST_DECIDED_EVENTS);
   // In chain order, so each request's last decided event is the one left.
-  return new Map(decided);
+  const read = new Map<string, Decided>(decided);
+  // A decision before GM-1b sealed no windows: those its cutover named stand for them (the chain's MAC keeps both).
+  for (const { event } of named) {
+    const id = event.subject.id.toLowerCase();
+    const found = read.get(id);
+    if (found?.held?.windows !== null) continue;
+    read.set(id, { ...found, held: { ...found.held, windows: windowsOf(event.details.payeeWindows) } });
+  }
+  return read;
 }
 
 /**

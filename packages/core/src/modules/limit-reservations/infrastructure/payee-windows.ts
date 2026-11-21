@@ -219,6 +219,15 @@ export function splitHeldLess(
   return payeeSplit(supplier ?? 0n, key ?? 0n, pair ?? 0n);
 }
 
+/**
+ * The windows' cutover naming the windows a request decided before GM-1b was opened in (its supplier's, its key's and
+ * the pair's), where its reservation's payee key holds to its decision's payee seal: about the request, by its ID,
+ * under a subject of its own (its own signed state's events are its state changes alone). A request with none is
+ * counted in its supplier's window alone.
+ */
+export const WINDOWS_NAMED_SUBJECT = 'spend_request_windows';
+export const WINDOWS_NAMED_ACTION = 'spend_request.windows_named';
+
 /** The payee windows' cutover event: about the organisation, by its ID, under a subject of its own. */
 export const WINDOWS_CUTOVER_SUBJECT = 'payee_windows';
 export const WINDOWS_CUTOVER_ACTION = 'payee_windows.cutover';
@@ -410,8 +419,12 @@ async function reservedByHour(
     from limit_reservations.reservations r
     cross join lateral (
       -- Its request's newest decided event, the one the holdings check reads.
+      -- Windowed: its decision sealed its windows, or (decided before GM-1b) the windows' cutover named them.
       select pg_catalog.strpos(e.details, '"heldMonth"') > 0 as month_sealed,
-             pg_catalog.strpos(e.details, '"payeeWindows"') > 0 as windowed
+             (pg_catalog.strpos(e.details, '"payeeWindows"') > 0 or exists (
+               select from audit.events n
+               where n.org_id = r.org_id and n.subject_type = ${WINDOWS_NAMED_SUBJECT}
+                 and n.subject_id = r.request_id and n.action = ${WINDOWS_NAMED_ACTION})) as windowed
       from audit.events e
       where e.org_id = r.org_id and e.subject_type = 'spend_request' and e.subject_id = r.request_id
         and e.action = 'spend_request.decided'

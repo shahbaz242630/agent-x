@@ -966,6 +966,65 @@ describe('an organisation made before GM-1b, until its cutover', () => {
     expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
+  it("counts a request decided before GM-1b in its key's windows where its reservation's key holds to its seal: a key moved since still counts it, and its ending gives back to them", async () => {
+    const { w, acting } = await ready({ madeBeforePayeeWindows: true });
+    const [first, second] = [supplierOf_(w), supplierOf_(w, 1)];
+    await payeeKeyOf(w, first, 'payee-1');
+    await cutOverByHand(w);
+    const held = await decided(acting, w, ORDER, first);
+    await asBeforeGm1b(w, [held.id]);
+    // The key moves to the second supplier within the month.
+    await payeeKeyOf(w, first, null);
+    await payeeKeyOf(w, second, 'payee-1');
+
+    await visit(w);
+    expect(lines('payee_windows.cut_over')).toEqual([expect.objectContaining({ opened: 3, mismatched: 0 })]);
+    const rows = [
+      supplierKey(first),
+      { supplierId: null, payeeKey: 'payee-1', currency: 'AED' },
+      { supplierId: first, payeeKey: 'payee-1', currency: 'AED' },
+    ];
+    for (const row of rows) expect(await heldIn(w, row)).toBe(ORDER);
+    // The key's new supplier is weighed with it: a second order to the payee in the day is a split.
+    expect(await decided(acting, w, ORDER, second)).toMatchObject(SPLIT);
+    await visit(w);
+    expect(lines('holdings_check.passed').at(-1)).toMatchObject({ windowsMismatched: 0, windowsMissing: 0 });
+
+    // Its ending gives back to the windows the cutover named for it.
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: held.id },
+        { kind: 'user', userId: '0199a0f0-0000-7000-8000-0000000000aa' },
+        clock.now(),
+      ),
+    );
+    for (const row of rows) expect(await heldIn(w, row)).toBe(row.supplierId === null ? ORDER : 0n);
+    await visit(w);
+    expect(lines('holdings_check.passed').at(-1)).toMatchObject({ windowsMismatched: 0, windowsMissing: 0 });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it("keeps a request decided before GM-1b in its supplier's window alone where its reservation's key doesn't hold to its seal", async () => {
+    const { w, acting } = await ready({ madeBeforePayeeWindows: true });
+    const supplierId = supplierOf_(w);
+    await payeeKeyOf(w, supplierId, 'payee-1');
+    await cutOverByHand(w);
+    const held = await decided(acting, w, ORDER, supplierId);
+    await asBeforeGm1b(w, [held.id]);
+    // The reservation's key changed past the app: the seal names another.
+    await asOwner(w, (owner) =>
+      owner.query("update limit_reservations.reservations set payee_key = 'payee-9' where request_id = $1", [held.id]),
+    );
+
+    await visit(w);
+    expect(lines('payee_windows.cut_over')).toEqual([expect.objectContaining({ opened: 1 })]);
+    expect(await heldIn(w, { supplierId: null, payeeKey: 'payee-1', currency: 'AED' })).toBe('none');
+    expect(await heldIn(w, { supplierId: null, payeeKey: 'payee-9', currency: 'AED' })).toBe('none');
+  });
+
   it('opens from the signed requests even where the owner cut the reservations, the mismatch alarmed', async () => {
     const { w, acting } = await ready({ madeBeforePayeeWindows: true });
     await cutOverByHand(w);
@@ -1011,6 +1070,7 @@ describe('an organisation made before GM-1b, until its cutover', () => {
     const cut = (w: World) =>
       withSignedStates(app, w.org, quiet(), (tx, states) =>
         cutOverPayeeWindows(tx, states, w.org, {
+          keys,
           payments: paymentHoldsOf,
           record: (event) => createAuditTrail({ keys, ids }).record(tx, w.org, event),
           at: clock.now(),

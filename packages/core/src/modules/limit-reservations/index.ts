@@ -65,6 +65,8 @@ export {
   type WindowTake,
   type WindowToWrite,
   WINDOWS_CUTOVER_ACTION,
+  WINDOWS_NAMED_ACTION,
+  WINDOWS_NAMED_SUBJECT,
   WINDOWS_CUTOVER_SUBJECT,
 } from './infrastructure/payee-windows.ts';
 export { type HeldByHour, heldAdded, hourOf, keptFromHour, windowFromHour } from './domain/held-by-hour.ts';
