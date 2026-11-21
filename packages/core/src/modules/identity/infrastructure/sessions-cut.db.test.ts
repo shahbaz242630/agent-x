@@ -541,10 +541,10 @@ describe(`AT13h, S208: a cut platform chain signs everyone out once, signed, ins
       }
       expect((await headRow()).seq).toBeGreaterThan(paused + 1n);
       expect(await pauseNow()).toBe('tampered');
-      // The sessions' reads still let the next sign-in in, held to the answer and raised by those writes.
+      // Those writes raised the head the sessions' reads are held to (they ran through it), and those reads go on.
+      expect(digest.heads(PLATFORM)?.accepted?.seen?.seq).toBe((await headRow()).seq);
       const next = await signedIn();
       expect(await copy(digest).use(app, next.cookie)).toBeDefined();
-      expect(digest.heads(PLATFORM)?.accepted?.seen?.seq).toBe((await headRow()).seq);
     } finally {
       checkStatesWith(undefined);
       await operator.destroy();
