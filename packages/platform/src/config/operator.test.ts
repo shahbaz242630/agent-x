@@ -287,11 +287,12 @@ describe("E10c the operator's write-once container for an audit export", () => {
 });
 
 describe("SEC-AV-03 the operator's command refuses to start on a bad config", () => {
-  it("accepts the witness log's two settings (TR-1), deployed before the command reads them", () => {
+  it("accepts the witness log's three settings (TR-1), deployed before the command reads them", () => {
     const url = 'https://stagentxevstg01.blob.core.windows.net/audit-witness';
     const witness = {
       AGENTX_AUDIT_WITNESS_URL: url,
       AGENTX_AUDIT_WITNESS_CLIENT_ID: '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+      AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: `${url}-snapshots`,
     };
     expect(problemsWith({ ...LOCAL, ...witness })).toEqual([]);
     // The control: a name one letter off is still refused.

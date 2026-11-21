@@ -60,11 +60,15 @@ export const throwawayAnchorsContainer = (id: string): string => `audit-anchors-
 /** The copy's witness log (apps.bicep, TR-1): its own too, for the same reason, never staging's `audit-witness`. */
 export const throwawayWitnessContainer = (id: string): string => `audit-witness-g-${id}`;
 
+/** The copy's witness snapshots (apps.bicep, TR-1), apart from its heads as staging's are. */
+export const throwawaySnapshotsContainer = (id: string): string => `audit-witness-snapshots-g-${id}`;
+
 /**
- * A copy's anchors or witness container by name, and nothing else: never staging's own `audit-anchors` or
- * `audit-witness`, the only containers a Stage G removal may name.
+ * A copy's anchors, witness or witness snapshots container by name, and nothing else: never staging's own
+ * `audit-anchors`, `audit-witness` or `audit-witness-snapshots` (each lacks the `-g-<id>` end), the only containers a
+ * Stage G removal may name.
  */
-export const THROWAWAY_ANCHORS_CONTAINER = /^audit-(?:anchors|witness)-g-[a-z0-9]{8}$/;
+export const THROWAWAY_ANCHORS_CONTAINER = /^audit-(?:anchors|witness|witness-snapshots)-g-[a-z0-9]{8}$/;
 
 /** The database comment that marks a copy: it names the server, so a copy can't vouch for another. */
 export const sentinelOf = (server: string): string => `agentx-stage-g-throwaway ${server}`;
