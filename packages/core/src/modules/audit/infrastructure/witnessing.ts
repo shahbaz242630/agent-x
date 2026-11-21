@@ -30,7 +30,7 @@ export const chainWitness = (): ChainWitness | undefined => witness;
 interface Written {
   readonly chain: Chain;
   klass: WitnessClass;
-  highest?: bigint;
+  highest?: { readonly seq: bigint; readonly hash: Buffer };
 }
 
 const writtenIn = new WeakMap<object, Map<string, Written>>();
@@ -48,11 +48,18 @@ export function witnessedWrite(tx: object, chain: Chain, klass: WitnessClass): v
   else held.klass = strongerClass(held.klass, klass);
 }
 
-/** A write of `chain` in `tx` that moved its head to `seq`: kept as the transaction's highest there. */
-export function wroteTo(tx: object, chain: Chain, seq: bigint): void {
+/** A write of `chain` in `tx` that moved its head to `head`: kept as the transaction's highest there. */
+export function wroteTo(tx: object, chain: Chain, head: { readonly seq: bigint; readonly hash: Buffer }): void {
   const held = writtenIn.get(tx)?.get(chainNameOf(chain));
-  if (held !== undefined && (held.highest === undefined || seq > held.highest)) held.highest = seq;
+  if (held !== undefined && (held.highest === undefined || head.seq > held.highest.seq)) held.highest = head;
 }
+
+/**
+ * The highest head `tx` moved `chain` to, once it committed: what the hand-off's gate witnesses before the bank's call
+ * (TR-1 F.5, `H_A`). None where nothing was written there, or no witness log is given.
+ */
+export const headWrittenIn = (tx: object, chain: Chain): { readonly seq: bigint; readonly hash: Buffer } | undefined =>
+  writtenIn.get(tx)?.get(chainNameOf(chain))?.highest;
 
 /** From a write's afterCommit: its head noted, where it is the highest the transaction moved the chain to. */
 export function noteCommitted(
@@ -61,7 +68,7 @@ export function noteCommitted(
   head: { readonly seq: bigint; readonly hash: Buffer } | undefined,
 ): void {
   const held = writtenIn.get(tx)?.get(chainNameOf(chain));
-  if (witness === undefined || head === undefined || held?.highest !== head.seq) return;
+  if (witness === undefined || head === undefined || held?.highest?.seq !== head.seq) return;
   witness.note(chain, head, held.klass);
 }
 

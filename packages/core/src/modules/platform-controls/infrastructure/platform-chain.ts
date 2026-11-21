@@ -82,10 +82,20 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
 import { afterCommit, JOB_ANSWER_WITHIN_MS, limitedTransaction } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type QueryResult, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
-import { chainWitness, noteCommitted, statesDigest, witnessedWrite, wroteTo } from '../../audit/index.ts';
+import {
+  chainWitness,
+  MOST_WALKED_WITHIN,
+  noteCommitted,
+  type ReadAhead,
+  statesDigest,
+  walkWithin,
+  type WithinWalk,
+  witnessedWrite,
+  wroteTo,
+} from '../../audit/index.ts';
 import { checkedPlatformEvent, type PlatformEvent, platformEventContent } from '../domain/event.ts';
 import type { PlatformControlsTables } from './tables.ts';
 
@@ -467,24 +477,8 @@ function writerFor(
 function readerFor(tx: PlatformTransaction, keys: KeyProvider): ChainReader & ChainEdgeReader {
   return {
     async edges(anchored) {
-      // One statement, so all of it comes from one moment. Each on the events' key, whatever the chain's length.
-      const { rows } = await sql<Record<string, unknown>>`
-        select (select pg_catalog.count(*) from platform_controls.audit_head) as heads,
-               h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
-               (select pg_catalog.min(p.seq) from platform_controls.audit_events p) as lowest,
-               (select pg_catalog.max(p.seq) from platform_controls.audit_events p) as highest,
-               (select p.hash from platform_controls.audit_events p where p.seq = h.seq limit 1) as head_event_hash,
-               (select pg_catalog.count(distinct p.seq) from platform_controls.audit_events p
-                where p.seq > h.seq - ${LAST_COUNTED} and p.seq <= h.seq) as last_stored,
-               e.*, e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
-        from (values (1)) as one (x)
-        left join (select * from platform_controls.audit_head limit 1) as h on true
-        left join platform_controls.audit_events e on e.seq = ${anchored}
-      `.execute(tx);
-      // One row always (`values` and left joins), but two where two events share a number, the table's key
-      // gone: neither is the one anchored.
-      const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
-      return edgesIn(row, contentOf(row));
+      const { rows } = await platformEdgesRead(anchored).execute(tx);
+      return platformEdgesOf(rows);
     },
 
     async countBetween(after, upTo) {
@@ -512,19 +506,69 @@ function readerFor(tx: PlatformTransaction, keys: KeyProvider): ChainReader & Ch
     },
 
     async events(after, upTo, limit) {
-      const rows = await platformEventsSigned(tx)
-        .where('e.seq', '>', after)
-        .where('e.seq', '<=', upTo)
-        .orderBy('e.seq')
-        .limit(limit)
-        .execute();
-      return rows.map((row) => {
-        const sealed = sealedSigned(keys, CHAIN, row);
-        const content = contentOf(row);
-        return sealed === undefined || content === undefined ? undefined : { ...sealed, content };
-      });
+      const rows = await platformEventsRead(tx, after, upTo, limit).execute();
+      return rows.map((row) => platformEntryOf(keys, row));
     },
   };
+}
+
+/**
+ * The platform chain's edges and the event numbered `anchored`, in one statement, so all of it comes from one moment.
+ * Each on the events' key, whatever the chain's length.
+ */
+const platformEdgesRead = (anchored: bigint) => sql<Record<string, unknown>>`
+  select (select pg_catalog.count(*) from platform_controls.audit_head) as heads,
+         h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
+         (select pg_catalog.min(p.seq) from platform_controls.audit_events p) as lowest,
+         (select pg_catalog.max(p.seq) from platform_controls.audit_events p) as highest,
+         (select p.hash from platform_controls.audit_events p where p.seq = h.seq limit 1) as head_event_hash,
+         (select pg_catalog.count(distinct p.seq) from platform_controls.audit_events p
+          where p.seq > h.seq - ${LAST_COUNTED} and p.seq <= h.seq) as last_stored,
+         e.*, e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
+  from (values (1)) as one (x)
+  left join (select * from platform_controls.audit_head limit 1) as h on true
+  left join platform_controls.audit_events e on e.seq = ${anchored}
+`;
+
+/** platformEdgesRead's row as the chain's edges. */
+function platformEdgesOf(rows: readonly Readonly<Record<string, unknown>>[]) {
+  // One row always (`values` and left joins), but two where two events share a number, the table's key gone: neither
+  // is the one anchored.
+  const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
+  return edgesIn(row, contentOf(row));
+}
+
+/** Up to `limit` platform events after `after` and at most `upTo`, in number order, each with its signature. */
+const platformEventsRead = (tx: PlatformTransaction, after: bigint, upTo: bigint, limit: number) =>
+  platformEventsSigned(tx).where('e.seq', '>', after).where('e.seq', '<=', upTo).orderBy('e.seq').limit(limit);
+
+/** One platform event row as the chain checks it, or undefined where it can't be read. */
+function platformEntryOf(keys: KeyProvider, row: Readonly<Record<string, unknown>>): StoredEntry | undefined {
+  const sealed = sealedSigned(keys, CHAIN, row);
+  const content = contentOf(row);
+  return sealed === undefined || content === undefined ? undefined : { ...sealed, content };
+}
+
+/**
+ * The statements that walk the platform chain from `from` to its head (TR-1 F.4), for a caller to send on a trip it
+ * makes anyway (sendTogether): its edges at `from`, then the events past it the walk may take. Their answers go to
+ * platformWalked, in this order.
+ */
+export const platformWalkReads = (tx: PlatformTransaction, from: CheckedPoint, most: number = MOST_WALKED_WITHIN) =>
+  [platformEdgesRead(from.seq), platformEventsRead(tx, from.seq, from.seq + BigInt(most), most)] as const;
+
+/** platformWalkReads' answers walked from `from` (walkWithin): the head reached, every hash on the way, or why not. */
+export function platformWalked(
+  keys: KeyProvider,
+  [edges, events]: readonly [QueryResult<unknown>, QueryResult<unknown>],
+  from: CheckedPoint,
+  most: number = MOST_WALKED_WITHIN,
+): Promise<WithinWalk> {
+  const read: ReadAhead[] = (events.rows as Readonly<Record<string, unknown>>[]).map((row) => ({
+    seq: typeof row.seq === 'bigint' ? row.seq : -1n,
+    entry: platformEntryOf(keys, row),
+  }));
+  return walkWithin(keys, CHAIN, platformEdgesOf(edges.rows as Readonly<Record<string, unknown>>[]), read, from, most);
 }
 
 /**
@@ -756,7 +800,7 @@ export function createPlatformChain({
       content: platformEventContent(event, details),
     });
     moved.head = { seq: sealed.seq, hash: sealed.hash };
-    wroteTo(tx, CHAIN, sealed.seq);
+    wroteTo(tx, CHAIN, moved.head);
     return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
   };
 

@@ -97,6 +97,11 @@ export interface WitnessLog extends ChainWitness {
    * that gained a head from another copy, none where the read failed. Never throws.
    */
   refresh(): Promise<readonly Chain[]>;
+  /**
+   * refresh, answering whether that very read ended whole (TR-1 F.6: the hand-off's gate sends nothing on a read that
+   * began after its commit and failed). Never throws.
+   */
+  refreshWhole(): Promise<boolean>;
   /** When the last refresh that ended whole began: none before one has. */
   freshAt(): Date | undefined;
   /** The chain's heads at or below `upToSeq` let go: the anchor check found each on its walk and anchored past them. */
@@ -179,6 +184,12 @@ const chainOfName = (name: string): Chain =>
 const nameOf = (chain: Chain): string =>
   chainName(chain.kind === 'platform' ? chain : { kind: 'organisation', orgId: chain.orgId.toLowerCase() });
 
+/** What one refresh read: the chains that gained a head, and whether it ended whole. */
+interface Refreshed {
+  readonly chains: readonly Chain[];
+  readonly whole: boolean;
+}
+
 /** A head noted here, waiting for its Put. */
 interface Queued {
   readonly chain: string;
@@ -244,8 +255,8 @@ export function createWitnessLog({
 
   let state: 'unread' | 'read' = 'unread';
   let freshAt: Date | undefined;
-  let refreshing: Promise<readonly Chain[]> | undefined;
-  let refreshNext: Promise<readonly Chain[]> | undefined;
+  let refreshing: Promise<Refreshed> | undefined;
+  let refreshNext: Promise<Refreshed> | undefined;
   let readFailingSince: number | undefined;
   // The newest heads file read or written, by its name's time, and the names read since a look back past it.
   let headsFrom: number | undefined;
@@ -531,7 +542,7 @@ export function createWitnessLog({
     }
   };
 
-  const refreshOnce = async (): Promise<readonly Chain[]> => {
+  const refreshOnce = async (): Promise<Refreshed> => {
     const began = now();
     const gained = new Set<string>();
     try {
@@ -554,20 +565,34 @@ export function createWitnessLog({
       }
       readFailingSince = undefined;
       freshAt = began;
-      return [...gained].map(chainOfName);
+      return { chains: [...gained].map(chainOfName), whole: true };
     } catch (error) {
       failed('read', error);
-      return [];
+      return { chains: [], whole: false };
     }
   };
 
   /** A refresh begun, kept as the one under way until it ends. */
-  const startRefresh = (): Promise<readonly Chain[]> => {
-    const run: Promise<readonly Chain[]> = refreshOnce().finally(() => {
+  const startRefresh = (): Promise<Refreshed> => {
+    const run: Promise<Refreshed> = refreshOnce().finally(() => {
       if (refreshing === run) refreshing = undefined;
     });
     refreshing = run;
     return run;
+  };
+
+  /** Each refresh's chains, as refresh answers them: one promise a refresh. */
+  const chainsOf = new WeakMap<Promise<Refreshed>, Promise<readonly Chain[]>>();
+
+  /** The next refresh that starts after this call. */
+  const nextRefresh = (): Promise<Refreshed> => {
+    if (refreshing === undefined) return startRefresh();
+    // The one under way may have begun before this call: the next, shared by every caller meanwhile.
+    refreshNext ??= refreshing.then(() => {
+      refreshNext = undefined;
+      return startRefresh();
+    });
+    return refreshNext;
   };
 
   /** The whole held, as a snapshot, where this copy leads, hourly and only after a whole read. */
@@ -611,13 +636,14 @@ export function createWitnessLog({
       await settled([...unconfirmed.keys()].map(chainOfName));
     },
     refresh(): Promise<readonly Chain[]> {
-      if (refreshing === undefined) return startRefresh();
-      // The one under way may have begun before this call: the next, shared by every caller meanwhile.
-      refreshNext ??= refreshing.then(() => {
-        refreshNext = undefined;
-        return startRefresh();
-      });
-      return refreshNext;
+      // One promise a refresh, shared by every caller of it, as before refreshWhole.
+      const run = nextRefresh();
+      const chains = chainsOf.get(run) ?? run.then(({ chains: gained }) => gained);
+      chainsOf.set(run, chains);
+      return chains;
+    },
+    async refreshWhole(): Promise<boolean> {
+      return (await nextRefresh()).whole;
     },
     freshAt: () => freshAt,
     prune(chain: Chain, upToSeq: bigint): void {

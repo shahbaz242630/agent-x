@@ -36,7 +36,13 @@
 // tampered with before it can't be changed and sealed as if it were real.
 // Events about an authority object are its state changes only: activity goes
 // against other subjects.
-import { type AnchorPoint, sealState, stateSealDetails, stateSealMatches } from '@agentx/platform/audit-chain';
+import {
+  type AnchorPoint,
+  type HeadSeen,
+  sealState,
+  stateSealDetails,
+  stateSealMatches,
+} from '@agentx/platform/audit-chain';
 import {
   type AnswersOf,
   createStatusChanger,
@@ -98,6 +104,7 @@ import {
   TooManyEventsAboutObject,
   TooManyEventsToRead,
 } from './audit-trail.ts';
+import { type FrontierStart, judgeWitnessed, type WalkedWithin } from './chain-frontier.ts';
 
 /**
  * Where a row and its signed state part:
@@ -171,6 +178,23 @@ export const CHAIN_SUBJECT = 'audit_chain';
 
 /** The chain against its last anchor: still holding it, or wound back (the alarm raised). */
 type AnchorKept = { readonly outcome: 'kept' } | { readonly outcome: 'tampered'; readonly sign: 'chain' };
+
+/** What a walk within Tx A is held to (TR-1 F.3): where it starts, the heads copies witnessed, how far it may go. */
+export interface AnchorWithin {
+  readonly start: FrontierStart;
+  readonly witnessed: readonly HeadSeen[];
+  readonly most?: number;
+}
+
+/**
+ * The chain against its anchor and the path from the frontier to its head (anchorKeptWithin): kept, with the walk to
+ * the head locked; tampered (the alarm raised, held as the anchor check holds); or not proven within the walk's reach,
+ * or with a head it could not judge (`unverified`: the hand-off waits).
+ */
+export type AnchorKeptWithin =
+  | { readonly outcome: 'kept'; readonly walk: WalkedWithin }
+  | { readonly outcome: 'tampered'; readonly sign: 'chain' }
+  | { readonly outcome: 'unverified' };
 
 /** The row's state, matched with its latest signed event. */
 export interface VerifiedState {
@@ -648,6 +672,17 @@ export interface SignedStates {
    */
   anchorKept(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<AnchorKept>;
   /**
+   * anchorKept, with the chain walked from the path frontier to the head this transaction locked, on the same trip
+   * (TR-1 F.3), and every head copies witnessed (asked before it) found on that path: a head above the head locked, or
+   * another event at its place, is the chain cut back (`cut_back`, the alarm and the hold, as anchorKept's).
+   */
+  anchorKeptWithin(
+    tx: AuditTransaction,
+    orgId: string,
+    anchor: AnchorPoint,
+    within: AnchorWithin,
+  ): Promise<AnchorKeptWithin>;
+  /**
    * Records a new organisation's integrity hold, CLEAR, as its first state, in
    * the transaction that creates the organisation: after `record(…, 'new')`
    * of the organisation's own row (its ID the organisation's) with these
@@ -940,6 +975,19 @@ export function createSignedStates({
   /** Transactions holding their chain head's lock, after which no row is locked (ADR-006 §6). */
   const headLocked = new WeakSet<AuditTransaction>();
   const KEPT: AnchorKept = Object.freeze({ outcome: 'kept' });
+  const UNVERIFIED: AnchorKeptWithin = Object.freeze({ outcome: 'unverified' });
+
+  /** The organisation's chain found tampered with: the alarm on its own line, and the hold as the anchor check's. */
+  const chainTampered = (
+    orgId: string,
+    alarm: Readonly<Record<string, unknown>>,
+    chainFailure: string,
+  ): { readonly outcome: 'tampered'; readonly sign: 'chain' } => {
+    const held = orgId.toLowerCase();
+    logger.child({ orgId: held }).error('audit.integrity_failed', { chain: 'organisation', ...alarm });
+    onTamper(Object.freeze({ orgId: held, subjectType: CHAIN_SUBJECT, objectId: held, sign: 'chain', chainFailure }));
+    return Object.freeze({ outcome: 'tampered', sign: 'chain' });
+  };
   /** Organisations verifyAll found whole in each transaction, whose hold it may clear. */
   const verifiedWhole = new WeakMap<AuditTransaction, Set<string>>();
   /** What each transaction's gatherHistories read, by history, for its next historyOf to answer from (P8). */
@@ -2027,23 +2075,30 @@ export function createSignedStates({
       if (!headLocked.has(tx))
         throw new Error("The anchor is compared only once integrityHold has locked the chain's head");
       if (await trail.keepsAnchor(tx, orgId, anchor)) return KEPT;
-      const held = orgId.toLowerCase();
-      logger.child({ orgId: held }).error('audit.integrity_failed', {
-        chain: 'organisation',
-        check: 'anchor',
-        reason: 'anchor',
-        anchorSeq: anchor.seq,
-      });
-      onTamper(
-        Object.freeze({
-          orgId: held,
-          subjectType: CHAIN_SUBJECT,
-          objectId: held,
-          sign: 'chain',
-          chainFailure: 'anchor',
-        }),
-      );
-      return Object.freeze({ outcome: 'tampered', sign: 'chain' });
+      return chainTampered(orgId, { check: 'anchor', reason: 'anchor', anchorSeq: anchor.seq }, 'anchor');
+    },
+
+    async anchorKeptWithin(
+      tx: AuditTransaction,
+      orgId: string,
+      anchor: AnchorPoint,
+      { start, witnessed, most }: AnchorWithin,
+    ): Promise<AnchorKeptWithin> {
+      if (!headLocked.has(tx))
+        throw new Error("The anchor is compared only once integrityHold has locked the chain's head");
+      const { kept, walk } = await trail.keepsAnchorWithin(tx, orgId, anchor, start.from, most);
+      if (!kept) return chainTampered(orgId, { check: 'anchor', reason: 'anchor', anchorSeq: anchor.seq }, 'anchor');
+      if (walk.kind === 'broken') {
+        const { reason, seq } = walk.problem;
+        return chainTampered(orgId, { check: 'frontier', reason, seq, fromSeq: start.from.seq }, reason);
+      }
+      if (walk.kind === 'too_far') return UNVERIFIED;
+      // Asked before the walk's statements: a head above the one locked was committed, and is gone.
+      const judged = judgeWitnessed(witnessed, start, walk, 'cut');
+      if (judged.kind === 'cut') {
+        return chainTampered(orgId, { check: 'witness', reason: 'cut_back', seq: judged.seq }, 'cut_back');
+      }
+      return judged.kind === 'held' ? Object.freeze({ outcome: 'kept', walk }) : UNVERIFIED;
     },
 
     async startIntegrityHold(tx: AuditTransaction, orgId: string, actor: AuditActor): Promise<RecordedState> {

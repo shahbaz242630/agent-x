@@ -641,6 +641,15 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   orgId: string,
   services: SignedStatesServices,
   work: (tx: Transaction<Tables>, states: SignedStates) => Promise<Result>,
+  {
+    witnessedByCaller,
+  }: {
+    /**
+     * Whether the caller waits for the transaction's `now` heads itself once it has `result` (TR-1 F.6: the hand-off's
+     * gate witnesses Tx A's head before the bank's call, a wait of its own, never two). Else they are waited for here.
+     */
+    readonly witnessedByCaller?: (result: Result) => boolean;
+  } = {},
 ): Promise<Result> {
   const { keys, ids, logger, correlationId } = services;
   const trail = createAuditTrail({ keys, ids, correlationId, digest: stateDigest });
@@ -685,6 +694,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     for (const [held, one] of due) await setHold(db, held, one, services);
   }
   // Committed: its `now` heads, and any held unconfirmed here for the organisation, outside the database first (TR-1).
+  if (witnessedByCaller?.(result) === true) return result;
   const written = opened.tx === undefined ? [] : nowChainsOf(opened.tx);
   const platform = written.filter(({ kind }) => kind === 'platform');
   await waitWitnessed([{ kind: 'organisation', orgId: orgId.toLowerCase() }, ...platform]);

@@ -162,6 +162,7 @@ import {
 import { HISTORY_CHECK_SUBJECT, HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
 import { witnessClassOf } from './witness-class.ts';
+import { MOST_WALKED_WITHIN, type ReadAhead, walkWithin, type WithinWalk } from './chain-frontier.ts';
 import { chainWitness, noteCommitted, witnessedWrite, wroteTo } from './witnessing.ts';
 
 /** A transaction on the audit tables, opened by withTenant for the organisation. */
@@ -485,6 +486,18 @@ export interface AuditTrail {
    * in withTenant's transaction for the organisation, its head locked.
    */
   keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean>;
+  /**
+   * keepsAnchor, with the chain walked from `from` (the path frontier, chain-frontier.ts: TR-1 F.3) to its head on the
+   * same trip: the edges at `from` and the events past it read in statements of their own, sent together with the
+   * anchor's, then re-hashed (walkWithin). More than `most` past `from` is `too_far`. Its head locked, as keepsAnchor's.
+   */
+  keepsAnchorWithin(
+    tx: AuditTransaction,
+    orgId: string,
+    anchor: AnchorPoint,
+    from: CheckedPoint,
+    most?: number,
+  ): Promise<{ readonly kept: boolean; readonly walk: WithinWalk }>;
   /**
    * record, with `statement` (a data-modifying one, given the event's ID and
    * a condition to AND to its filter: that the event was written) run in the
@@ -1332,20 +1345,47 @@ function readerFor(
     },
 
     async events(after, upTo, limit) {
-      const { rows } = await sql<Record<string, unknown>>`
-        select ${SIGNED_EVENT_COLUMNS} from audit.events e
-        where e.org_id = ${orgId} and e.seq > ${after} and e.seq <= ${upTo}
-        order by e.seq limit ${limit}
-      `.execute(tx);
-      const chain: Chain = { kind: 'organisation', orgId };
+      const { rows } = await eventsRead(orgId, after, upTo, limit).execute(tx);
       if (seen !== undefined) rows.forEach(seen);
-      return rows.map((row) => {
-        const sealed = sealedSigned(keys, chain, row);
-        const content = contentOf(row);
-        return sealed === undefined || content === undefined ? undefined : { ...sealed, content };
-      });
+      return rows.map((row) => entryOfRow(keys, orgId, row));
     },
   };
+}
+
+/** Up to `limit` of the organisation's events after `after` and at most `upTo`, in number order, as the walk reads them. */
+const eventsRead = (orgId: string, after: bigint, upTo: bigint, limit: number) => sql<Record<string, unknown>>`
+  select ${SIGNED_EVENT_COLUMNS} from audit.events e
+  where e.org_id = ${orgId} and e.seq > ${after} and e.seq <= ${upTo}
+  order by e.seq limit ${limit}
+`;
+
+/** One event row as the chain checks it, or undefined where it can't be read. */
+function entryOfRow(keys: KeyProvider, orgId: string, row: Readonly<Record<string, unknown>>): StoredEntry | undefined {
+  const sealed = sealedSigned(keys, { kind: 'organisation', orgId }, row);
+  const content = contentOf(row);
+  return sealed === undefined || content === undefined ? undefined : { ...sealed, content };
+}
+
+/** Whether the chain holds the anchor (keepsAnchor), as one statement: the head's place and the event anchored. */
+const keepsAnchorRead = (orgId: string, anchor: AnchorPoint) => sql<{
+  head_seq: bigint | null;
+  anchored: Buffer | null;
+}>`
+  select h.seq as head_seq,
+         (select e.hash from audit.events e where e.org_id = ${orgId} and e.seq = ${anchor.seq}) as anchored
+  from (values (1)) as one (x)
+  left join audit.heads h on h.org_id = ${orgId}
+`;
+
+/** keepsAnchorRead's answer: no head, a head behind the anchor, or another event where the anchored one was, is wound back. */
+function keptIn(
+  row: { readonly head_seq: bigint | null; readonly anchored: Buffer | null } | undefined,
+  anchor: AnchorPoint,
+) {
+  // An empty chain's anchor (seq 0, the genesis hash) is held by every chain grown from it: no event to compare.
+  if (anchor.seq === 0n) return true;
+  const head = row?.head_seq ?? null;
+  return head !== null && head >= anchor.seq && row?.anchored?.equals(anchor.hash) === true;
 }
 
 /** Who recorded an event, and its details' JSON text, as eventsSinceChecked gives them. */
@@ -1584,7 +1624,7 @@ export function createAuditTrail({
     const last = sealed.at(-1);
     if (last !== undefined) {
       moved.head = { seq: last.seq, hash: last.hash };
-      wroteTo(tx, chain, last.seq);
+      wroteTo(tx, chain, moved.head);
     }
     return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));
   };
@@ -1982,19 +2022,35 @@ export function createAuditTrail({
 
     async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {
       await assertTenant(tx, orgId);
-      // An empty chain's anchor (seq 0, the genesis hash) is held by every chain grown from it: no event to compare.
       if (anchor.seq === 0n) return true;
+      const { rows } = await keepsAnchorRead(chainOf(orgId).orgId, anchor).execute(tx);
+      return keptIn(rows[0], anchor);
+    },
+
+    async keepsAnchorWithin(
+      tx: AuditTransaction,
+      orgId: string,
+      anchor: AnchorPoint,
+      from: CheckedPoint,
+      most = MOST_WALKED_WITHIN,
+    ) {
+      await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const { rows } = await sql<{ head_seq: bigint | null; anchored: Buffer | null }>`
-        select h.seq as head_seq,
-               (select e.hash from audit.events e where e.org_id = ${chain.orgId} and e.seq = ${anchor.seq}) as anchored
-        from (values (1)) as one (x)
-        left join audit.heads h on h.org_id = ${chain.orgId}
-      `.execute(tx);
-      const head = rows[0]?.head_seq ?? null;
-      const anchored = rows[0]?.anchored ?? null;
-      // No head, a head behind the anchor, or another event where the anchored one was: wound back.
-      return head !== null && head >= anchor.seq && anchored?.equals(anchor.hash) === true;
+      // The events past `from`, as many as the walk may take: one more would be past its reach, read no further.
+      const [kept, edges, events] = await sendTogether(tx, [
+        keepsAnchorRead(chain.orgId, anchor),
+        edgesRead(chain.orgId, from.seq),
+        eventsRead(chain.orgId, from.seq, from.seq + BigInt(most), most),
+      ]);
+      const read: ReadAhead[] = (events.rows as Readonly<Record<string, unknown>>[]).map((row) => ({
+        seq: typeof row.seq === 'bigint' ? row.seq : -1n,
+        entry: entryOfRow(keys, chain.orgId, row),
+      }));
+      const edgeRows = edges.rows as Readonly<Record<string, unknown>>[];
+      return {
+        kept: keptIn(kept.rows[0] as Parameters<typeof keptIn>[0], anchor),
+        walk: await walkWithin(keys, chain, edgesOf(edgeRows), read, from, most),
+      };
     },
 
     async latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState> {

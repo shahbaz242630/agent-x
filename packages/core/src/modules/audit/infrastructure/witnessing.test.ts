@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   chainWitness,
+  headWrittenIn,
   noteCommitted,
   nowChainsOf,
   waitWitnessed,
@@ -41,21 +42,24 @@ describe('TR-1 each transaction’s chain heads to the witness log', () => {
     expect(chainWitness()).toBe(witness);
     const tx = {};
     witnessedWrite(tx, ORG, 'soon');
-    wroteTo(tx, ORG, 5n);
+    wroteTo(tx, ORG, head(5n));
     witnessedWrite(tx, { kind: 'organisation', orgId: ORG.orgId.toLowerCase() }, 'now');
-    wroteTo(tx, ORG, 7n);
-    wroteTo(tx, ORG, 6n);
+    wroteTo(tx, ORG, head(7n));
+    wroteTo(tx, ORG, head(6n));
     // The first write's hook: not the highest, nothing; the second's: the highest, as `now`.
     noteCommitted(tx, ORG, head(5n));
     noteCommitted(tx, ORG, head(7n));
     expect(notes).toEqual([['organisation', 7n, 'now']]);
     expect(nowChainsOf(tx)).toEqual([ORG]);
+    // The highest head, its hash with it: what the hand-off's gate witnesses (TR-1 F.5); none for a chain not written.
+    expect(headWrittenIn(tx, ORG)).toEqual(head(7n));
+    expect(headWrittenIn(tx, PLATFORM)).toBeUndefined();
   });
 
   it('notes nothing without a witness log, for a head it never wrote, or for a transaction it never saw', () => {
     const tx = {};
     witnessedWrite(tx, PLATFORM, 'now');
-    wroteTo(tx, PLATFORM, 3n);
+    wroteTo(tx, PLATFORM, head(3n));
     noteCommitted(tx, PLATFORM, head(3n));
     const { witness, notes } = recording();
     witnessWith(witness);

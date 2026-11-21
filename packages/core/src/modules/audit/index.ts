@@ -102,6 +102,8 @@ export {
   SignedStateFailed,
   type SignedStates,
   type SignedStatusChange,
+  type AnchorKeptWithin,
+  type AnchorWithin,
   checkOf,
   judgeSignedRow,
   type StateCheck,
@@ -130,7 +132,21 @@ export type { AuditTables } from './infrastructure/tables.ts';
 export { type PageAsked, type PageShown, type VerifiedPage, verifiedPage } from './infrastructure/verified-page.ts';
 export { WITNESSED_SOON, witnessClassOf } from './infrastructure/witness-class.ts';
 export {
+  type ChainFrontier,
+  createChainFrontier,
+  type FrontierAnchors,
+  type FrontierStart,
+  judgeWitnessed,
+  MOST_WALKED_WITHIN,
+  type ReadAhead,
+  type WalkedWithin,
+  walkWithin,
+  type WithinWalk,
+  type WitnessJudgement,
+} from './infrastructure/chain-frontier.ts';
+export {
   chainWitness,
+  headWrittenIn,
   noteCommitted,
   nowChainsOf,
   waitWitnessed,
