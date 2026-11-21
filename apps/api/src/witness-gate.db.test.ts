@@ -12,7 +12,7 @@ import {
   witnessWith,
 } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import { cancelRequest, ORDER_SLOTS, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import {
   type AnchorStore,
@@ -194,6 +194,10 @@ async function jobsCopy(
   const frontier = createChainFrontier({
     anchors: { latest: (each) => anchors.latest(each), rebasedAfter },
     now: () => clock.now(),
+    // As job-list.ts wires it (TR-3): what each Tx A's walk read of the signed objects kept in the digest.
+    seen: (each, signed, began) => {
+      digest.record(each, signed, began);
+    },
   });
   return { digest, anchors, witness, frontier };
 }
@@ -679,6 +683,181 @@ describe('TR-1 review: the platform frontier, witness writes failing, a restart'
   it('the positive control: a restarted copy that never read the first head pays a second time (the attack)', async () => {
     const { submitted } = await paidThenCutAfterRestart(false);
     expect(submitted).toBe(1);
+  });
+});
+
+describe('TR-3 a stop rewritten in place below the frontier, its hash kept', () => {
+  /**
+   * Two requests; W cancels the second, its head witnessed; J's Tx A for the first walks past the cancel, raising F
+   * beyond it. Then, `rewrite` given, the owner moves the cancel's event to another subject (its stored hash left as it
+   * was, so every one-row check still reads true) and puts the request's row back as approved. J's next run.
+   */
+  async function cancelledThenRewritten(rewrite: boolean) {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const j = await jobsCopy(w, store);
+    const paid = await ask(acting, w, { amount: ALLOWED() });
+    const stopped = await ask(acting, w, { amount: ALLOWED() });
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    let saved: Awaited<ReturnType<typeof owner.saveRow>>;
+    try {
+      saved = await owner.saveRow(stopped.id);
+    } finally {
+      await owner.end();
+    }
+    witnessWith(witnessOver(store));
+    try {
+      await signed(w, (tx, states) =>
+        states.changeStatus(tx, SPEND_REQUESTS, { orgId: w.org, id: stopped.id }, 'cancel', {
+          actor: OPERATOR,
+          action: 'spend_request.cancelled',
+          details: {},
+        }),
+      );
+    } finally {
+      witnessWith(undefined);
+    }
+    // More of the organisation's writes after the stop, so the walk raises F past it, not to it (the event at F itself
+    // is read whole by every walk from F).
+    await signed(w, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: OPERATOR,
+        action: 'handoff.held_for_bank',
+        subject: { type: 'handoff_hold', id: ids.next(), version: 1 },
+        details: { hold: 'lane' },
+      }),
+    );
+    await j.witness.refresh();
+    expect(await handOffOnJ(w, j)).toBe(1);
+    expect(await statusOf(w, paid.id)).toBe('HANDED_OFF');
+    expect(await statusOf(w, stopped.id)).toBe('CANCELLED');
+    if (rewrite) {
+      const cutting = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+      try {
+        await cutting.query('begin');
+        await cutting.query('alter table audit.events disable trigger user');
+        await cutting.query(
+          "update audit.events set subject_id = '0199a0f0-0000-7000-8000-00000000dead' where org_id = $1 and subject_id = $2 and action = 'spend_request.cancelled'",
+          [w.org, stopped.id],
+        );
+        await cutting.query('alter table audit.events enable trigger user');
+        await cutting.query('commit');
+        await cutting.withoutStatusGuard(() => cutting.restoreRow(saved));
+      } finally {
+        await cutting.end();
+      }
+    }
+    capture = new LogCapture();
+    return { w, stopped, submitted: await handOffOnJ(w, j) };
+  }
+
+  it('the stop rewritten in place and the request put back approved: never paid, the alarm', async () => {
+    const { w, stopped, submitted } = await cancelledThenRewritten(true);
+    expect(submitted).toBe(0);
+    expect(await outcome(w, stopped.id, submitted)).toMatchObject({ transaction: undefined });
+    expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The order-slot variant: an order asked, ended (its slots let go), asked again and paid, a write after it. The paid
+   * Tx A walks past the slots' `order_slot.held`, raising F beyond. Then, `rewrite` given, the owner moves those events to
+   * another subject (hashes kept), puts the slots back as no one's and releases the claim. The order asked a third time.
+   */
+  async function orderRewritten(rewrite: boolean) {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const j = await jobsCopy(w, store);
+    const earlier = await ask(acting, w, { amount: ALLOWED(), orderReference: 'ORD-77' });
+    await signed(w, (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: earlier.id },
+        { kind: 'user', userId: '0199a0f0-0000-7000-8000-0000000000aa' },
+        clock.now(),
+      ),
+    );
+    const owner = await tamperAsOwner(database, ORDER_SLOTS, w.org);
+    let saved: Awaited<ReturnType<typeof owner.saveRow>>[] = [];
+    let before = '0';
+    try {
+      const rows = await owner.query<{ id: string }>('select id from spend_requests.order_slots where org_id = $1', [
+        w.org,
+      ]);
+      saved = await Promise.all(rows.map(({ id }) => owner.saveRow(id)));
+      const [top] = await owner.query<{ seq: string }>(
+        'select max(seq)::text as seq from audit.events where org_id = $1',
+        [w.org],
+      );
+      before = top?.seq ?? '0';
+    } finally {
+      await owner.end();
+    }
+    const paid = await ask(acting, w, { amount: ALLOWED(), orderReference: 'ORD-77' });
+    await signed(w, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: OPERATOR,
+        action: 'handoff.held_for_bank',
+        subject: { type: 'handoff_hold', id: ids.next(), version: 1 },
+        details: { hold: 'lane' },
+      }),
+    );
+    await j.witness.refresh();
+    expect(await handOffOnJ(w, j)).toBe(1);
+    expect(await statusOf(w, paid.id)).toBe('HANDED_OFF');
+    if (rewrite) {
+      const cutting = await tamperAsOwner(database, ORDER_SLOTS, w.org);
+      try {
+        await cutting.query('begin');
+        await cutting.query('alter table audit.events disable trigger user');
+        await cutting.query('alter table spend_requests.order_claims disable trigger user');
+        await cutting.query('alter table spend_requests.order_slots disable trigger user');
+        await cutting.query(
+          "update audit.events set subject_id = gen_random_uuid() where org_id = $1 and action = 'order_slot.held' and seq > $2",
+          [w.org, before],
+        );
+        await cutting.query('update spend_requests.order_claims set released_at = claimed_at where request_id = $1', [
+          paid.id,
+        ]);
+        await cutting.query('alter table spend_requests.order_slots enable trigger user');
+        await cutting.query('alter table spend_requests.order_claims enable trigger user');
+        await cutting.query('alter table audit.events enable trigger user');
+        await cutting.query('commit');
+        for (const row of saved) await cutting.restoreRow(row);
+      } finally {
+        await cutting.end();
+      }
+    }
+    // The order asked a third time, on this process, its reads held to J's digest (its alarm in the decisions' log).
+    const before3 = lines('audit.integrity_failed').length;
+    checkStatesWith(j.digest);
+    try {
+      const answer = await ask(acting, w, { amount: ALLOWED(), orderReference: 'ORD-77' }).then(
+        (request) => request.decision,
+        (error: unknown) => (error instanceof Error ? error.message : 'refused'),
+      );
+      return { answer, alarms: lines('audit.integrity_failed').length - before3 };
+    } finally {
+      checkStatesWith(undefined);
+    }
+  }
+
+  it('the order-slot variant: its slots rewritten in place and put back as no one’s, the order asked again is refused', async () => {
+    const { answer, alarms } = await orderRewritten(true);
+    expect(answer).toMatch(/INTEGRITY_FAILED/);
+    expect(alarms).toBeGreaterThan(0);
+  });
+
+  it('the order-slot variant’s positive control: not rewritten, the order asked again is an honest duplicate', async () => {
+    expect(await orderRewritten(false)).toEqual({ answer: 'DENY', alarms: 0 });
+  });
+
+  it('the positive control: not rewritten, the cancelled request is never handed off, and nothing is alarmed', async () => {
+    const { w, stopped, submitted } = await cancelledThenRewritten(false);
+    expect(submitted).toBe(0);
+    expect(await statusOf(w, stopped.id)).toBe('CANCELLED');
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 });
 

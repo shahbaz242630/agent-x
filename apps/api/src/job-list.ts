@@ -439,6 +439,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
                     rebasedAfter: (chain, at) => anchorLog?.rebasedAfter(chain, at) ?? false,
                   },
                   now: () => systemClock.now(),
+                  // What each Tx A's walk read of the signed objects kept as an anchor check's walk is (TR-3).
+                  seen: (chain, signed, began) => {
+                    digest.record(chain, signed, began);
+                  },
                 }),
               },
             }),

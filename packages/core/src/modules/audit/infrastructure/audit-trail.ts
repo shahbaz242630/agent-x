@@ -318,15 +318,21 @@ function seeingSigned<Reader extends Pick<ChainReader, 'events'>>(reader: Reader
     async events(after, upTo, limit) {
       const batch = await reader.events(after, upTo, limit);
       for (const entry of batch) {
-        const [, , , , , , type, id, , , details] = entry?.content ?? [];
-        if (entry === undefined || typeof type !== 'string' || typeof id !== 'string') continue;
-        if (typeof details !== 'string' || !details.includes(HAS_STATE_SEAL)) continue;
-        const key = subjectKey(type, id);
+        const subject = entry === undefined ? undefined : signedSubjectOf(entry);
+        if (entry === undefined || subject === undefined) continue;
+        const key = subjectKey(...subject);
         if ((seen.get(key) ?? 0n) < entry.seq) seen.set(key, entry.seq);
       }
       return batch;
     },
   };
+}
+
+/** The signed object an event is a state of (it carries a state seal): its type and ID, or none. */
+function signedSubjectOf(entry: StoredEntry): readonly [string, string] | undefined {
+  const [, , , , , , type, id, , , details] = entry.content;
+  if (typeof type !== 'string' || typeof id !== 'string') return undefined;
+  return typeof details === 'string' && details.includes(HAS_STATE_SEAL) ? [type, id] : undefined;
 }
 
 /** A step and what it saw, kept only for one that holds: a step that fails read no chain to believe. */
@@ -2062,7 +2068,8 @@ export function createAuditTrail({
       const edgeRows = edges.rows as Readonly<Record<string, unknown>>[];
       return {
         kept: keptIn(kept.rows[0] as Parameters<typeof keptIn>[0], anchor),
-        walk: await walkWithin(keys, chain, edgesOf(edgeRows), read, from, most),
+        // Each signed object's newest place on it, for the digest (TR-3), as an anchor check's walk keeps them.
+        walk: await walkWithin(keys, chain, edgesOf(edgeRows), read, from, most, signedSubjectOf),
       };
     },
 

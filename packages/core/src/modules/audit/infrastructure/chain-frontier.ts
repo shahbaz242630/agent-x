@@ -13,13 +13,20 @@
 // one on the stretch is judged at once, not left to wait for the anchor check. Memory: 32 bytes an event, for chains a
 // hand-off walked; past `mostBytes` a chain's stretch is not kept (its next Tx A walks from the anchor again: slower,
 // never less safe).
+//
+// What a walk read of each signed object (its newest place on the stretch) goes to the process's signed states'
+// digest as the walk raises F, as an anchor check's walk is kept (`seen`, TR-3): every later read is held to it. Else an
+// event below F rewritten in place, its hash column kept and its object's row put back to an older sealed state, would
+// pass: no later walk re-reads it, and the stretch kept only its hash.
 import {
   type Chain,
   type ChainEdges,
   type ChainProblem,
   type CheckedPoint,
   type HeadSeen,
+  type SignedSeen,
   type StoredEntry,
+  subjectKey,
   verifyFromAnchor,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -46,7 +53,13 @@ export interface FrontierStart {
 
 /** What a walk within a transaction found: the head it reached with every hash on the way, or why not. */
 export type WithinWalk =
-  | { readonly kind: 'walked'; readonly head: CheckedPoint; readonly path: ReadonlyMap<bigint, Buffer> }
+  | {
+      readonly kind: 'walked';
+      readonly head: CheckedPoint;
+      readonly path: ReadonlyMap<bigint, Buffer>;
+      /** Each signed object's newest place on the walk, as the anchor check's walks keep them (AT13, TR-3). */
+      readonly signed: SignedSeen;
+    }
   | { readonly kind: 'broken'; readonly problem: ChainProblem }
   | { readonly kind: 'too_far' };
 
@@ -92,9 +105,15 @@ export function createChainFrontier({
   now,
   mostBytes = MOST_FRONTIER_BYTES,
   mostKept = MOST_WALKED_WITHIN,
+  seen,
 }: {
   readonly anchors: FrontierAnchors;
   readonly now: () => Date;
+  /**
+   * Where what each walk read of the signed objects is kept as it is raised (the signed states' digest's `record`,
+   * TR-3): none, nothing is (a process keeping no digest).
+   */
+  readonly seen?: (chain: Chain, signed: SignedSeen, began: Date) => void;
   readonly mostBytes?: number;
   /** How many events a chain's stretch keeps before it is trimmed to the latest anchor. */
   readonly mostKept?: number;
@@ -145,6 +164,8 @@ export function createChainFrontier({
 
     raise(chain: Chain, start: FrontierStart, walk: WalkedWithin | undefined): void {
       if (walk === undefined) return;
+      // First, whatever F does: the walk read every event it names, and every later read is held to them.
+      seen?.(chain, walk.signed, now());
       const { head, path } = walk;
       const name = chainName(chain);
       const kept = byChain.get(name);
@@ -218,8 +239,10 @@ export async function walkWithin(
   events: readonly ReadAhead[],
   from: CheckedPoint,
   most: number = MOST_WALKED_WITHIN,
+  subjectOf: (entry: StoredEntry) => readonly [string, string] | undefined = () => undefined,
 ): Promise<WithinWalk> {
   const path = new Map<bigint, Buffer>();
+  const signed = new Map<string, bigint>();
   let next = 0;
   const step = await verifyFromAnchor(
     keys,
@@ -233,7 +256,12 @@ export async function walkWithin(
         for (let at = next; at < events.length && batch.length < limit; at += 1) {
           const read = events[at];
           if (read === undefined || read.seq > upTo) break;
-          if (read.entry !== undefined) path.set(read.seq, read.entry.hash);
+          if (read.entry !== undefined) {
+            path.set(read.seq, read.entry.hash);
+            const subject = subjectOf(read.entry);
+            // In number order: the last seen is the newest.
+            if (subject !== undefined) signed.set(subjectKey(...subject), read.seq);
+          }
           batch.push(read.entry);
         }
         return Promise.resolve(batch);
@@ -244,5 +272,6 @@ export async function walkWithin(
   );
   if (!step.ok) return { kind: 'broken', problem: step.problem };
   if (step.seq !== step.to) return { kind: 'too_far' };
-  return { kind: 'walked', head: { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion }, path };
+  const head = { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion };
+  return { kind: 'walked', head, path, signed };
 }

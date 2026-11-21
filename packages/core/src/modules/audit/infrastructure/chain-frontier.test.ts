@@ -10,7 +10,9 @@ import {
   type CheckedPoint,
   type HeadSeen,
   LAST_COUNTED,
+  type SignedSeen,
   type StoredEntry,
+  subjectKey,
 } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { describe, expect, it } from 'vitest';
@@ -115,7 +117,41 @@ function walked(walk: Awaited<ReturnType<Sealed['walk']>>): WalkedWithin {
 
 const startAt = (point: CheckedPoint): FrontierStart => ({ base: point, hashes: Buffer.alloc(0), from: point, at: 0 });
 
-describe('TR-1 F.1 the walk within a transaction and the path frontier', () => {
+describe('SEC-DB-20 TR-1 F.1 the walk within a transaction and the path frontier', () => {
+  it('TR-3: a walk names each signed object’s newest place on it, and every raise hands that on, raised or not', async () => {
+    const chain = await new Sealed().grow(8);
+    // Events 3, 5 and 7 are one object's states, 6 another's: what a state-sealed event names.
+    const subjectOf = ({ seq }: StoredEntry) => {
+      if (seq === 6n) return ['supplier', 'b'] as const;
+      return seq % 2n === 1n && seq > 1n ? (['supplier', 'a'] as const) : undefined;
+    };
+    const walk = await walkWithin(keys, CHAIN, chain.edges(2n), chain.after(2n), chain.point(2n), undefined, subjectOf);
+    if (walk.kind !== 'walked') throw new Error('walked');
+    expect([...walk.signed]).toEqual([
+      [subjectKey('supplier', 'a'), 7n],
+      [subjectKey('supplier', 'b'), 6n],
+    ]);
+    // Without a reading of objects, none named.
+    expect(walked(await chain.walk(chain.point(2n))).signed.size).toBe(0);
+    const kept: [string, SignedSeen][] = [];
+    const frontier = createChainFrontier({
+      anchors: { latest: () => chain.point(2n), rebasedAfter: () => false },
+      now: () => AT,
+      seen: (each, signed) => kept.push([each.kind, signed]),
+      mostBytes: 32,
+    });
+    const start = frontier.startOf(CHAIN);
+    if (start === undefined) throw new Error('anchored');
+    // Past its memory (no stretch kept) and again at the same head: handed on each time all the same.
+    frontier.raise(CHAIN, start, walk);
+    frontier.raise(CHAIN, start, walk);
+    frontier.raise(CHAIN, start, undefined);
+    expect(kept).toEqual([
+      ['organisation', walk.signed],
+      ['organisation', walk.signed],
+    ]);
+  });
+
   it('a row put back at a witnessed place from another branch fails the judgement; a genuine extension passes', async () => {
     // The honest chain: an anchor at 4, a stop witnessed at 7 by another copy.
     const honest = await new Sealed().grow(9);

@@ -35,6 +35,7 @@ const walkedTo = (head: bigint): { readonly start: FrontierStart; readonly walk:
     kind: 'walked',
     head: point(head),
     path: new Map(Array.from({ length: Number(head - 2n) }, (_, n) => [3n + BigInt(n), hash(3 + n)])),
+    signed: new Map(),
   },
 });
 
