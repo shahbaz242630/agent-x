@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { seedRows } from '../../../seed-rows.helper.test.ts';
 import type { AuditTables } from '../../audit/index.ts';
 import { RESERVATION } from '../domain/reservation.ts';
-import { type MonthToSum, monthSpentRead, monthsSpent, splitHeld } from './reservations.ts';
+import { type MonthToSum, monthSpentRead, monthsSpent } from './reservations.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -501,10 +501,6 @@ describe("a reservation's request (`held_for_its_request`, D2's review)", () => 
   });
 });
 
-/** The split total for the supplier (and payee key) given, since `since`, as a decision reads it (D5). */
-const splitOf = (org: Org, supplierId: string, payeeKey: string | null, since = AT, currency = 'AED') =>
-  inOrg(org, (tx) => splitHeld(tx, { supplierId, payeeKey, since, currency }));
-
 describe("an agent's month total (0110, GM-1a)", () => {
   /** A total row for the agent's month, as the audit module's record adds one before sealing it. */
   const totalRow = (org: Org, overrides: Record<string, unknown> = {}) => ({
@@ -571,6 +567,85 @@ describe("an agent's month total (0110, GM-1a)", () => {
   });
 });
 
+describe("a payee's split window (0112, GM-1b)", () => {
+  /** A window row for the organisation's supplier, as the audit module's record adds one before sealing it. */
+  const windowRow = (org: Org, overrides: Record<string, unknown> = {}) => ({
+    org_id: org.id,
+    id: randomUUID(),
+    supplier_id: org.supplier,
+    payee_key: null,
+    currency: 'AED',
+    held_by_hour: '493000:25000',
+    created_at: AT,
+    ...overrides,
+  });
+  const addWindow = (org: Org, overrides: Record<string, unknown> = {}) =>
+    inOrg(org, (tx) => tx.insertInto('limit_reservations.payee_windows').values(windowRow(org, overrides)).execute());
+  const changeWindow = (org: Org, values: Record<string, unknown>) =>
+    inOrg(org, (tx) => tx.updateTable('limit_reservations.payee_windows').set(values).execute());
+
+  it('is one a supplier, a key, or the two together, and a currency: never none of them', async () => {
+    const org = await organisation();
+    await addWindow(org);
+    await expect(addWindow(org)).rejects.toEqual(refusedBy('one_window_a_payee'));
+    // The key's own row, and the pair's, are rows of their own; so is another currency's (G4).
+    await addWindow(org, { supplier_id: null, payee_key: 'payee-1' });
+    await expect(addWindow(org, { supplier_id: null, payee_key: 'payee-1' })).rejects.toEqual(
+      refusedBy('one_window_a_payee'),
+    );
+    await addWindow(org, { payee_key: 'payee-1' });
+    await addWindow(org, { currency: 'USD' });
+    await expect(addWindow(org, { supplier_id: null, payee_key: null })).rejects.toEqual(refusedBy('a_payee_named'));
+  });
+
+  it('holds only whole hours with something held in each, a key as a payee key is, and a currency', async () => {
+    const org = await organisation();
+    await addWindow(org, { held_by_hour: '' });
+    await addWindow(org, { held_by_hour: '1:1,2:900000000000000000', currency: 'USD' });
+    const holding = 'payee_windows_held_by_hour_check';
+    for (const held of ['1:0', '1:-5', '-1:5', '1:01', '1:5,', ',1:5', '1:5;2:5', '1:5 ', 'x:5']) {
+      await expect(addWindow(org, { held_by_hour: held, currency: 'EUR' })).rejects.toEqual(refusedBy(holding));
+    }
+    // Longer than any 745 hours can be written in: refused as too long, not just too odd.
+    const tooLong = Array.from({ length: 2_000 }, (_, hour) => `${String(hour)}:1000000000000000`).join(',');
+    await expect(addWindow(org, { held_by_hour: tooLong, currency: 'EUR' })).rejects.toEqual(refusedBy(holding));
+    await expect(addWindow(org, { payee_key: 'a key' })).rejects.toEqual(refusedBy('payee_windows_payee_key_check'));
+    await expect(addWindow(org, { currency: 'aed' })).rejects.toEqual(refusedBy('payee_windows_currency_check'));
+    await expect(addWindow(org, { created_at: 'infinity', currency: 'GBP' })).rejects.toEqual(
+      refusedBy('payee_windows_created_at_check'),
+    );
+  });
+
+  it('changes only in what it holds and its signed state: its supplier, key, currency and making fixed, never deleted', async () => {
+    const org = await organisation();
+    await addWindow(org, { payee_key: 'payee-1' });
+    await changeWindow(org, { held_by_hour: '493001:50000', state_version: 2, state_event_id: randomUUID() });
+    // The audit module's record writes them again with the same values as it seals a new window: no change.
+    await changeWindow(org, { supplier_id: org.supplier, payee_key: 'payee-1', currency: 'AED', created_at: AT });
+    await expect(changeWindow(org, { supplier_id: randomUUID() })).rejects.toEqual(refusedBy('fixed_at_creation'));
+    await expect(changeWindow(org, { payee_key: null })).rejects.toEqual(refusedBy('fixed_at_creation'));
+    await expect(changeWindow(org, { payee_key: 'payee-2' })).rejects.toEqual(refusedBy('fixed_at_creation'));
+    await expect(changeWindow(org, { currency: 'USD' })).rejects.toEqual(refusedBy('fixed_at_creation'));
+    await expect(changeWindow(org, { created_at: LATER })).rejects.toEqual(refusedBy('fixed_at_creation'));
+    await expect(changeWindow(org, { org_id: randomUUID() })).rejects.toEqual(DENIED);
+    await expect(changeWindow(org, { id: randomUUID() })).rejects.toEqual(DENIED);
+    await expect(inOrg(org, (tx) => tx.deleteFrom('limit_reservations.payee_windows').execute())).rejects.toEqual(
+      DENIED,
+    );
+  });
+
+  it("is its organisation's alone", async () => {
+    const org = await organisation();
+    const other = await organisation();
+    await addWindow(org);
+    const seen = await inOrg(other, (tx) => tx.selectFrom('limit_reservations.payee_windows').select('id').execute());
+    expect(seen).toEqual([]);
+    await expect(
+      inOrg(other, (tx) => tx.insertInto('limit_reservations.payee_windows').values(windowRow(org)).execute()),
+    ).rejects.toThrow(/row-level security/);
+  });
+});
+
 describe('the totals in one currency (G4)', () => {
   it('count only the currency weighed: another’s minor units are never counted as its own', async () => {
     const org = await organisation();
@@ -585,10 +660,6 @@ describe('the totals in one currency (G4)', () => {
       inOrg(org, (tx) => monthSpent(tx, { agentId: org.agent, month: MONTH, currency }));
 
     expect([await spent('AED'), await spent('USD'), await spent('EUR')]).toEqual([25_000n, 25_000n, 0n]);
-    expect([
-      await splitOf(org, org.supplier, null, AT, 'AED'),
-      await splitOf(org, org.supplier, null, AT, 'USD'),
-    ]).toEqual([25_000n, 25_000n]);
   });
 });
 
@@ -681,48 +752,6 @@ describe("the month's total from its index alone (0081, S180)", () => {
         }),
       ]);
     }
-  });
-});
-
-describe('the split total (`splitHeld`, D5)', () => {
-  it('adds up the supplier’s reservations still holding capacity, reserved since the window began', async () => {
-    const org = await organisation();
-    await period(org);
-    await reserve(org);
-    await withoutPayments(async () => {
-      await moved(org, 'FINALISED');
-      await moved(org, 'RELEASED');
-    });
-    const other = await organisation();
-    await period(other);
-    await reserve(other);
-
-    // HELD and FINALISED count, RELEASED never; another organisation's never.
-    expect(await splitOf(org, org.supplier, null)).toBe(50_000n);
-    // The window's first instant counts; one reserved before it doesn't.
-    expect(await splitOf(org, org.supplier, null, new Date(AT.getTime() + 1))).toBe(0n);
-  });
-
-  it('counts the payee key’s under another supplier record, and the supplier’s own under any key or none', async () => {
-    const org = await organisation('payee-1');
-    await period(org);
-    await reserve(org, { payee_key: 'payee-1' });
-    // The key moved to a new supplier record past the app, as a re-created supplier would take it.
-    await database
-      .as('admin')
-      .query('update suppliers.suppliers set payee_key = null where org_id = $1 and id = $2', [org.id, org.supplier]);
-    await reserve(org);
-    const recreated = await seedRows(database.as('admin'), AT).supplier(org.id, 'payee-1');
-
-    expect(await splitOf(org, recreated.id, 'payee-1')).toBe(25_000n);
-    expect(await splitOf(org, org.supplier, null)).toBe(50_000n);
-    // Given a new key, the supplier still counts its own, whatever key each was made under.
-    expect(await splitOf(org, org.supplier, 'payee-2')).toBe(50_000n);
-    // Another organisation's supplier may hold the same key (keys are per organisation): its orders never count.
-    const other = await organisation('payee-1');
-    await period(other);
-    await reserve(other, { payee_key: 'payee-1' });
-    expect(await splitOf(org, recreated.id, 'payee-1')).toBe(25_000n);
   });
 });
 

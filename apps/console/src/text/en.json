@@ -1082,7 +1082,7 @@
   "mandates.form.timeZonePick": "Choose a time zone",
   "mandates.form.timeZoneHint": "The monthly limit starts again at midnight on the 1st in this zone (Asia/Dubai in the UAE). It can't be changed later.",
   "mandates.form.splitWindow": "Split check window, in hours",
-  "mandates.form.splitWindowHint": "A whole number from {least} to {most}. Orders to one supplier within this many hours count together. Longer catches more splitting and sends more to a person. It can't be changed later.",
+  "mandates.form.splitWindowHint": "A whole number from {least} to {most}. Orders to one supplier within this many hours count together, counted in whole hours from the start of the hour the window begins in (so up to 59 minutes more, never less). Longer catches more splitting and sends more to a person. It can't be changed later.",
   "mandates.form.purpose": "What it is for",
   "mandates.form.purposeHint": "1 to 200 characters, with a letter or digit and no space at either end.",
   "mandates.form.perOrder": "Most for one request, in {currency}",

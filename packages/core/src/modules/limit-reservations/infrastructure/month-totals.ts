@@ -124,20 +124,31 @@ export type CutOver = 'cut_over' | 'not_yet' | 'tampered';
  * and the cutover's. Asked only where a month's total is missing, so a
  * decision on a month that has one makes no trip for it.
  */
-export async function monthTotalsCutOver(tx: TotalsTransaction, states: SignedStates, orgId: string): Promise<CutOver> {
+export const monthTotalsCutOver = (tx: TotalsTransaction, states: SignedStates, orgId: string): Promise<CutOver> =>
+  countedSince(tx, states, orgId, { subject: CUTOVER_SUBJECT, action: CUTOVER_ACTION, born: 'monthTotals' });
+
+/**
+ * Whether the organisation is counted in one kind of signed row, from its own log, each event believed only whole: its
+ * newest of `organization.created` (born counted, its detail `born` saying `signed`) and that kind's cutover event.
+ * The month totals' (GM-1a) and the payee windows' (GM-1b), each with its own cutover.
+ */
+export async function countedSince(
+  tx: TotalsTransaction,
+  states: SignedStates,
+  orgId: string,
+  { subject, action, born }: { readonly subject: string; readonly action: string; readonly born: string },
+): Promise<CutOver> {
   const read = await states.historyOf(tx, orgId, {
-    subjectTypes: ['organization', CUTOVER_SUBJECT],
+    subjectTypes: ['organization', subject],
     subjectId: orgId,
-    actions: ['organization.created', CUTOVER_ACTION],
+    actions: ['organization.created', action],
     limit: 1,
     newest: true,
   });
   if (read.outcome === 'tampered') return 'tampered';
   const [newest] = read.events;
   if (newest === undefined) return 'not_yet';
-  return newest.event.action === CUTOVER_ACTION || newest.event.details.monthTotals === BORN_SIGNED
-    ? 'cut_over'
-    : 'not_yet';
+  return newest.event.action === action || newest.event.details[born] === BORN_SIGNED ? 'cut_over' : 'not_yet';
 }
 
 /** The fields of a new total, as it is added and sealed. */

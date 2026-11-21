@@ -120,12 +120,13 @@ export function periodOf(at: Date, zone: string): Period {
 }
 
 /** The longest split-check window: 31 days. */
-const MOST_WINDOW_HOURS = 31 * 24;
+export const MOST_WINDOW_HOURS = 31 * 24;
 
 /**
  * Where a rolling window ending at `at` begins (ADR-006 §9: the split check's,
  * default 24 hours, so splitting an order across midnight gains nothing): a
- * whole number of hours, from 1 to 31 days'.
+ * whole number of hours, from 1 to 31 days'. The split check counts from the
+ * start of the hour this falls in (GM-1b, limit-reservations' windowFromHour).
  */
 export function windowStart(at: Date, hours: number): Date {
   if (!Number.isInteger(hours) || hours < 1 || hours > MOST_WINDOW_HOURS) {

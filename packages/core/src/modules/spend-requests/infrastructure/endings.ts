@@ -13,8 +13,10 @@
 // an agent's own cancels counted under its cancel lock (8a); its reservation
 // and order claim locked (11); its month's signed total read for change (11a,
 // GM-1a: a brake's batch locks each of its totals once, in order of ID);
-// then the move, signed, which takes the audit head (12); then its amount
-// given back to the total, and the reservation and claim released, which
+// its payee's windows read for change (11b, GM-1b: the windows its decision
+// sealed, each once, in order of ID); then the move, signed, which takes the
+// audit head (12); then its amount given back to the total and the windows,
+// and the reservation and claim released, which
 // 0040's `held_for_its_request` and 0039's `claim_guard` allow only once the
 // request has ended. So no lock is taken after the head's.
 //
@@ -50,10 +52,17 @@ import {
   type MonthTotalCheck,
   monthTotalOf,
   monthTotalOrder,
+  type PayeeWindowCheck,
+  payeeWindowId,
+  payeeWindowsOf,
   releaseReservationsOf,
+  hourOf,
+  windowsGivenBack,
+  type WindowTake,
 } from '../../limit-reservations/index.ts';
 import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { waitedOut } from '../domain/approval-wait.ts';
+import type { HeldSealed } from '../domain/holdings.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
@@ -445,6 +454,15 @@ export async function voidPendingOf(
   // whose requests share totals take them alike, never crosswise.
   const held = await heldInOf(tx, states, orgId, found);
   const totals = await lockedTotalsOf(tx, states, orgId, held);
+  // Then their payee windows (11b, GM-1b), each once, in order of ID, after every total.
+  const takes = held.flatMap(({ windows }) => windows);
+  const windowsRead = await payeeWindowsOf(
+    tx,
+    states,
+    orgId,
+    takes.map(({ id }) => id),
+    'change',
+  );
   for (const id of pending) await voidedWith(tx, states, keys, { orgId, id }, [cause], now, 'caller');
   // One record a total, for every request of the batch it held.
   for (const { key, total, of } of totals) {
@@ -452,6 +470,11 @@ export async function voidPendingOf(
     const change = givenBackBy({ actor: ACTOR, action: VOIDED, details: {} }, of);
     await givenBack(tx, states, orgId, { key, total, amount }, { at: now, change });
   }
+  // And one a window.
+  await windowsGivenBack(tx, states, orgId, windowsRead, takes, {
+    at: now,
+    change: windowsGivenBackBy({ actor: ACTOR, action: VOIDED, details: {} }),
+  });
   return pending.length;
 }
 
@@ -589,24 +612,37 @@ async function endHolding(
   await requestHoldingsWhole(tx, states, keys, key.orgId, key.id, NO_PAYMENTS);
   // Its month's total locked for change (11a) before the move takes the head (12), unless the caller holds it (GM-1a).
   // Read for change already by every caller, in this transaction: the same row, verified again.
+  // Its payee windows likewise (11b, GM-1b), after the total.
   const held = total === 'own' ? await lockedTotalOf(tx, states, key, 'change') : null;
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, change);
   movedAsRead(moved, `A spend request read as open didn't ${event}`);
-  if (held !== null) await givenBack(tx, states, key.orgId, held, { at, change: givenBackBy(change, [held]) });
+  if (held !== null) {
+    await givenBack(tx, states, key.orgId, held, { at, change: givenBackBy(change, [held]) });
+    await windowsGivenBack(tx, states, key.orgId, held.windowsRead, held.windows, {
+      at,
+      change: windowsGivenBackBy(change),
+    });
+  }
   await releaseReservationsOf(tx, { requestId: key.id, at });
   await releaseClaim(tx, { requestId: key.id, releasedAt: at });
 }
 
-/** Where a request's capacity is held: its month's total, by its signed state and sealed decision, and its amount. */
+/**
+ * Where a request's capacity is held: its month's total, by its signed state and sealed decision, and its amount;
+ * and the payee windows it was added to, at the hour its decision sealed (GM-1b).
+ */
 interface HeldIn {
   readonly requestId: string;
   readonly key: MonthTotalKey;
   readonly amount: bigint;
+  readonly windows: readonly WindowTake[];
 }
 
 /**
  * Where each request's capacity is held, by its verified state and its decision as sealed (one statement). One whose
- * decision sealed no month (decided before E1) has none: no month total counts it (the cutover's rule alike).
+ * decision sealed no month (decided before E1) has none: no month total or window counts it (the cutovers' rule
+ * alike). Its windows are those its decision sealed; one decided before GM-1b sealed none, and is counted in those
+ * the windows' cutover named for it, else in its supplier's window alone, as that cutover opened it (windowsHeldOf).
  */
 async function heldInOf(
   tx: EndingsTransaction,
@@ -621,28 +657,64 @@ async function heldInOf(
     requests.map(({ id }) => id),
   );
   return requests.flatMap((request) => {
-    const month = decided.get(request.id)?.held?.month;
-    if (month === undefined) return [];
-    const key = { agentId: request.agentId, month, currency: request.amount.currency };
-    return [{ requestId: request.id, key, amount: request.amount.minor }];
+    const held = decided.get(request.id)?.held;
+    if (held === undefined || held === null) return [];
+    const key = { agentId: request.agentId, month: held.month, currency: request.amount.currency };
+    return [{ requestId: request.id, key, amount: request.amount.minor, windows: windowsHeldOf(orgId, request, held) }];
   });
 }
 
 /**
- * The request's month total, read for change (11a, GM-1a), with what it gives back: its request read through its
- * signed state (`lock`, as its caller holds it) and its decision's sealed month. Null for none to give back to: a
- * request that can't be believed (its read raised the alarm) or whose decision sealed no month (before E1).
+ * The windows a request's capacity is in, each with its sealed hour and amount (GM-1b): those its decision sealed,
+ * or, decided before GM-1b, those the windows' cutover named for it (read with its decision), else its supplier's
+ * alone (the windows' cutover counts it there, by its signed supplier).
+ */
+export function windowsHeldOf(
+  orgId: string,
+  request: Pick<SpendRequestRecord, 'id' | 'supplierId' | 'amount'>,
+  held: Pick<HeldSealed, 'reservedAt' | 'windows'>,
+): readonly WindowTake[] {
+  const ids = held.windows ?? [
+    payeeWindowId(orgId, { supplierId: request.supplierId, payeeKey: null, currency: request.amount.currency }),
+  ];
+  const hour = hourOf(held.reservedAt);
+  return ids.map((id) => ({ id, requestId: request.id, hour, amount: request.amount.minor }));
+}
+
+/**
+ * The request's month total, read for change (11a, GM-1a), and its payee windows, read for change in order of ID
+ * (11b, GM-1b), with what it gives back: its request read through its signed state (`lock`, as its caller holds it)
+ * and its decision as sealed. Null for none to give back to: a request that can't be believed (its read raised the
+ * alarm) or whose decision sealed no month (before E1).
  */
 export async function lockedTotalOf(
   tx: EndingsTransaction,
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
   lock: 'share' | 'change',
-): Promise<(HeldIn & { readonly total: MonthTotalCheck }) | null> {
+): Promise<
+  (HeldIn & { readonly total: MonthTotalCheck; readonly windowsRead: ReadonlyMap<string, PayeeWindowCheck> }) | null
+> {
   const read = await requestOf(tx, states, key, lock);
   const [held] = await heldInOf(tx, states, key.orgId, read.outcome === 'found' ? [read.request] : []);
-  return held === undefined ? null : { ...held, total: await monthTotalOf(tx, states, key.orgId, held.key, 'change') };
+  if (held === undefined) return null;
+  const total = await monthTotalOf(tx, states, key.orgId, held.key, 'change');
+  const windowsRead = await payeeWindowsOf(
+    tx,
+    states,
+    key.orgId,
+    held.windows.map(({ id }) => id),
+    'change',
+  );
+  return { ...held, total, windowsRead };
 }
+
+/** The windows' own event for capacity given back by an ending: the ending's actor (windowsGivenBack adds the requests and amount). */
+const windowsGivenBackBy = (change: SignedChange): SignedChange => ({
+  actor: change.actor,
+  action: 'payee_window.released',
+  details: {},
+});
 
 /** The total's own event for capacity given back by an ending: the ending's actor, with the requests and amount. */
 const givenBackBy = (change: SignedChange, held: readonly HeldIn[]): SignedChange => ({

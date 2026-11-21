@@ -975,6 +975,16 @@ export const PLAIN_WORDS = {
     broke: 'The organisation is on hold and its agents are answered busy.',
     next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
   },
+  'payee_windows.cutover_failed': {
+    happened: "Moving an organisation's split-payment check onto signed hourly totals failed.",
+    broke: "That organisation's agents can't spend under a mandate yet: their requests are answered busy.",
+    next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database and the error.',
+  },
+  'payee_windows.cutover_held': {
+    happened: "An organisation's split-payment check was not moved onto signed totals: a record can't be trusted.",
+    broke: 'The organisation is on hold and its agents are answered busy.',
+    next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
+  },
   'http.framework_log': {
     happened: 'The web server reported a problem of its own while handling a request.',
     broke: 'That request may not have been answered properly.',

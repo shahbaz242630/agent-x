@@ -1,0 +1,207 @@
+// An organisation made before GM-1b moved to signed payee windows (0112;
+// R-15), once, in one transaction: every window its spend requests then held
+// capacity in, in an hour a split window can still count, opened as a signed
+// window (`payee_window.opened`), counted from the requests' signed states and
+// their decisions' sealed instants, never from the reservations (the rows the
+// owner could have cut); then its cutover event (`payee_windows.cutover`),
+// after which a payee with no window holds nothing. Until it runs, every
+// decision in it is refused busy (weighed-totals.ts). It runs only once the
+// organisation's month totals are cut over (GM-1a), so a decision reading its
+// windows cut over knows its totals are too.
+//
+// What a request holds is the month totals' cutover's rule (eachSignedHolding):
+// waiting, approved or ready, its whole amount; handed off, as its payment
+// says. A request whose decisions can't be read, or with no decision, stops
+// the cutover (tampered, alarmed): nothing is opened, and the organisation
+// stays busy rather than counting it as nothing. One whose decision sealed no
+// month was decided before E1: no window counts it. Every request decided
+// before this cutover sealed no windows (decisions are refused busy until it
+// commits), so each is counted where its signed facts alone place it: its
+// supplier's window, at its sealed hour, and, where its one reservation's payee
+// key holds to its decision's payee seal (E1b), its key's and the pair's too,
+// those windows named for it in an event of the cutover's own
+// (`spend_request.windows_named`), which its ending, the carry and the holdings
+// check then read with its decision. One with no seal, or a key that doesn't
+// hold to it, stays in its supplier's window alone. Where the
+// reservations hold other than the requests do, the window is opened from the
+// requests all the same, and the mismatch alarmed (`holding`).
+import type { KeyProvider } from '@agentx/platform/keys';
+import type { Transaction } from 'kysely';
+
+import type { AuditEvent, AuditTables, SignedStates } from '../../audit/index.ts';
+import {
+  addToWindows,
+  hourOf,
+  keptFromHour,
+  type LimitReservationsTables,
+  monthTotalsCutOver,
+  PAYEE_WINDOWS,
+  payeeWindowId,
+  payeeWindowKeys,
+  payeeWindowOf,
+  payeeWindowOrder,
+  payeeWindowsCutOver,
+  recordPayeeWindow,
+  reservationsFor,
+  reservationsInWindows,
+  sameFrom,
+  WINDOWS_CUTOVER_ACTION,
+  WINDOWS_CUTOVER_SUBJECT,
+  WINDOWS_NAMED_ACTION,
+  WINDOWS_NAMED_SUBJECT,
+  type WindowsHeld,
+} from '../../limit-reservations/index.ts';
+import type { HeldSealed } from '../domain/holdings.ts';
+import type { SpendRequestRecord } from './decisions.ts';
+import { eachSignedHolding } from './month-totals-cutover.ts';
+import type { PaymentsOf } from './holdings-check.ts';
+import { payeeAsSealed } from './payee-seal.ts';
+import { SPEND_REQUESTS } from './requests.ts';
+import type { SpendRequestsTables } from './tables.ts';
+
+type CutoverTransaction = Transaction<SpendRequestsTables & LimitReservationsTables & AuditTables>;
+
+const OPENER = { type: 'system', id: 'api' } as const;
+
+/**
+ * What a windows' cutover did: cut over, with how many windows it opened; already cut over; not yet, its month totals
+ * not cut over first; or not, something tampered with (alarmed).
+ */
+export type WindowsCutoverDone =
+  | { readonly outcome: 'cut_over'; readonly opened: number; readonly mismatched: number }
+  | { readonly outcome: 'already' | 'not_yet' | 'tampered' };
+
+const ALREADY = Object.freeze({ outcome: 'already' as const });
+const NOT_YET = Object.freeze({ outcome: 'not_yet' as const });
+const TAMPERED = Object.freeze({ outcome: 'tampered' as const });
+/** The windows already counted, or their log not believed: nothing to cut over. */
+const STOPPED_BY = { cut_over: ALREADY, tampered: TAMPERED } as const;
+/** The month totals not cut over yet, or their log not believed: the windows wait for them. */
+const WAITING_ON = { not_yet: NOT_YET, tampered: TAMPERED } as const;
+
+/**
+ * The organisation cut over to signed payee windows, in the caller's transaction (withSignedStates' for it), at `at`;
+ * `record` adds the cutover's own event to the organisation's chain (an audit trail's record, last).
+ */
+export async function cutOverPayeeWindows<Tx extends CutoverTransaction>(
+  tx: Tx,
+  states: SignedStates,
+  orgId: string,
+  {
+    keys,
+    payments,
+    record,
+    at,
+  }: {
+    /** The payee seals' key, to hold each request's reservation's payee key to its decision's seal. */
+    readonly keys: KeyProvider;
+    readonly payments: PaymentsOf<Tx>;
+    readonly record: (event: AuditEvent) => Promise<unknown>;
+    readonly at: Date;
+  },
+): Promise<WindowsCutoverDone> {
+  const now = await payeeWindowsCutOver(tx, states, orgId);
+  if (now !== 'not_yet') return STOPPED_BY[now];
+  const months = await monthTotalsCutOver(tx, states, orgId);
+  if (months !== 'cut_over') return WAITING_ON[months];
+  const keptFrom = keptFromHour(at);
+  const counted: { readonly request: SpendRequestRecord; readonly held: HeldSealed }[] = [];
+  const sealedAhead: string[] = [];
+  const read = await eachSignedHolding(tx, states, orgId, payments, (request, decision) => {
+    // One sealing windows was decided by GM-1b's code, which refuses an organisation not cut over: past the app.
+    if (decision.windows !== null) {
+      states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
+      sealedAhead.push(request.id);
+    }
+    if (hourOf(decision.reservedAt) >= keptFrom) counted.push({ request, held: decision });
+  });
+  if (read === 'tampered' || sealedAhead.length > 0) return TAMPERED;
+  const keyed = await sealedPayeeKeys(tx, keys, orgId, counted);
+  const signed: WindowsHeld = new Map();
+  for (const { request, held } of counted) {
+    const payeeKey = keyed.get(request.id) ?? null;
+    const payee = { supplierId: request.supplierId, payeeKey, currency: request.amount.currency };
+    addToWindows(signed, orgId, payeeWindowKeys(payee), hourOf(held.reservedAt), request.amount.minor);
+  }
+  // Each read for change first, in order of ID, every one before any is opened: a window found before the cutover
+  // (planted past the app, its read raising the alarm) opens none of them.
+  const opening = [...signed.entries()].toSorted(([a], [b]) => payeeWindowOrder(a, b));
+  for (const [id] of opening) {
+    if ((await payeeWindowOf(tx, states, orgId, id, 'change')).outcome !== 'none') return TAMPERED;
+  }
+  // Each request counted in its key's windows named, so its ending gives back to them and the holdings check counts
+  // its reservation there: the sealed facts its windows rest on from now on.
+  for (const { request } of counted) {
+    const payeeKey = keyed.get(request.id);
+    if (payeeKey === undefined) continue;
+    const payee = { supplierId: request.supplierId, payeeKey, currency: request.amount.currency };
+    await record({
+      actor: OPENER,
+      action: WINDOWS_NAMED_ACTION,
+      subject: { type: WINDOWS_NAMED_SUBJECT, id: request.id, version: 1 },
+      details: {
+        payeeWindows: payeeWindowKeys(payee)
+          .map((key) => payeeWindowId(orgId, key))
+          .join(','),
+      },
+    });
+  }
+  const reserved = await reservationsInWindows(tx, orgId, keptFrom);
+  const apart = [...new Set([...signed.keys(), ...reserved.keys()])].filter(
+    (id) => !sameFrom(signed.get(id)?.held ?? new Map(), reserved.get(id)?.held ?? new Map(), keptFrom),
+  );
+  for (const id of apart) states.mismatch(PAYEE_WINDOWS.subject, { orgId, id });
+  for (const [, { key, held }] of opening) {
+    await recordPayeeWindow(tx, states, orgId, key, { outcome: 'none' }, held, {
+      at,
+      change: { actor: OPENER, action: 'payee_window.opened', details: {} },
+    });
+  }
+  await record({
+    actor: OPENER,
+    action: WINDOWS_CUTOVER_ACTION,
+    subject: { type: WINDOWS_CUTOVER_SUBJECT, id: orgId, version: 1 },
+    details: { opened: opening.length, mismatched: apart.length },
+  });
+  return { outcome: 'cut_over', opened: opening.length, mismatched: apart.length };
+}
+
+/** How many requests' reservations one statement reads: verifiedStates' most, alike. */
+const RESERVATIONS_A_READ = 500;
+
+/**
+ * The payee key each request decided before GM-1b was reserved under, where it holds to its decision's payee seal
+ * (E1b): its one reservation on its own supplier, with a key, that seal's MAC over it whole. Sealed facts alone: a
+ * request with no seal (decided before E1b), a seal not whole, a reservation not its own or its key not the one
+ * sealed, has none, and is counted in its supplier's window alone. By request ID.
+ */
+async function sealedPayeeKeys(
+  tx: CutoverTransaction,
+  keys: KeyProvider,
+  orgId: string,
+  counted: readonly { readonly request: SpendRequestRecord; readonly held: HeldSealed }[],
+): Promise<ReadonlyMap<string, string>> {
+  const keyed = new Map<string, string>();
+  for (let start = 0; start < counted.length; start += RESERVATIONS_A_READ) {
+    const page = counted.slice(start, start + RESERVATIONS_A_READ);
+    const reserved = await reservationsFor(
+      tx,
+      page.map(({ request }) => request.id),
+    );
+    for (const { request, held } of page) {
+      const own = reserved.filter(({ requestId }) => requestId === request.id);
+      const [reservation] = own;
+      const payeeKey = reservation?.payeeKey ?? null;
+      if (
+        own.length === 1 &&
+        payeeKey !== null &&
+        reservation?.supplierId === request.supplierId &&
+        typeof held.payee === 'object' &&
+        payeeAsSealed(keys, held.payee, { orgId, requestId: request.id, payeeKey })
+      ) {
+        keyed.set(request.id, payeeKey);
+      }
+    }
+  }
+  return keyed;
+}

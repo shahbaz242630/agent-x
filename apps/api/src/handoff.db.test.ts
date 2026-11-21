@@ -1771,8 +1771,34 @@ describe('what a handed-off request holds follows its payment (C3; ADR-006 ยง10โ
         .execute(),
     );
     expect(released).toHaveLength(1);
+    // Its payee's windows likewise, each once (GM-1b): its supplier's, its payee key's and the pair's, the kept one
+    // still in each.
+    const windowReleased = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select('details')
+        .where('subject_type', '=', 'payee_window')
+        .where('action', '=', 'payee_window.released')
+        .execute(),
+    );
+    expect(windowReleased).toHaveLength(3);
+    for (const { details } of windowReleased) {
+      expect(JSON.parse(details)).toMatchObject({
+        requestIds: cancelled.id.toLowerCase(),
+        amountMinor: SMALL(2n).minor.toString(),
+      });
+    }
     expect(await holdingsChecked(w)).toEqual([
-      expect.objectContaining({ mismatched: 0, tampered: 0, totals: 1, totalsMismatched: 0, totalsMissing: 0 }),
+      expect.objectContaining({
+        mismatched: 0,
+        tampered: 0,
+        totals: 1,
+        totalsMismatched: 0,
+        totalsMissing: 0,
+        windows: 3,
+        windowsMismatched: 0,
+        windowsMissing: 0,
+      }),
     ]);
   });
 
