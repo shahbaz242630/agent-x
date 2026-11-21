@@ -328,7 +328,7 @@ beforeEach(() => {
 });
 
 describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
-  it('records the download first, then gives a paid request whole: decided, handed off, paid, every event linked', async () => {
+  it('SEC-EVD-03 records the download first, then gives a paid request whole: decided, handed off, paid, every event linked', async () => {
     const { w, request, instruction, transaction } = await paid();
 
     const bundle = bundleOf(await exported(w.admin, request.id));
@@ -419,7 +419,7 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     expect(await downloadsOf(w)).toHaveLength(1);
   });
 
-  it('gives a denied request too: its decision and reasons, no reservation and no payment', async () => {
+  it('SEC-EVD-03 gives a denied request too: its decision and reasons, no reservation and no payment', async () => {
     const { w, acting } = await ready();
     const denied = await ask(acting, w, { amount: AED(w.maxPayment * 10n) });
     expect(denied.status).toBe('DENIED');
@@ -430,6 +430,38 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     expect(bundle.spendRequest.reasons.map(({ code }) => code)).toEqual(denied.reasons);
     expect(bundle).toMatchObject({ reservation: null, payment: null, approval: null, rejection: null, voiding: null });
     expect(actionsOf(bundle)).toEqual(['spend_request.received', 'spend_request.decided', EVIDENCE_EXPORTED]);
+  });
+
+  // S208: PRD §12's third case beside denial and success, a partner's decline (the fake's .01 fils, B2).
+  it('SEC-EVD-03 gives a request the partner declined whole: decided, handed off, declined with its code, released, every event linked, no secret', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: SMALL(1n) });
+    await createHandoff(runner(w)).run();
+    const payment = await paymentOf(w, request.id);
+    if (typeof payment.instruction !== 'object' || typeof payment.transaction !== 'object') {
+      throw new Error(`not handed off: ${JSON.stringify(payment)}`);
+    }
+
+    const bundle = bundleOf(await exported(w.admin, request.id));
+
+    expect(bundle.spendRequest).toMatchObject({
+      id: request.id,
+      decision: 'ALLOW',
+      amountMinor: Number(SMALL(1n).minor),
+    });
+    expect(bundle.reservation).toMatchObject({ state: 'RELEASED' });
+    expect(bundle.payment).toMatchObject({
+      id: payment.transaction.id,
+      status: 'FAILED',
+      rejectCode: 'AANI.AM04',
+      instruction: { id: payment.instruction.id, intentHash: payment.instruction.intentHash },
+    });
+    expect(actionsOf(bundle)).toEqual(
+      expect.arrayContaining(['spend_request.decided', 'instruction.made', 'transaction.opened', EVIDENCE_EXPORTED]),
+    );
+    expect(bundle.events.every(({ hash, prevHash }) => /^[0-9a-f]{64}$/.test(hash) && prevHash.length > 0)).toBe(true);
+    const text = JSON.stringify(bundle);
+    for (const secret of secretsOf(w, payment.instruction)) expect(text).not.toContain(secret);
   });
 
   it('gives a rejected request with who rejected it, when, why and the step-up it was bound to', async () => {

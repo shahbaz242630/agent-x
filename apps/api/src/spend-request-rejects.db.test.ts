@@ -285,7 +285,7 @@ describe('rejecting a spend request waiting for approval (B4a)', () => {
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 
-  it('refuses a step-up asked for another request, or for another reason: STEP_UP_FAILED', async () => {
+  it('SEC-HA-02 refuses a step-up asked for another request, or for another reason: STEP_UP_FAILED', async () => {
     const { w, acting } = await ready();
     const first = await ask(acting, w);
     const second = await ask(acting, w);

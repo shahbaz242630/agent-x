@@ -216,7 +216,7 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
     expect(await ask(await member(w.org, role), id, 'suspend')).toEqual(refused(403, 'FORBIDDEN'));
   });
 
-  it('refuses a step-up signed in with an app code: STEP_UP_FAILED, nothing moved', async () => {
+  it('SEC-HA-02 refuses a step-up signed in with an app code: STEP_UP_FAILED, nothing moved', async () => {
     const w = await world();
     const id = await active(w);
     expect(await moved(w, id, 'suspend', APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
@@ -230,6 +230,21 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
     await stepUp(w.admin, challengeId);
 
     expect(await confirm(w.admin, id, 'revoke', challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+  });
+
+  // S208: the resume's own step-up, the one of the three moves a refusal test didn't cover.
+  it('SEC-HA-02 refuses a resume confirmed before signing in again, or with an app code: still suspended; the same step-up, signed in again with a passkey, resumes it', async () => {
+    const w = await world();
+    const id = await active(w);
+    movedOf(await moved(w, id, 'suspend'));
+    const challengeId = askedFor(await ask(w.admin, id, 'resume'));
+
+    expect(await confirm(w.admin, id, 'resume', challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await moved(w, id, 'resume', APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect((await eventsAbout(w.org, id)).at(-1)?.action).toBe('mandate.suspended');
+
+    await stepUp(w.admin, challengeId);
+    expect(movedOf(await confirm(w.admin, id, 'resume', challengeId)).mandate.status).toBe('ACTIVE');
   });
 
   it('refuses a step-up asked with another choice for the pending requests: STEP_UP_FAILED, nothing moved (decision 7)', async () => {
@@ -283,7 +298,7 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
     expect(movedOf(await moved(w, id, 'resume')).mandate.status).toBe('ACTIVE');
   });
 
-  it('refuses a step-up asked before the mandate changed: STEP_UP_FAILED, for the mandate as it stood', async () => {
+  it('SEC-HA-02 refuses a step-up asked before the mandate changed: STEP_UP_FAILED, for the mandate as it stood', async () => {
     const w = await world();
     const id = await active(w);
     const challengeId = askedFor(await ask(w.admin, id, 'revoke'));
@@ -402,7 +417,7 @@ describe('choosing what happens past a mandate’s own limits, on the mandate in
     expect(await shownOf(w, id)).toBe('refuse');
   });
 
-  it('refuses a step-up asked with the other choice, or before the mandate changed: STEP_UP_FAILED, nothing chosen', async () => {
+  it('SEC-HA-02 refuses a step-up asked with the other choice, or before the mandate changed: STEP_UP_FAILED, nothing chosen', async () => {
     const w = await world();
     const id = await shared.inForce(registry, w, {}, 'refuse');
     const other = askedFor(await askOverLimit(w.admin, id, 'refuse'));

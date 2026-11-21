@@ -545,7 +545,7 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect(await verifiedNotices(org)).toEqual([]);
   });
 
-  it('binds the step-up to the note asked with: another note at the confirm verifies nothing', async () => {
+  it('SEC-HA-02 binds the step-up to the note asked with: another note at the confirm verifies nothing', async () => {
     const { org, bob, supplierId } = await established();
 
     expect(await verified(bob, supplierId, { note: NOTE, confirmNote: `${NOTE}, and more` })).toEqual(

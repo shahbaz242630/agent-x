@@ -409,7 +409,7 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
     expect(second.cookie).toBe(flow.cookie);
   });
 
-  it('refuses a developer another member’s agent, an admin without a passkey, a scope not asked, and a suspended agent', async () => {
+  it('SEC-HA-02 refuses a developer another member’s agent, an admin without a passkey, a scope not asked, and a suspended agent', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const developer = await member(org, 'developer');
@@ -2079,7 +2079,7 @@ describe(`SEC-OAUTH-06 a connection's own record tampered with, at its revocatio
 });
 
 describe(`mutation pass (6E3b): what each survivor showed untested (Postgres ${server.version})`, () => {
-  it('M08: a step-up for one connection’s revocation can’t revoke another', async () => {
+  it('SEC-HA-02 M08: a step-up for one connection’s revocation can’t revoke another', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const agentId = await agent(org, admin);

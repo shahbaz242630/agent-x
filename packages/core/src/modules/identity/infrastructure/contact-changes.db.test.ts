@@ -286,7 +286,7 @@ describe(`adding a registered contact (B6-1c, Postgres ${server.version})`, () =
     expect(await noticesOf(org)).toHaveLength(2);
   });
 
-  it('refuses to confirm without the step-up, or with an app code rather than a passkey (SEC-HA-12), changing nothing', async () => {
+  it('SEC-HA-02 refuses to confirm without the step-up, or with an app code rather than a passkey (SEC-HA-12), changing nothing', async () => {
     const { org, admin } = await organization();
     const asked = written(await add(admin));
 
@@ -545,7 +545,7 @@ describe(`removing a registered contact (B6-1c, Postgres ${server.version})`, ()
     ]);
   });
 
-  it('refuses a removal stepped up for another contact, or not stepped up, or with an app code', async () => {
+  it('SEC-HA-02 refuses a removal stepped up for another contact, or not stepped up, or with an app code', async () => {
     const { admin } = await organization();
     const id = await added(admin);
     const other = await added(admin, 'owner@example.test');
