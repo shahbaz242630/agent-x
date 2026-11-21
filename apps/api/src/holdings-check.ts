@@ -60,6 +60,7 @@ import {
   slotsMissing,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
+import { payeeKeysNow, type SuppliersTables } from '@agentx/core/modules/suppliers';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
 import { type Clock, type IdGenerator, systemClock } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
@@ -125,7 +126,9 @@ export function createHoldingsCheck({
   readonly list: () => Promise<readonly string[]>;
   /** One whose pass ended this run, its requests all checked: owed no visit until listed again. */
   readonly done?: (orgId: string) => void;
-  readonly database: Database<SpendRequestsTables & LimitReservationsTables & PaymentsTables & AuditTables>;
+  readonly database: Database<
+    SpendRequestsTables & LimitReservationsTables & PaymentsTables & SuppliersTables & AuditTables
+  >;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
@@ -237,6 +240,7 @@ export function createHoldingsCheck({
         cutOverOrderSlots(tx, states, orgId, {
           keys,
           payments: paymentHoldsOf,
+          payeeKeysNow,
           record: (event) => trail.record(tx, orgId, event),
           at: clock.now(),
         }),

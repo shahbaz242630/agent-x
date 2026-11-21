@@ -999,12 +999,22 @@ describe('an approval older than the horizon: denied at the hand-off, its holdin
     return { passed: lines('holdings_check.passed'), alarms: lines('audit.integrity_failed') };
   };
 
-  /** What the books must say once a request ended late, with no tampering: its reservation HELD, all level. */
+  /**
+   * What the books must say once a request ended late, with no tampering: its reservation HELD, its order kept (its
+   * claim open, its slots held: TR-2, partner S209, fail safe), all level.
+   */
   const booksLevel = async (w: World, requestId: string) => {
-    expect(await holdingsOf(w, requestId)).toEqual({ reservation: 'HELD', released: true });
+    expect(await holdingsOf(w, requestId)).toEqual({ reservation: 'HELD', released: false });
     const { passed, alarms } = await holdingsCheckedNow(w);
     expect(passed).toEqual([
-      expect.objectContaining({ mismatched: 0, tampered: 0, totalsMismatched: 0, windowsMismatched: 0 }),
+      expect.objectContaining({
+        mismatched: 0,
+        tampered: 0,
+        totalsMismatched: 0,
+        windowsMismatched: 0,
+        slotsMismatched: 0,
+        slotsMissing: 0,
+      }),
     ]);
     expect(alarms).toEqual([]);
     const ending = (await shared.eventsAbout(w.org, requestId, SPEND_REQUESTS.subject)).at(-1);

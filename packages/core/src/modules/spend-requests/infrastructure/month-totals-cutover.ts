@@ -174,7 +174,8 @@ export async function eachSignedHolding<Tx extends CutoverTransaction>(
 
 /**
  * eachSignedHolding with every request still holding, its decision whole as read, a decision sealing no month (before
- * E1) among them: the order slots' cutover (TR-2), as a request decided before E1 still holds its order.
+ * E1) among them: the order slots' cutover (TR-2), as a request decided before E1 still holds its order. `kept`: an
+ * ended request whose signed ending kept its capacity too (AT13d), as it keeps its order (partner S209).
  */
 export async function eachSignedHolder<Tx extends CutoverTransaction>(
   tx: Tx,
@@ -182,6 +183,7 @@ export async function eachSignedHolder<Tx extends CutoverTransaction>(
   orgId: string,
   payments: PaymentsOf<Tx>,
   visit: (request: SpendRequestRecord, decided: Decided) => void,
+  ended: 'passed over' | 'kept' = 'passed over',
 ): Promise<'read' | 'tampered'> {
   let after: string | null = null;
   do {
@@ -192,7 +194,7 @@ export async function eachSignedHolder<Tx extends CutoverTransaction>(
       after,
       REQUESTS_A_READ,
     );
-    const holding = await holdingOf(tx, states, orgId, listed.ids);
+    const holding = await holdingOf(tx, states, orgId, listed.ids, ended);
     if (holding === 'tampered') return 'tampered';
     if ((await visitHeld(tx, states, orgId, payments, holding, visit)) === 'tampered') return 'tampered';
     after = listed.next;
@@ -200,18 +202,22 @@ export async function eachSignedHolder<Tx extends CutoverTransaction>(
   return 'read';
 }
 
-/** The requests of a page that still hold capacity, each verified; `tampered` if any can't be believed. */
+/**
+ * The requests of a page that still hold capacity (with `kept`, every one ended before hand-off too, its decision to
+ * say whether its ending kept it), each verified; `tampered` if any can't be believed.
+ */
 async function holdingOf(
   tx: CutoverTransaction,
   states: SignedStates,
   orgId: string,
   ids: readonly string[],
+  ended: 'passed over' | 'kept',
 ): Promise<SpendRequestRecord[] | 'tampered'> {
   if (ids.length === 0) return [];
   const holding: SpendRequestRecord[] = [];
   for (const check of (await requestsOf(tx, states, orgId, ids)).values()) {
     if (check.outcome !== 'found') return 'tampered';
-    if (holdsNow(check.request.status)) holding.push(check.request);
+    if (holdsNow(check.request.status) || ended === 'kept') holding.push(check.request);
   }
   return holding;
 }
@@ -240,6 +246,11 @@ async function visitHeld<Tx extends CutoverTransaction>(
   if (decided === 'tampered') return 'tampered';
   for (const request of holding.filter(({ id }) => paid.get(id) !== 'ended')) {
     const decision = decided.get(request.id);
+    // Ended before hand-off, it holds only where its signed ending kept its capacity (AT13d).
+    if (!holdsNow(request.status)) {
+      if (decision?.capacityKept === true) visit(request, decision);
+      continue;
+    }
     if (decision === undefined) {
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
       return 'tampered';

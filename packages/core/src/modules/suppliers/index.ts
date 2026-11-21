@@ -61,6 +61,7 @@ export {
   type SupplierCheck,
   SupplierContactsUnreadable,
   type SupplierRecord,
+  payeeKeysNow,
   SUPPLIERS,
   type SupplierShown,
   suppliersAddedSince,

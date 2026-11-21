@@ -36,11 +36,11 @@ import type { Transaction } from 'kysely';
 
 import type { AuditEvent, AuditTables, SignedStates } from '../../audit/index.ts';
 import type { LimitReservationsTables } from '../../limit-reservations/index.ts';
-import { payeeWindowsCutOver } from '../../limit-reservations/index.ts';
+import { payeeWindowsCutOver, reservationsFor } from '../../limit-reservations/index.ts';
 import { bankKeyOf } from '../domain/asked.ts';
 import { heldBy, holdersText, type Holders, noHolders } from '../domain/order-slots.ts';
 import type { SpendRequestRecord } from './decisions.ts';
-import { type ClaimRow, claimsFor, type Decided, orderKeysOf, type PaymentsOf } from './holdings-check.ts';
+import { claimsFor, type Decided, orderKeysOf, type PaymentsOf } from './holdings-check.ts';
 import { eachSignedHolder } from './month-totals-cutover.ts';
 import {
   ORDER_SLOTS,
@@ -103,12 +103,15 @@ export async function cutOverOrderSlots<Tx extends CutoverTransaction>(
   {
     keys,
     payments,
+    payeeKeysNow,
     record,
     at,
   }: {
-    /** The payee seals' key, to hold each request's claim's payee key to its decision's seal. */
+    /** The payee seals' key, to hold each request's payee key to its decision's seal. */
     readonly keys: KeyProvider;
     readonly payments: PaymentsOf<Tx>;
+    /** Each supplier's payee key as its signed state holds it now (the suppliers module's, level 6, read first). */
+    readonly payeeKeysNow: PayeeKeysNow<Tx>;
     readonly record: (event: AuditEvent) => Promise<unknown>;
     readonly at: Date;
   },
@@ -117,9 +120,14 @@ export async function cutOverOrderSlots<Tx extends CutoverTransaction>(
   if (now !== 'not_yet') return STOPPED_BY[now];
   const windows = await payeeWindowsCutOver(tx, states, orgId);
   if (windows !== 'cut_over') return WAITING_ON[windows];
+  // The suppliers (6) before the requests (8), as the lock order has them.
+  const keysNow = await payeeKeysNow(tx, states, orgId);
+  if (keysNow === 'tampered') return TAMPERED;
   const holding = await holdingNow(tx, states, orgId, payments);
   if (holding === 'tampered') return TAMPERED;
-  const filled = slotsFilled(states, orgId, await ordersOf(tx, states, keys, orgId, holding));
+  const orders = await ordersOf(tx, states, { keys, keysNow, orgId }, holding);
+  if (orders === 'tampered') return TAMPERED;
+  const filled = slotsFilled(states, orgId, orders);
   if (filled === 'tampered') return TAMPERED;
   const { opening, named } = filled;
   // Each read for change first, in order of ID, every one before any is opened: a slot found before the cutover
@@ -159,6 +167,17 @@ export async function cutOverOrderSlots<Tx extends CutoverTransaction>(
   return { outcome: 'cut_over', opened: ordered.length, mismatched: apart.length };
 }
 
+/**
+ * Each supplier's payee key as its signed state holds it now, by supplier ID in lower case (null: none), every supplier
+ * of the organisation; `tampered` where one can't be believed (its alarm raised). Spend requests can't read suppliers
+ * (ADR-004), so the caller passes it in.
+ */
+export type PayeeKeysNow<Tx> = (
+  tx: Tx,
+  states: SignedStates,
+  orgId: string,
+) => Promise<ReadonlyMap<string, string | null> | 'tampered'>;
+
 /** A request still holding its order, with its decisions as read. */
 interface Holding {
   readonly request: SpendRequestRecord;
@@ -178,13 +197,21 @@ async function holdingNow<Tx extends CutoverTransaction>(
 ): Promise<readonly Holding[] | 'tampered'> {
   const holding: Holding[] = [];
   const sealedAhead: string[] = [];
-  const read = await eachSignedHolder(tx, states, orgId, payments, (request, decided) => {
-    if (decided.slots !== null) {
-      states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
-      sealedAhead.push(request.id);
-    }
-    holding.push({ request, decided });
-  });
+  // An ending that kept its capacity kept its order too (AT13d, partner S209): its slots are opened as a holder's.
+  const read = await eachSignedHolder(
+    tx,
+    states,
+    orgId,
+    payments,
+    (request, decided) => {
+      if (decided.slots !== null) {
+        states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
+        sealedAhead.push(request.id);
+      }
+      holding.push({ request, decided });
+    },
+    'kept',
+  );
   return read === 'tampered' || sealedAhead.length > 0 ? 'tampered' : holding;
 }
 
@@ -231,28 +258,46 @@ function sameHolders(holders: Holders | undefined, claimed: ReadonlySet<string> 
 }
 
 /**
- * Each holding request's order as its signed facts name it (the header): a page of claims and canonical forms a
- * statement each. A claim whose payee key doesn't hold to its decision's seal is alarmed, and its request counted on
- * its supplier alone.
+ * Each holding request's order as its signed facts name it (the header): a page of claims, reservations and canonical
+ * forms a statement each. `tampered` where a request's payee key can't be settled from them (sealedPayeeKey, alarmed):
+ * nothing is then opened, and the organisation stays busy rather than leave an order unguarded under its key.
  */
 async function ordersOf(
   tx: CutoverTransaction,
   states: SignedStates,
-  keys: KeyProvider,
-  orgId: string,
+  {
+    keys,
+    keysNow,
+    orgId,
+  }: { readonly keys: KeyProvider; readonly keysNow: ReadonlyMap<string, string | null>; readonly orgId: string },
   holding: readonly Holding[],
-): Promise<readonly { readonly request: SpendRequestRecord; readonly order: OrderToSlot }[]> {
+): Promise<readonly { readonly request: SpendRequestRecord; readonly order: OrderToSlot }[] | 'tampered'> {
   const orders = [];
   for (let start = 0; start < holding.length; start += REQUESTS_A_READ) {
     const page = holding.slice(start, start + REQUESTS_A_READ);
-    const claims = await claimsFor(
-      tx,
-      page.map(({ request }) => request.id),
-    );
+    const ids = page.map(({ request }) => request.id);
+    const claims = await claimsFor(tx, ids);
+    const reserved = await reservationsFor(tx, ids);
     const canonical = await orderKeysOf(tx, [...new Set(page.map(({ request }) => request.orderReference))]);
     for (const { request, decided } of page) {
-      const own = claims.filter(({ requestId }) => requestId.toLowerCase() === request.id);
-      const payeeKey = sealedPayeeKey(states, keys, orgId, { request, decided }, own);
+      const mine = <Row extends { readonly requestId: string }>(rows: readonly Row[]) =>
+        rows.filter(({ requestId }) => requestId.toLowerCase() === request.id);
+      const payeeKey = sealedPayeeKey(
+        keys,
+        orgId,
+        { request, decided },
+        {
+          claims: mine(claims).map((claim) => claim.payeeKey),
+          others: [
+            ...mine(reserved).map((reservation) => reservation.payeeKey),
+            keysNow.get(request.supplierId) ?? null,
+          ],
+        },
+      );
+      if (payeeKey === undefined) {
+        states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
+        return 'tampered';
+      }
       const orderKey = canonical.get(request.orderReference);
       if (orderKey === undefined) throw new Error(`An order's canonical form was not read: ${request.id}`);
       const bankKey = decided.held?.bankKeyed === true ? bankKeyOf(request.orderReference) : null;
@@ -263,21 +308,25 @@ async function ordersOf(
 }
 
 /**
- * The payee key a request's order is counted under: its one claim's, where that holds to its decision's payee seal or
- * no seal was made (before E1b: a key that can only refuse an order more); none for no one claim, or a key that
- * doesn't hold to the seal (alarmed, `holding`).
+ * The payee key a request's order is counted under, never taken from a claim row on trust (TR-2 review, R-15):
+ * - its decision sealed one (E1b): the key that holds to the seal, among its claim's, its reservation's and its
+ *   supplier's signed key now; none where the seal is of no key. Undefined (the cutover stops) where none holds to it,
+ *   the seal can't be read, or its claim names another key than the sealed one: an order left unguarded under its key
+ *   could be paid twice through another supplier holding that key.
+ * - decided before E1b (no seal): its one claim's key, or, with no claim, its supplier's signed key now (a deleted claim
+ *   never takes the key away); none if neither has one.
  */
-function sealedPayeeKey(
-  states: SignedStates,
+export function sealedPayeeKey(
   keys: KeyProvider,
   orgId: string,
   { request, decided }: Holding,
-  own: readonly ClaimRow[],
-): string | null {
-  const [claim] = own;
-  const payeeKey = own.length === 1 ? (claim?.payeeKey ?? null) : null;
-  if (payeeKey === null) return null;
-  if (payeeAsSealed(keys, decided.held?.payee ?? 'none', { orgId, requestId: request.id, payeeKey })) return payeeKey;
-  states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
-  return null;
+  { claims, others }: { readonly claims: readonly (string | null)[]; readonly others: readonly (string | null)[] },
+): string | null | undefined {
+  const seal = decided.held?.payee ?? 'none';
+  const [claimed] = claims;
+  if (seal === 'none') return claims.length === 1 ? (claimed ?? null) : (others.at(-1) ?? null);
+  const holds = (payeeKey: string | null) => payeeAsSealed(keys, seal, { orgId, requestId: request.id, payeeKey });
+  const sealed = holds(null) ? null : [...claims, ...others].find((key) => key !== null && holds(key));
+  if (sealed === undefined) return undefined;
+  return claims.every((key) => key === sealed) ? sealed : undefined;
 }

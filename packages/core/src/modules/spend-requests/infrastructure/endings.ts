@@ -480,13 +480,14 @@ export async function voidPendingOf(
     takes.map(({ id }) => id),
     'change',
   );
-  // Then their order slots (11c, TR-2), each once, in order of ID, after every window: those kept their capacity let
-  // go of their orders all the same, as their claims are released.
+  // Then their order slots (11c, TR-2), each once, in order of ID, after every window: those that kept their capacity
+  // keep their orders too (fail safe, partner S209: one possibly paid stays refused), so only the others' are read.
+  const slotTakes = holding.slots.filter(({ requestId }) => !keptOf.has(requestId));
   const slotsRead = await orderSlotsOf(
     tx,
     states,
     orgId,
-    holding.slots.map(({ id }) => id),
+    slotTakes.map(({ id }) => id),
     'change',
   );
   for (const id of pending) {
@@ -505,7 +506,7 @@ export async function voidPendingOf(
     change: windowsGivenBackBy({ actor: ACTOR, action: VOIDED, details: {} }),
   });
   // And one a slot, for every request of the batch it held: two sharing a bank slot let go in one record.
-  await slotsLetGo(tx, states, orgId, slotsRead, holding.slots, { at: now, change: slotsLetGoBy(ACTOR) });
+  await slotsLetGo(tx, states, orgId, slotsRead, slotTakes, { at: now, change: slotsLetGoBy(ACTOR) });
   return pending.length;
 }
 
@@ -660,15 +661,18 @@ async function endHolding(
       change: windowsGivenBackBy(change),
     });
   }
-  // Its order let go of, kept capacity or not, as its claim is released below: the order may be asked for again.
-  if (holding !== null) {
+  // Its order let go of, so it may be asked for again: unless its capacity was kept, when its order is kept too, its
+  // slots and its claim (fail safe, partner S209: a request rolled back past the digest may have been paid).
+  if (holding !== null && kept === undefined) {
     await slotsLetGo(tx, states, key.orgId, holding.slotsRead, holding.slots, {
       at,
       change: slotsLetGoBy(change.actor),
     });
   }
-  // Kept, its reservation stays HELD: its month total and windows still count it, so they and it agree.
-  if (kept === undefined) await releaseReservationsOf(tx, { requestId: key.id, at });
+  // Kept, its reservation stays HELD and its claim open: its month total, windows and slots still count it, so they
+  // and it agree.
+  if (kept !== undefined) return;
+  await releaseReservationsOf(tx, { requestId: key.id, at });
   await releaseClaim(tx, { requestId: key.id, releasedAt: at });
 }
 

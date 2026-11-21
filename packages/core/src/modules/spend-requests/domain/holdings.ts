@@ -24,7 +24,8 @@
 //   RELEASED one, no claim or a released one; but where its signed ending
 //   kept its capacity (AT13d: ended past what the digest remembers), its one
 //   reservation stays HELD as decided, as its month total and windows kept the
-//   amount, and its claim released;
+//   amount, and its claim open as its order slots keep it (TR-2, partner
+//   S209: fail safe); or, ended so before TR-2, its claim released;
 // - VALIDATING: never seen once committed (a request leaves it in the
 //   transaction that made it), so it never matches.
 import type { Money } from '../../../shared-kernel/index.ts';
@@ -201,16 +202,25 @@ export function holdingsMatch(
   const [reservation] = reservations;
   if (holds === 'ended') {
     const claimsReleased = claims.every(({ released }) => released);
-    // Its signed ending kept its capacity (AT13d): its one reservation stays HELD, as decided; otherwise none holds.
+    // Its signed ending kept its capacity (AT13d): its one reservation stays HELD, as decided, and its order kept, its
+    // one claim open as its own (TR-2), or released where it ended so before TR-2; otherwise none holds.
     if (request.capacityKept === true) {
-      return claimsReleased && reservation !== undefined && reservationAsDecided(request, reservation, 'HELD');
+      return (
+        (claimsReleased || claimHeldAsDecided(claims)) &&
+        reservation !== undefined &&
+        reservationAsDecided(request, reservation, 'HELD')
+      );
     }
     return reservations.every(({ state }) => state === 'RELEASED') && claimsReleased;
   }
-  const [claim] = claims;
-  if (reservation === undefined || claim === undefined || claim.released || !claim.itsOwn) return false;
-  if (!claim.payeeAsSealed) return false;
+  if (reservation === undefined || !claimHeldAsDecided(claims)) return false;
   return reservationAsDecided(request, reservation, RESERVATION_STATE[holds]);
+}
+
+/** Whether the request's one claim is open, on its own supplier and order, and on its payee as sealed. */
+function claimHeldAsDecided(claims: readonly ClaimHolding[]): boolean {
+  const [claim] = claims;
+  return claim !== undefined && !claim.released && claim.itsOwn && claim.payeeAsSealed;
 }
 
 /** Whether the reservation is in `state`, on its payee as sealed, holding exactly what the request was decided to. */
