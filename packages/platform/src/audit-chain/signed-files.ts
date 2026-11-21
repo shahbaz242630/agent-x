@@ -19,7 +19,7 @@ import { isCount } from './rebase.ts';
 import { bodyHash } from './shards.ts';
 
 /** A line past this is no line of ours. */
-export const MOST_LINE_BYTES = 64 * 1024;
+const MOST_LINE_BYTES = 64 * 1024;
 
 /** What a file's name counts down from, so the newest lists first, as the anchors' files. */
 const LAST_MS = 9_999_999_999_999;
@@ -31,7 +31,7 @@ const FILE = /^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const NAMES_A_PAGE = 100;
 
 /** A file's place in its folder, counted down from its time. */
-export const countedDown = (ms: number): string => String(LAST_MS - ms).padStart(13, '0');
+const countedDown = (ms: number): string => String(LAST_MS - ms).padStart(13, '0');
 
 /** The time a name's countdown stands for. */
 export const timeOfName = (countdown: string): number => LAST_MS - Number(countdown);
@@ -49,7 +49,7 @@ export function parsed(line: string): unknown {
 }
 
 /** A file's lines, as gunzip gives them, never the whole as one string. */
-export async function* linesIn(bytes: Buffer): AsyncGenerator<string> {
+async function* linesIn(bytes: Buffer): AsyncGenerator<string> {
   const opening = createGunzip();
   opening.end(bytes);
   let rest: Buffer = Buffer.alloc(0);
@@ -67,7 +67,7 @@ export async function* linesIn(bytes: Buffer): AsyncGenerator<string> {
 }
 
 /** Text gzipped as it is made: a snapshot is never one string. */
-export async function gzipped(text: Iterable<string>): Promise<Buffer> {
+async function gzipped(text: Iterable<string>): Promise<Buffer> {
   const made: Buffer[] = [];
   await pipeline(Readable.from(text), createGzip(), async (chunks: AsyncIterable<Buffer>) => {
     for await (const chunk of chunks) made.push(chunk);
