@@ -1,10 +1,12 @@
-// The write-once store, with three containers: our team's exports of an
+// The write-once store, with four containers: our team's exports of an
 // organisation's audit log (`audit-exports`; ADR-005 §6, Phase 3 E10c; decision
 // 27), the audit chains' anchors (`audit-anchors`; 4D2e E, PL-58), kept apart
 // from the database so a chain wound back shows, across restarts too, and the
 // witness log (`audit-witness`; TR-1), where every copy of the API, and the
 // operator, puts each chain head it wrote before saying it was done, so a chain
-// cut below a head any copy saw shows to every other copy. The
+// cut below a head any copy saw shows to every other copy, and that log's hourly
+// snapshots (`audit-witness-snapshots`), apart from the heads so that a copy
+// that may add a head can't add a snapshot leaving one out. The
 // operator's `audit-export` job writes each export once, as its own identity
 // (apps/operator/src/azure-blob-store.ts); the API writes each anchor file once,
 // as its own (packages/platform/src/storage/write-once.ts). Nothing, us included,
@@ -12,7 +14,7 @@
 //
 // - version-level immutability, set when the account is created (Microsoft:
 //   it can't be added later), and every container takes the account's policy,
-//   so the three keep a file alike: staging a few days, Unlocked;
+//   so the four keep a file alike: staging a few days, Unlocked;
 //   production five years, Locked. A policy can't be created Locked, so
 //   production's first foundation runs twice, Unlocked then Locked, and a
 //   Locked account can't be deleted until its last file's time is up
@@ -42,8 +44,13 @@
 //   apps that run the API (`witnessWriters`: the API, every copy of it, and the
 //   jobs app) and the operator's may add a new file to `audit-witness` and read
 //   and list what is there: every copy that writes a chain puts its head there,
-//   and reads the others'. The chain repair's may read and list it alone. None
-//   can overwrite or delete. No one else is given anything
+//   and reads the others'. The chain repair's may read and list it alone. Only
+//   the app that holds the jobs (`anchorKeepers`, as for the anchors) may add a
+//   snapshot to `audit-witness-snapshots` and read them; production's API
+//   (`anchorReaders`) and the chain repair's may read and list them alone, and
+//   the operator's nothing there: a snapshot is what a restarting copy starts
+//   from, so whoever may add one could make every copy forget a witnessed head.
+//   None can overwrite or delete. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -61,6 +68,10 @@ func anchorContainerName() string => 'audit-anchors'
 @export()
 @description('The container the witness log is kept in (TR-1): the chain heads each copy wrote.')
 func witnessContainerName() string => 'audit-witness'
+
+@export()
+@description('The container the witness log\'s hourly snapshots are kept in (TR-1), apart from the heads: only the app that holds the jobs adds one.')
+func witnessSnapshotsContainerName() string => 'audit-witness-snapshots'
 
 param location string
 param name string
@@ -223,6 +234,14 @@ resource anchorContainer 'Microsoft.Storage/storageAccounts/blobServices/contain
 resource witnessContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = {
   parent: blobs
   name: witnessContainerName()
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+resource witnessSnapshotsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = {
+  parent: blobs
+  name: witnessSnapshotsContainerName()
   properties: {
     publicAccess: 'None'
   }
@@ -391,6 +410,46 @@ resource restorerReadsWitness 'Microsoft.Authorization/roleAssignments@2022-04-0
     principalId: restorer.properties.principalId
     principalType: 'ServicePrincipal'
     description: 'chain-restore reads audit witness heads (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// The witness log's snapshots (TR-1): the app that holds the jobs alone adds one (the anchors' keepers: production's
+// jobs app; staging's API too, which holds the jobs out of a load run), with the witness role; never the operator.
+resource keepsWitnessSnapshots 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (keeper, index) in anchorKeepers: {
+    scope: witnessSnapshotsContainer
+    name: guid(witnessSnapshotsContainer.id, anchorKeeper[index].id, witnessRole.id)
+    properties: {
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', witnessRole.name)
+      principalId: anchorKeeper[index].properties.principalId
+      principalType: 'ServicePrincipal'
+      description: '${keeper.workload} writes and reads audit witness snapshots (deploy/azure/modules/evidence.bicep)'
+    }
+  }
+]
+
+// Production's `web` copies start from a snapshot and add none: the read-only role, as the chain repair's.
+resource readsWitnessSnapshots 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (reader, index) in anchorReaders: {
+    scope: witnessSnapshotsContainer
+    name: guid(witnessSnapshotsContainer.id, anchorReader[index].id, anchorReaderRole.id)
+    properties: {
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+      principalId: anchorReader[index].properties.principalId
+      principalType: 'ServicePrincipal'
+      description: '${reader.workload} reads audit witness snapshots (deploy/azure/modules/evidence.bicep)'
+    }
+  }
+]
+
+resource restorerReadsWitnessSnapshots 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: witnessSnapshotsContainer
+  name: guid(witnessSnapshotsContainer.id, restorer.id, anchorReaderRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+    principalId: restorer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'chain-restore reads audit witness snapshots (deploy/azure/modules/evidence.bicep)'
   }
 }
 

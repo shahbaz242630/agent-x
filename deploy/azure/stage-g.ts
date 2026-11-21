@@ -60,6 +60,7 @@ import {
 import {
   THROWAWAY_ANCHORS_CONTAINER,
   throwawayAnchorsContainer,
+  throwawaySnapshotsContainer,
   throwawayWitnessContainer,
   throwawayHost,
   throwawayIdOf,
@@ -939,9 +940,13 @@ async function remove(steps: StageGSteps, named: string | undefined): Promise<nu
   }
   steps.say(`${server} is gone.`);
   if (kept) takeReads(steps);
-  // Its anchors and its witness log (TR-1), each kept as long as the store keeps their files.
+  // Its anchors, its witness log and the log's snapshots (TR-1), each kept as long as the store keeps their files.
   const lockedUntil = new Date(steps.now().getTime() + ANCHORS_KEPT_MS).toISOString();
-  const containers = [throwawayAnchorsContainer(id), throwawayWitnessContainer(id)].map((container): Anchors => ({
+  const containers = [
+    throwawayAnchorsContainer(id),
+    throwawayWitnessContainer(id),
+    throwawaySnapshotsContainer(id),
+  ].map((container): Anchors => ({
     container,
     server,
     lockedUntil,

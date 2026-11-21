@@ -428,11 +428,12 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     ]);
   });
 
-  it("accepts the witness log's two settings (TR-1), deployed before the app reads them", () => {
+  it("accepts the witness log's three settings (TR-1), deployed before the app reads them", () => {
     const url = 'https://stagentxevstg01.blob.core.windows.net/audit-witness';
     const witness = {
       AGENTX_AUDIT_WITNESS_URL: url,
       AGENTX_AUDIT_WITNESS_CLIENT_ID: '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+      AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: `${url}-snapshots`,
     };
     expect(problemsWith({ ...MINIMAL, ...witness })).toEqual([]);
     // The control: a name one letter off is still refused, so the acceptance is the registry's, not a gap.

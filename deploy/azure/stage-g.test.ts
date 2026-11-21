@@ -894,7 +894,7 @@ describe('delete', () => {
     expect(state.copy).toBeUndefined();
     // Its witness log (TR-1) kept beside its anchors, for the same days.
     expect(state.anchors).toEqual(
-      [`audit-anchors-g-${ID}`, `audit-witness-g-${ID}`].map((container) => ({
+      [`audit-anchors-g-${ID}`, `audit-witness-g-${ID}`, `audit-witness-snapshots-g-${ID}`].map((container) => ({
         container,
         server: COPY,
         lockedUntil: expect.stringMatching(/^2026-11-09T11:/) as unknown,

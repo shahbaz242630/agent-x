@@ -61,7 +61,13 @@ import {
   uniqueSuffix
   workloads
 } from 'names.bicep'
-import { anchorContainerName, evidenceAccountName, evidenceContainerName, witnessContainerName } from 'modules/evidence.bicep'
+import {
+  anchorContainerName
+  evidenceAccountName
+  evidenceContainerName
+  witnessContainerName
+  witnessSnapshotsContainerName
+} from 'modules/evidence.bicep'
 import { activityDownloadsAccountName, activityDownloadsContainerName } from 'modules/activity-downloads.bicep'
 
 targetScope = 'resourceGroup'
@@ -226,6 +232,7 @@ var throwawayAnchorsName = 'audit-anchors-g-${last(sys.split(first(sys.split(loa
 // And its witness log (TR-1), for the same reason: the copy's heads in staging's
 // witness container would read to staging as chains cut below a witnessed head.
 var throwawayWitnessName = 'audit-witness-g-${last(sys.split(first(sys.split(loadDatabaseHost, '.')), '-'))}'
+var throwawaySnapshotsName = 'audit-witness-snapshots-g-${last(sys.split(first(sys.split(loadDatabaseHost, '.')), '-'))}'
 
 // The restore drill's copy (S78): a point-in-time restore made under this name,
 // in the same subnet and private zone, which the operator's restore check reads
@@ -768,6 +775,15 @@ var witnessUrl = 'https://${evidenceAccountName(shortName(environment), nameSuff
 
 var throwawayWitnessUrl = 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${throwawayWitnessName}'
 
+// The log's hourly snapshots, a container of their own (modules/evidence.bicep): every copy starts from one, only the
+// app holding the jobs adds one. Told to the apps that run the API and the chain repair, never the operator.
+var snapshotsSetting = {
+  name: 'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL'
+  value: throwaway
+    ? 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${throwawaySnapshotsName}'
+    : 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${witnessSnapshotsContainerName()}'
+}
+
 // On Stage G's copy the API keeps no anchors (`keepsAnchors`), so the epoch its
 // witness files are named under comes with them here: the same one setting.
 var apiWitnessSettings = concat(throwaway ? [anchorEpochSetting] : [], [
@@ -779,6 +795,7 @@ var apiWitnessSettings = concat(throwaway ? [anchorEpochSetting] : [], [
     name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID'
     value: apiIdentity.properties.clientId
   }
+  snapshotsSetting
 ])
 
 var jobsWitnessSettings = [
@@ -790,6 +807,7 @@ var jobsWitnessSettings = [
     name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID'
     value: jobsIdentity!.properties.clientId
   }
+  snapshotsSetting
 ]
 
 // The operator's commands that write a chain (the hand-off pause above all) put
@@ -874,6 +892,10 @@ var restoreStoreSettings = concat(
     {
       name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID'
       value: restorerIdentity.properties.clientId
+    }
+    {
+      name: 'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL'
+      value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${witnessSnapshotsContainerName()}'
     }
   ],
   empty(anchorPublicKeys)
@@ -1901,6 +1923,43 @@ resource throwawayWitnessApi 'Microsoft.Authorization/roleAssignments@2022-04-01
     principalId: apiIdentity.properties.principalId
     principalType: 'ServicePrincipal'
     description: 'api writes and reads Stage G copy audit witness heads (deploy/azure/apps.bicep)'
+  }
+}
+
+// And its snapshots, apart as staging's are: the jobs app, which holds the jobs on the run, adds them; the API's
+// `web` copies only read them, with the anchors' read-only role.
+resource throwawaySnapshots 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = if (throwaway) {
+  parent: evidenceBlobs
+  name: throwawaySnapshotsName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+var anchorReaderRoleId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  guid(resourceGroup().id, 'audit-anchors-reader')
+)
+
+resource throwawaySnapshotsJobs 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (throwaway) {
+  scope: throwawaySnapshots
+  name: guid(throwawaySnapshots.id, jobsIdentity.id, witnessRoleId)
+  properties: {
+    roleDefinitionId: witnessRoleId
+    principalId: jobsIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'jobs writes and reads Stage G copy audit witness snapshots (deploy/azure/apps.bicep)'
+  }
+}
+
+resource throwawaySnapshotsApi 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (throwaway) {
+  scope: throwawaySnapshots
+  name: guid(throwawaySnapshots.id, apiIdentity.id, anchorReaderRoleId)
+  properties: {
+    roleDefinitionId: anchorReaderRoleId
+    principalId: apiIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'api reads Stage G copy audit witness snapshots (deploy/azure/apps.bicep)'
   }
 }
 
