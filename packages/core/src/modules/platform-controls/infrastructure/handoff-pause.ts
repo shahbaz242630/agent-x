@@ -29,6 +29,13 @@
 // none, is tampering too: the alarm, read as paused. Asked before the event's
 // statement, so whatever the walk read was committed before its snapshot.
 //
+// Nor is a pause the chain's newest events took with them, cut off by the owner
+// with an earlier sealed head put back and the row pointed at the resume before
+// it, before any anchor passed it (AT13h): every seal still holds, and no walk
+// read it. So the event's statement also reads the platform chain's head, held
+// to the highest this process has seen (platformCutBack, as a session's read):
+// a head below it, or another event at its place, is tampering, read as paused.
+//
 // The row is the first lock any transaction that reads or moves it takes
 // (ADR-006 §6 level 1): FOR SHARE by a hand-off, FOR NO KEY UPDATE by a
 // change, so a pause can't commit halfway through a hand-off's check, and
@@ -41,8 +48,10 @@ import type { Logger } from '@agentx/platform/observability';
 import { PlatformEventRefused, type PlatformActor } from '../domain/event.ts';
 import {
   type PlatformChain,
+  platformCutBack,
   platformEventSealed,
   platformEventsSigned,
+  platformHeadRead,
   type PlatformTransaction,
 } from './platform-chain.ts';
 
@@ -121,10 +130,12 @@ interface Read {
     | undefined;
   /** Where the digest says the newest pause or resume is (AT13c), if it says. */
   readonly known: bigint | undefined;
+  /** Where the platform chain was cut back below the head this process saw (AT13h), if it was. */
+  readonly cut?: bigint | undefined;
 }
 
 /** What the pause's read is held to: the digest the process keeps, if it keeps one. */
-type PauseDigest = Pick<StateDigest, 'latest'> | undefined;
+type PauseDigest = (Pick<StateDigest, 'latest'> & Partial<Pick<StateDigest, 'heads'>>) | undefined;
 
 /**
  * The row, locked, then the newest event. Two statements, in this order: under
@@ -144,7 +155,9 @@ async function readPause(
   const rows = await (lock === 'share' ? locking.forShare() : locking.forNoKeyUpdate()).execute();
   // Before the event's statement: what the walk read was committed before that statement's snapshot.
   const known = digest?.latest({ kind: 'platform' }, ...PAUSE_SUBJECT);
+  const watch = digest?.heads?.({ kind: 'platform' });
   const newest = await platformEventsSigned(tx)
+    .select(platformHeadRead(watch?.seen?.seq))
     .where('e.action', 'in', [HANDOFF_PAUSED, HANDOFF_RESUMED])
     .orderBy('e.seq', 'desc')
     .limit(1)
@@ -157,6 +170,8 @@ async function readPause(
   return {
     row: read,
     known,
+    // With no pause or resume ever, nothing was there to cut off but the row as born, which is paused.
+    cut: newest === undefined ? undefined : platformCutBack(keys, tx, watch, newest),
     newest:
       newest === undefined
         ? undefined
@@ -203,21 +218,25 @@ export async function handoffPauseOf(
   { keys, logger, digest }: { readonly keys: KeyProvider; readonly logger: Logger; readonly digest?: PauseDigest },
 ): Promise<HandoffPause> {
   const read = await readPause(tx, lock, keys, digest);
-  const pause = rolledBack(read) ? undefined : agreed(read);
+  const pause = rolledBack(read) || read.cut !== undefined ? undefined : agreed(read);
   if (pause !== undefined) return pause;
   logger.error('audit.integrity_failed', {
     chain: 'platform',
     check: 'handoff_pause',
     reason: pauseProblem(read),
-    ...(read.known === undefined ? {} : { seq: read.known.toString() }),
+    ...(placeOf(read) === undefined ? {} : { seq: String(placeOf(read)) }),
   });
   return { outcome: 'tampered' };
 }
+
+/** Where the alarm says the pause's newest event should be: the head seen where the chain was cut back, else the digest's. */
+const placeOf = (read: Read): bigint | undefined => read.cut ?? read.known;
 
 /** What the alarm says of a pause not believed: the row's own problem first, then the digest's, then the event's. */
 function pauseProblem(read: Read): string {
   if (typeof read.row === 'string') return read.row;
   if (rolledBack(read)) return 'rolled_back';
+  if (read.cut !== undefined) return 'cut_back';
   return read.newest?.believed === false ? 'unsealed' : 'mismatch';
 }
 

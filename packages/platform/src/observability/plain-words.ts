@@ -486,6 +486,11 @@ export const PLAIN_WORDS = {
     broke: 'Any request using it at that moment failed; the app replaces the connection by itself.',
     next: "Nothing to do if it is rare, such as during a database restart. If it repeats, check the database's health.",
   },
+  'db.after_commit_failed': {
+    happened: 'A step meant to run after a change was saved in the database failed.',
+    broke: 'The change is saved. Only the tamper check of the newest records waits for their next read.',
+    next: 'Nothing urgent. If it repeats, report it as a fault with the error shown.',
+  },
   'db.migration.connection_lost': {
     happened: 'The database update job lost its connection to the database.',
     broke: 'The update in progress did not finish; any part not saved was undone.',
