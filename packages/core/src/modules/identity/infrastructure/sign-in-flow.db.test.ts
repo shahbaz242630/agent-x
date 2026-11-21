@@ -15,13 +15,12 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { createWitnessLog, WitnessUnconfirmed } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { witnessWith } from '../../audit/index.ts';
+import { createWitnessLog, witnessWith, WitnessUnconfirmed } from '../../audit/index.ts';
 import {
   createPlatformChain,
   type PlatformControlsTables,
