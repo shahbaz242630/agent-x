@@ -816,8 +816,14 @@ export async function noteHeadsAsTheyStand(
       const org = await withTenant(database, orgId, (tx) =>
         tx.selectFrom('audit.heads').select(columns).where('org_id', '=', orgId).executeTakeFirst(),
       );
-      // An organisation with no chain yet has nothing to witness: its request was refused before writing.
-      if (org !== undefined) sealedHead({ kind: 'organisation', orgId: orgId.toLowerCase() }, org);
+      // A command that names an organisation and ends done has written its chain, or found it written: a head row
+      // missing then is one taken away past the app, never witnessed as nothing.
+      if (org === undefined) {
+        throw new Error(
+          "the organisation's audit chain has no head row: it was changed past the app, and is not witnessed",
+        );
+      }
+      sealedHead({ kind: 'organisation', orgId: orgId.toLowerCase() }, org);
     }
   } finally {
     await database.destroy();

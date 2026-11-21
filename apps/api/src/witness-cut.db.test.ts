@@ -27,7 +27,7 @@ import {
   type WitnessLog,
   WitnessUnconfirmed,
 } from '@agentx/platform/audit-chain';
-import { createDatabase, createIdempotentWrites, type Database, HEAD_SEALS_REQUIRED_FROM } from '@agentx/platform/db';
+import { createDatabase, createIdempotentWrites, type Database } from '@agentx/platform/db';
 import {
   createFakeWriteOnceStore,
   createTestDatabase,
@@ -481,18 +481,161 @@ describe('TR-1 review finding 2: a retry answered from the stored result', () =>
     expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
   });
 
-  it('a head not sealed (planted past the app) is never witnessed: the reads alarm it, and no copy is held to it for good', async () => {
+  it('the head row garbled or taken away with the write cut: never the stored answer, the alarm and the hold', async () => {
+    for (const key of ['tr1-replay-planted', 'tr1-replay-headless'] as const) {
+      const { w } = await ready();
+      const suspend = suspendUnderKey(w, key);
+      await savedUnwitnessed(w, suspend);
+      await asOwner(w, async (owner) => {
+        if (key === 'tr1-replay-planted') {
+          await owner.query('update audit.heads set mac = $1 where org_id = $2', [Buffer.alloc(32, 7), w.org]);
+        } else {
+          await owner.query('delete from audit.heads where org_id = $1', [w.org]);
+        }
+      });
+      const up = createFakeWriteOnceStore();
+      witnessWith(witnessOver(up));
+      await expect(suspend()).rejects.toBeInstanceOf(WriteCutBack);
+      witnessWith(undefined);
+      expect(up.files.size).toBe(0);
+      expect(lines('audit.integrity_failed')).toContainEqual(
+        expect.objectContaining({ check: 'witness', reason: 'cut_back', orgId: w.org }),
+      );
+    }
+  });
+
+  it('the original row put back at its place beside a cut branch grown past it: the next event isn’t linked to it, the alarm and the hold', async () => {
     const { w } = await ready();
-    const suspend = suspendUnderKey(w, 'tr1-replay-planted');
-    await savedUnwitnessed(w, suspend);
+    const suspend = suspendUnderKey(w, 'tr1-replay-mixed');
+    const { head, row } = await savedUnwitnessed(w, suspend);
+    const kept = BigInt(head.seq) + 1n;
+    let original: unknown;
     await asOwner(w, async (owner) => {
-      await owner.query('update audit.heads set mac = $1 where org_id = $2', [Buffer.alloc(32, 7), w.org]);
+      const [found] = await owner.query<{ event: unknown }>(
+        'select pg_catalog.row_to_json(e) as event from audit.events e where e.org_id = $1 and e.seq = $2::bigint',
+        [w.org, kept.toString()],
+      );
+      original = found?.event;
+      await owner.windBack(head);
+      await owner.withoutStatusGuard(() => owner.restoreRow(row));
     });
+    // A copy that never saw it grows the cut chain past its place, then the owner puts the original row back there.
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspended',
+        details: { reason: 'a stale copy' },
+      }),
+    );
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'reactivate', {
+        actor: OPERATOR,
+        action: 'agent.reactivated',
+        details: {},
+      }),
+    );
+    await asOwner(w, async (owner) => {
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query('delete from audit.events where org_id = $1 and seq = $2::bigint', [w.org, kept.toString()]);
+      await owner.query(
+        'insert into audit.events select * from pg_catalog.json_populate_record(null::audit.events, $1::json)',
+        [JSON.stringify(original)],
+      );
+      await owner.query('alter table audit.events enable trigger user');
+    });
+    witnessWith(witnessOver(createFakeWriteOnceStore()));
+    await expect(suspend()).rejects.toBeInstanceOf(WriteCutBack);
+    witnessWith(undefined);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'witness', reason: 'cut_back', seq: kept.toString() }),
+    );
+  });
+});
+
+describe('TR-1 review 4: a write that recorded on the platform chain too', () => {
+  const platformChain = createPlatformChain({ keys, ids });
+  const started = { configHash: `sha256:${'ab'.repeat(32)}`, release: 'r-test' };
+
+  /** The agent's suspension and a platform event, under one idempotency key, through the signed states. */
+  const bothUnderKey = (w: World, key: string) => {
+    const idempotency = createIdempotentWrites({ keys, logger: testLogger(capture) });
+    const request = {
+      orgId: w.org,
+      client: { kind: 'agent' as const, id: w.agent },
+      operation: 'agents.suspend',
+      key,
+      payload: '{}',
+    };
+    return () =>
+      withSignedStates(app, w.org, { keys, ids, logger: testLogger(capture) }, (tx, states) =>
+        idempotency.run(tx, request, async () => {
+          await states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+            actor: OPERATOR,
+            action: 'agent.suspended',
+            details: { reason: 'test' },
+          });
+          await platformChain.record(tx, {
+            actor: { type: 'system', id: 'api' },
+            action: 'platform.started',
+            details: started,
+          });
+          return { status: 200, resourceId: w.agent };
+        }),
+      );
+  };
+
+  const platformHead = async () => {
+    const [row] = await database
+      .as('owner')
+      .query<{ seq: string; kept: unknown }>(
+        'select h.seq::text as seq, pg_catalog.row_to_json(h) as kept from platform_controls.audit_head h',
+      );
+    return row;
+  };
+
+  it('a replay holds the platform chain to the head the write left there too, and witnesses it as it stands', async () => {
+    const { w } = await ready();
+    const both = bothUnderKey(w, 'tr1-platform-replay');
+    const down = createFakeWriteOnceStore();
+    down.instead.put = () => Promise.reject(new Error('store down'));
+    witnessWith(witnessOver(down, 100));
+    await expect(both()).rejects.toBeInstanceOf(WitnessUnconfirmed);
     const up = createFakeWriteOnceStore();
     witnessWith(witnessOver(up));
-    await suspend();
+    await both();
     witnessWith(undefined);
-    expect(up.files.size).toBe(0);
+    const reader = witnessOver(up);
+    await reader.refresh();
+    expect(reader.pending({ kind: 'platform' }).map(({ seq }) => seq)).toEqual([
+      BigInt(String((await platformHead())?.seq)),
+    ]);
+  });
+
+  it('its platform event cut off since: the alarm (the platform’s) and the hold, never the stored answer', async () => {
+    const { w } = await ready();
+    const before = await platformHead();
+    const both = bothUnderKey(w, 'tr1-platform-cut');
+    const down = createFakeWriteOnceStore();
+    down.instead.put = () => Promise.reject(new Error('store down'));
+    witnessWith(witnessOver(down, 100));
+    await expect(both()).rejects.toBeInstanceOf(WitnessUnconfirmed);
+    witnessWith(undefined);
+    const owner = database.as('owner');
+    await owner.query('delete from platform_controls.operator_signatures where seq > $1::bigint', [before?.seq]);
+    await owner.query('delete from platform_controls.audit_events where seq > $1::bigint', [before?.seq]);
+    await owner.query(
+      `update platform_controls.audit_head h set (seq, hash, mac, mac_key_version) =
+         (select r.seq, r.hash, r.mac, r.mac_key_version
+          from pg_catalog.json_populate_record(null::platform_controls.audit_head, $1::json) r)`,
+      [JSON.stringify(before?.kept)],
+    );
+    witnessWith(witnessOver(createFakeWriteOnceStore()));
+    await expect(both()).rejects.toMatchObject({ name: 'WriteCutBack', chain: 'platform' });
+    witnessWith(undefined);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ chain: 'platform', check: 'witness', reason: 'cut_back' }),
+    );
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
   });
 });
 
@@ -593,21 +736,22 @@ describe('TR-1 review 3: a head below an anchor this process didn’t make (a re
   });
 });
 
-describe('TR-1 review 3: a replayed row with no head seal, either side of the date every row must carry one', () => {
-  const replayAt = async (at: Date) => {
+describe('TR-1 review 4: a replayed row with no head seal, judged by the row itself', () => {
+  const REQUEST = (w: World, key: string) => ({
+    orgId: w.org,
+    client: { kind: 'agent' as const, id: w.agent },
+    operation: 'agents.suspend',
+    key,
+    payload: '{}',
+  });
+
+  /** A suspension under its key, then its row's head seal taken away; as a v1 row (from before 0115) where `asV1`. */
+  const replayWithoutSeal = async (key: string, asV1: boolean, garbleHead = false) => {
     const { w } = await ready();
-    const witness = witnessOver(createFakeWriteOnceStore());
-    const idempotency = createIdempotentWrites({ keys, logger: testLogger(capture), now: () => at });
-    const request = {
-      orgId: w.org,
-      client: { kind: 'agent' as const, id: w.agent },
-      operation: 'agents.suspend',
-      key: `tr1-legacy-${String(at.getTime())}`,
-      payload: '{}',
-    };
+    const idempotency = createIdempotentWrites({ keys, logger: testLogger(capture) });
     const suspend = () =>
       withSignedStates(app, w.org, { keys, ids, logger: testLogger(capture) }, (tx, states) =>
-        idempotency.run(tx, request, async () => {
+        idempotency.run(tx, REQUEST(w, key), async () => {
           await states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
             actor: OPERATOR,
             action: 'agent.suspended',
@@ -617,29 +761,53 @@ describe('TR-1 review 3: a replayed row with no head seal, either side of the da
         }),
       );
     await suspend();
-    // As a row from before 0115 reads, or one whose seal the owner took away.
+    const r = REQUEST(w, key);
+    // The request hashed as before 0115 (v1), which only the app's key could make.
+    const v1 = keys.mac('request-hash', [
+      'idempotent-request',
+      r.orgId,
+      r.client.kind,
+      r.client.id,
+      r.operation,
+      r.key,
+      r.payload,
+    ]);
     await asOwner(w, async (owner) => {
       await owner.query(
-        'update idempotency.keys set head_seq = null, head_hash = null, head_mac = null, head_mac_key_version = null where org_id = $1',
+        `update idempotency.keys set head_seq = null, head_hash = null, platform_head_seq = null,
+           platform_head_hash = null, head_mac = null, head_mac_key_version = null
+         where org_id = $1`,
         [w.org],
       );
+      if (asV1) {
+        await owner.query(
+          'update idempotency.keys set request_hash = $2, request_hash_key_version = $3 where org_id = $1',
+          [w.org, v1.mac, v1.keyVersion],
+        );
+      }
+      if (garbleHead)
+        await owner.query('update audit.heads set mac = $2 where org_id = $1', [w.org, Buffer.alloc(32, 7)]);
     });
-    witnessWith(witness);
+    const up = createFakeWriteOnceStore();
+    witnessWith(witnessOver(up));
     try {
-      return { w, answer: await suspend().catch((error: unknown) => error) };
+      return { w, up, answer: await suspend().catch((error: unknown) => error) };
     } finally {
       witnessWith(undefined);
     }
   };
 
-  it('the day before: answered as before', async () => {
-    const { answer } = await replayAt(new Date(HEAD_SEALS_REQUIRED_FROM.getTime() - 86_400_000));
+  it('a v1 row (made before 0115) is answered as before; its head, not sealed, never witnessed', async () => {
+    const { answer } = await replayWithoutSeal('tr1-v1', true);
     expect(answer).toMatchObject({ outcome: 'replayed' });
+    const garbled = await replayWithoutSeal('tr1-v1-garbled', true, true);
+    expect(garbled.answer).toMatchObject({ outcome: 'replayed' });
+    expect(garbled.up.files.size).toBe(0);
     expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
-  it('from the date on: a seal taken away, the alarm (`record: missing`) and the hold, never the stored answer', async () => {
-    const { w, answer } = await replayAt(HEAD_SEALS_REQUIRED_FROM);
+  it('a v2 row with its seal taken away: the alarm (`record: missing`) and the hold at once, never the stored answer', async () => {
+    const { w, answer } = await replayWithoutSeal('tr1-v2-stripped', false);
     expect(answer).toBeInstanceOf(WriteCutBack);
     expect(lines('audit.integrity_failed')).toContainEqual(
       expect.objectContaining({ check: 'witness', reason: 'cut_back', record: 'missing' }),

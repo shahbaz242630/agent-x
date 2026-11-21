@@ -13,7 +13,13 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createAnchorCheck, type OrganisationChains, type ProbeAnswer, type RecentPlaces } from './anchor-check.ts';
+import {
+  createAnchorCheck,
+  type OrganisationChains,
+  type ProbeAnswer,
+  type RecentPlaces,
+  type WatchedPlaces,
+} from './anchor-check.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -38,7 +44,7 @@ interface Asked {
 interface Answering {
   readonly verified?: (orgId: string, recent?: RecentPlaces) => ChainReport;
   /** One step of a walk from a head towards the anchor (the trail's passStep); none, the chains have no `confirm`. */
-  readonly stepped?: (cursor: CheckedPoint, target: CheckedPoint) => ChainStep;
+  readonly stepped?: (cursor: CheckedPoint, target: CheckedPoint, watch?: WatchedPlaces) => ChainStep;
   readonly answers?: Readonly<Record<string, ProbeAnswer>>;
   readonly probeFails?: boolean;
 }
@@ -68,9 +74,9 @@ function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false
     ...(stepped === undefined
       ? {}
       : {
-          confirm: (orgId: string, cursor: CheckedPoint, target: CheckedPoint) => {
+          confirm: (orgId: string, cursor: CheckedPoint, target: CheckedPoint, watch?: WatchedPlaces) => {
             steps.push(`confirm ${orgId} ${cursor.seq.toString()}`);
-            return Promise.resolve(stepped(cursor, target));
+            return Promise.resolve(stepped(cursor, target, watch));
           },
         }),
     probe: (chains: readonly Asked[]) => {
@@ -260,13 +266,22 @@ describe('TR-1 the anchor check held to the witness log', () => {
     expect(run.pruned).not.toContainEqual([ORG, [4n]]);
   });
 
-  /** A walk from a head to the anchor at 5: reaches it where `onChain`, else breaks at the head's next place. */
+  /**
+   * A walk from a head towards the anchor: where `onChain`, at most `most` events a step, each watched place holding its
+   * head's own hash (or `forkAt`'s another); else broken at the next place.
+   */
   const walkingTo =
-    (onChain: (cursor: CheckedPoint) => boolean) =>
-    (cursor: CheckedPoint, target: CheckedPoint): ChainStep =>
-      onChain(cursor)
-        ? { ok: true, seq: target.seq, hash: target.hash, macKeyVersion: target.macKeyVersion, to: target.seq }
-        : { ok: false, problem: { reason: 'link', seq: cursor.seq + 1n } };
+    (onChain: (cursor: CheckedPoint) => boolean, most = 2_000n, forkAt?: bigint) =>
+    (cursor: CheckedPoint, target: CheckedPoint, watch?: WatchedPlaces): ChainStep => {
+      if (!onChain(cursor)) return { ok: false, problem: { reason: 'link', seq: cursor.seq + 1n } };
+      const seq = target.seq < cursor.seq + most ? target.seq : cursor.seq + most;
+      for (const head of watch?.heads ?? []) {
+        if (head.seq <= seq) watch?.found.set(head.seq, head.seq === forkAt ? Buffer.alloc(32, 99) : head.hash);
+      }
+      return seq === target.seq
+        ? { ok: true, seq, hash: target.hash, macKeyVersion: target.macKeyVersion, to: target.seq }
+        : { ok: true, seq, hash: Buffer.alloc(32, Number(seq % 200n)), macKeyVersion: 1, to: target.seq };
+    };
 
   /** ORG anchored at 5 by another copy (or before a restart): this process kept no hashes of its walk. */
   const anchoredElsewhere = (stepped?: Answering['stepped']) => {
@@ -330,6 +345,48 @@ describe('TR-1 the anchor check held to the witness log', () => {
       expect.objectContaining({ level: 'warn', event: 'audit.anchor_check_failed', check: 'witness' }),
     );
     expect(failing.pruned).not.toContainEqual([ORG, [4n]]);
+  });
+
+  it('one walk a chain, from its lowest held head, checks every other head on the way: a place holding another event is the alarm', async () => {
+    const run = anchoredElsewhere(walkingTo(() => true));
+    run.pending.set(ORG, [witnessed(5n), witnessed(4n), witnessed(2n)]);
+    await run.check.run();
+    expect(run.steps.filter((step) => step.startsWith('confirm'))).toEqual([`confirm ${ORG} 2`]);
+    expect(run.pruned).toContainEqual([ORG, [5n, 4n, 2n]]);
+    const forked = anchoredElsewhere(walkingTo(() => true, 2_000n, 4n));
+    forked.pending.set(ORG, [witnessed(4n), witnessed(2n)]);
+    await forked.check.run();
+    expect(forked.alarms()).toEqual([{ what: 'witness', reason: 'cut_back', seq: '2' }]);
+  });
+
+  it('a deep walk goes on from where it reached at the next run, within each run’s budget, and holds the chain unanchored meanwhile', async () => {
+    const deep = withWitness({
+      answers: { [ORG]: { kind: 'same' }, [OTHER_ORG]: { kind: 'same' } },
+      stepped: walkingTo(() => true),
+    });
+    deep.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(450_005n), AT));
+    deep.pending.set(ORG, [witnessed(5n)]);
+    await deep.check.run();
+    const confirms = () => deep.steps.filter((step) => step.startsWith(`confirm ${ORG}`));
+    // A run's budget: 200,000 events, a hundred steps.
+    expect(confirms()).toHaveLength(100);
+    expect(deep.capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'audit.witness_head_unconfirmed', walkedTo: '200005' }),
+    );
+    await deep.check.run();
+    expect(confirms().at(100)).toBe(`confirm ${ORG} 200005`);
+    expect(deep.pruned).not.toContainEqual([ORG, [5n]]);
+    await deep.check.run();
+    expect(deep.pruned).toContainEqual([ORG, [5n]]);
+    expect(deep.alarms()).toEqual([]);
+    // A head below where it reached that came in since starts it afresh, from that head.
+    const fresh = withWitness({ answers: { [ORG]: { kind: 'same' } }, stepped: walkingTo(() => true) });
+    fresh.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(450_005n), AT));
+    fresh.pending.set(ORG, [witnessed(5n)]);
+    await fresh.check.run();
+    fresh.pending.set(ORG, [witnessed(5n), witnessed(3n)]);
+    await fresh.check.run();
+    expect(fresh.steps.filter((step) => step.startsWith(`confirm ${ORG}`)).at(100)).toBe(`confirm ${ORG} 3`);
   });
 
   it('a quick probe that fails is a warning: the run asks the same of every chain', async () => {

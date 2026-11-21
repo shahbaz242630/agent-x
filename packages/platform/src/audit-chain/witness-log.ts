@@ -138,6 +138,12 @@ const MOST_SPOILED_SNAPSHOTS = 24;
 /** How often the leader writes a snapshot. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
 
+/**
+ * How many heads let go since the last snapshot write the next at once, the hour or not: a restart starts from the
+ * snapshot, and every head confirmed and let go since would come back to be confirmed again.
+ */
+const PRUNED_FOR_A_SNAPSHOT = 1_000;
+
 /** The most lines one heads file carries: more wait for the next Put. */
 const MOST_LINES_A_FILE = 10_000;
 
@@ -274,6 +280,7 @@ export function createWitnessLog({
   const namesRead = new Set<string>();
   let lastSnapshotAt: number | undefined;
   let changedSinceSnapshot = false;
+  let prunedSinceSnapshot = 0;
 
   const alarm = (reason: string, more: Record<string, unknown>): void => {
     logger.error('audit.integrity_failed', { chain: 'store', check: 'witness_store', reason, ...more });
@@ -640,7 +647,8 @@ export function createWitnessLog({
   const snapshotOnce = async (): Promise<void> => {
     if (snapshots === undefined || writes?.() !== true || state !== 'read' || !changedSinceSnapshot) return;
     const at = now().getTime();
-    if (lastSnapshotAt !== undefined && at - lastSnapshotAt < SNAPSHOT_EVERY_MS) return;
+    const hourly = lastSnapshotAt === undefined || at - lastSnapshotAt >= SNAPSHOT_EVERY_MS;
+    if (!hourly && prunedSinceSnapshot < PRUNED_FOR_A_SNAPSHOT) return;
     try {
       const name = fileName(folder('snapshots'), at);
       const lines: string[] = [];
@@ -650,6 +658,7 @@ export function createWitnessLog({
       await snapshots.put(name, await signedFile(keys, SNAPSHOT_FILE, name, epoch, lines));
       lastSnapshotAt = at;
       changedSinceSnapshot = false;
+      prunedSinceSnapshot = 0;
     } catch (error) {
       failed('write', error);
     }
@@ -692,10 +701,11 @@ export function createWitnessLog({
       const name = nameOf(chain);
       const list = held.get(name);
       if (list === undefined || heads.length === 0) return;
-      setList(
-        name,
-        list.filter((one) => !heads.some(({ seq, hash }) => seq === one.seq && hash.equals(one.hash))),
-      );
+      const kept = list.filter((one) => !heads.some(({ seq, hash }) => seq === one.seq && hash.equals(one.hash)));
+      // Counted towards the next snapshot, so a restart doesn't confirm them all over again.
+      prunedSinceSnapshot += list.length - kept.length;
+      if (kept.length !== list.length) changedSinceSnapshot = true;
+      setList(name, kept);
     },
     beyondMemory: (chain: Chain): boolean => beyond(nameOf(chain)),
     useAnchors(given: WitnessAnchors): void {

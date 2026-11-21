@@ -345,7 +345,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       {
         chain: { kind: 'platform' },
         // A head held below its anchor walked from to it, a pass step at a time (TR-1).
-        confirm: (cursor, target) => platform.passStep(database, cursor, target, CONFIRM_STEP),
+        confirm: (cursor, target, watch) => platform.passStep(database, cursor, target, CONFIRM_STEP, watch),
         // From its anchor, and whole once a day (4D2e E8), or when the digest owes it a walk (AT13c).
         verify: platformChainCheck({
           // Held to the heads copies witnessed (TR-1), asked before the walk.
@@ -369,7 +369,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       // Held to the heads the anchor check asked of the witness log before the walk (TR-1).
       verify: (orgId, anchor, heldTo, recent) =>
         trail.checkFromAnchor(database, orgId, anchor ?? CHAIN_START, undefined, heldTo, recent),
-      confirm: (orgId, cursor, target) => trail.passStep(database, orgId, cursor, target, CONFIRM_STEP),
+      confirm: (orgId, cursor, target, watch) => trail.passStep(database, orgId, cursor, target, CONFIRM_STEP, watch),
       // The run's own logger: the hold's lines name the organisation themselves.
       hold: (orgId, failure) =>
         holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure, JOB_ANSWER_WITHIN_MS),
