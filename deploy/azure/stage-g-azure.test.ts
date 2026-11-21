@@ -430,6 +430,13 @@ describe("the adapter's own delete guard (S185)", () => {
 
   it.each([
     'audit-anchors',
+    // Staging's own witness log (TR-1), and any other word in the copy's name's place.
+    'audit-witness',
+    'audit-witness-snapshots',
+    'audit-witnessx-g-abcd1234',
+    'audit-witness-snapshots-g-abcd123',
+    'audit-witness-snapshots-g',
+    'audit-exports-g-abcd1234',
     '',
     'audit-anchors-g-abcd123',
     'audit-anchors-g-abcd1234/x',
@@ -446,7 +453,10 @@ describe("the adapter's own delete guard (S185)", () => {
     const { azure } = azureOn(cli);
     azure.deleteServer(COPY);
     expect(azure.deleteContainer('stagentxstgq1w2e3', 'audit-anchors-g-abcd1234')).toBe(true);
-    expect(cli.calls.filter((args) => args.includes('delete'))).toHaveLength(2);
+    // And its witness log's (TR-1).
+    expect(azure.deleteContainer('stagentxstgq1w2e3', 'audit-witness-g-abcd1234')).toBe(true);
+    expect(azure.deleteContainer('stagentxstgq1w2e3', 'audit-witness-snapshots-g-abcd1234')).toBe(true);
+    expect(cli.calls.filter((args) => args.includes('delete'))).toHaveLength(4);
   });
 });
 

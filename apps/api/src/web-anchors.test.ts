@@ -350,7 +350,7 @@ describe('the read-only store (AT13b)', () => {
 
 describe('the web copy’s run that reads the store again (AT13b)', () => {
   /** A log and a digest that record what is asked of them, each read answered as `answers` says. */
-  function standIns(answers: { log?: () => Promise<void>; digest?: () => Promise<void> } = {}) {
+  function standIns(answers: { log?: () => Promise<void>; digest?: () => Promise<void> } = {}, copy?: 'web' | 'jobs') {
     const asked: string[] = [];
     const failed: unknown[] = [];
     const capture = new LogCapture();
@@ -371,6 +371,7 @@ describe('the web copy’s run that reads the store again (AT13b)', () => {
         },
       },
       logger: testLogger(capture),
+      ...(copy === undefined ? {} : { copy }),
     });
     return { run, asked, failed, capture };
   }
@@ -391,11 +392,14 @@ describe('the web copy’s run that reads the store again (AT13b)', () => {
     expect(asked).toEqual(['anchors', 'digest']);
   });
 
-  it('a digest read that fails is its warning, never a throw', async () => {
-    const { run, capture } = standIns({ digest: () => Promise.reject(new PastDeadline('slow')) });
+  it.each([
+    ['web', undefined],
+    ['jobs', 'jobs'],
+  ] as const)('a digest read that fails is its warning, never a throw, naming the copy: %s', async (named, copy) => {
+    const { run, capture } = standIns({ digest: () => Promise.reject(new PastDeadline('slow')) }, copy);
     await expect(run.run()).resolves.toBeUndefined();
     expect(capture.lines()).toEqual([
-      expect.objectContaining({ level: 'warn', event: 'audit.web_anchors_read_failed', copy: 'web', what: 'read' }),
+      expect.objectContaining({ level: 'warn', event: 'audit.web_anchors_read_failed', copy: named, what: 'read' }),
     ]);
   });
 

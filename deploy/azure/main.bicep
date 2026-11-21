@@ -159,6 +159,11 @@ var anchorKeepers = environment == 'production' ? [jobsKeeper] : [apiKeeper, job
 // the jobs keep beside the anchors. Staging's API keeps them already.
 var anchorReaders = environment == 'production' ? [apiKeeper] : []
 
+// Who writes the witness log (TR-1): every app that runs the API, in both
+// environments: each copy, `web` copies too, puts the chain heads it wrote there
+// and reads the others'.
+var witnessWriters = [apiKeeper, jobsKeeper]
+
 resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   name: names.group
   location: location
@@ -366,6 +371,7 @@ module evidence 'modules/evidence.bicep' = {
     writerIdentityName: identityName(environment, 'operator')
     anchorKeepers: anchorKeepers
     anchorReaders: anchorReaders
+    witnessWriters: witnessWriters
     restorerIdentityName: identityName(environment, 'chain-restore')
     retentionDays: evidenceRetentionDays
     immutability: evidenceImmutability

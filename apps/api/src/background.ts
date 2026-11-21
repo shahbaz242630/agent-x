@@ -129,6 +129,11 @@ export interface Leadership {
   leading(): boolean;
   /** The work, each run waiting until this process leads, and aborted through its signal if the lease goes. */
   onlyWhileLeading(work: NamedWork): NamedWork;
+  /**
+   * The work, each run passed over while this process leads (TR-1 A): a follower's read of the anchors' store, as a web
+   * copy's, which the leader's own anchor check does in its place.
+   */
+  onlyWhileNotLeading(work: NamedWork): NamedWork;
   /** Stops renewing and gives the lease up. Never throws. After the jobs have stopped. */
   stop(): Promise<void>;
 }
@@ -151,6 +156,11 @@ export interface Leadership {
  * passes: a forged or deleted row, or a database that never answers. One copy is
  * the shape we run (policy.ts's ONE_REPLICA), so a follower lasting that long isn't
  * normal.
+ *
+ * A renewal refused while this process's own term still runs (TR-1 A) can't be another copy taking the lease by expiry:
+ * the database counted that term from later than this process did. So the row was changed past the app (the owner's
+ * UPDATE, say), and that is said at once as an error, `jobs.lease_taken_early`: the jobs stop here, though the digest
+ * keeps all it holds. Refused once its term has run out, it is the ordinary hand-over, said as information.
  */
 export function createLeadership({
   store,
@@ -198,6 +208,10 @@ export function createLeadership({
   };
 
   const refused = (): void => {
+    // Within the term, less a try's deadline for the two clocks: no copy could have taken it by expiry yet.
+    if (lead !== undefined && now() < endsAt - tryWithinMs) {
+      logger.error('jobs.lease_taken_early', { termLeftMs: Math.round(endsAt - now()) });
+    }
     lose();
     if (!refusalSaid) logger.info('jobs.lease_held_elsewhere');
     refusalSaid = true;
@@ -299,6 +313,15 @@ export function createLeadership({
           const held = await untilLeading(signal);
           if (held === undefined) return;
           await work.run(signal === undefined ? held.signal : AbortSignal.any([signal, held.signal]));
+        },
+      };
+    },
+    onlyWhileNotLeading(work) {
+      return {
+        name: work.name,
+        async run(signal) {
+          if (leading()) return;
+          await work.run(signal);
         },
       };
     },
