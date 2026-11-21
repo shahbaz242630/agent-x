@@ -261,14 +261,20 @@ export type Voided =
  * source and supplier as they now stand, read by the caller through their
  * signed states before this, in ADR-006's order (levels 2–6); `named`, the
  * IDs it read them
- * by, which must be the request's own.
+ * by, which must be the request's own; `approvedAt`, its decision's
+ * `approvedAt` as the caller read it (Decided): an approved one's age past
+ * APPROVAL_HORIZON_MS voids it too (AT13d).
  */
 export async function voidRequest(
   tx: EndingsTransaction,
   states: SignedStates,
   keys: KeyProvider,
   key: { readonly orgId: string; readonly id: string },
-  { named, authority }: { readonly named: SubjectsNamed; readonly authority: AuthorityNow },
+  {
+    named,
+    authority,
+    approvedAt,
+  }: { readonly named: SubjectsNamed; readonly authority: AuthorityNow; readonly approvedAt: Date },
   now: Date,
 ): Promise<Voided> {
   const read = await requestOf(tx, states, key, 'change');
@@ -286,7 +292,10 @@ export async function voidRequest(
     throw new Error(`A spend request was judged by another's authority: ${key.id}`);
   }
   const against = decidedAgainst(read.state);
-  const causes = voidCauses({ mandateId: request.mandateId, ...against }, authority);
+  // Its status as this verified read locks it: one still waiting has no approval to age. Read by the caller before the
+  // lock, an approval committed between the two leaves its decision's time here: older, so never kept past the horizon.
+  const approved = request.status === 'APPROVAL_REQUIRED' ? null : approvedAt;
+  const causes = voidCauses({ mandateId: request.mandateId, ...against, approvedAt: approved }, authority);
   if (causes.length === 0) return { outcome: 'standing' };
   await voidedWith(tx, states, keys, key, causes, now);
   return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };

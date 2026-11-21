@@ -30,7 +30,7 @@
 // pays one (0040's `held_for_its_request` and 0039's `for_its_request` guard
 // what the app makes).
 import type { KeyProvider } from '@agentx/platform/keys';
-import { sql, type Transaction } from 'kysely';
+import { type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
 import {
@@ -85,6 +85,22 @@ export const NO_PAYMENTS = (): Promise<ReadonlyMap<string, PaymentHolds>> => Pro
 
 /** A request's decided event names one decision: a few more read are already tampering. */
 const MOST_DECIDED_EVENTS = 4;
+
+/** A person's approval of a request waiting (approvals.ts): read with its decision, for when it was approved (AT13d). */
+const APPROVED = 'spend_request.approved';
+
+/** The events that may approve a request, the newest of them dating its approval (Decided's `approvedAt`, AT13d). */
+const APPROVING_ACTIONS: readonly string[] = ['spend_request.decided', APPROVED];
+
+/**
+ * When the request whose ID is the column `idColumn`, in the organisation the column `orgColumn` names, had its newest
+ * decided or approved event recorded, unverified, not run: a candidate's approval's age alone (the request voids',
+ * AT13d), each judged again by its sealed events (Decided's `approvedAt`) before anything moves.
+ */
+export const approvedAtLooks = (orgColumn: string, idColumn: string): RawBuilder<Date | null> =>
+  sql<Date | null>`(select pg_catalog.max(e.recorded_at) from audit.events e
+    where e.org_id = ${sql.ref(orgColumn)} and e.subject_type = ${SPEND_REQUESTS.subject}
+      and e.subject_id = ${sql.ref(idColumn)} and e.action = any(${APPROVING_ACTIONS}::text[]))`;
 
 /** A page checked: requests compared, those that didn't match and those tampered with (each alarmed), and where to go on. */
 export interface HoldingsChecked {
@@ -172,6 +188,11 @@ export interface Decided extends ApprovalClock {
   readonly held: HeldSealed | null;
   /** Its decided event's place in the chain: a stop chosen to cancel after it voids the request (F1 G1). */
   readonly seq: bigint;
+  /**
+   * When its newest decided or approved event was recorded, as the chain seals it: for one approved, its approval (a
+   * person's, or the policy's at its decision), whatever was signed since (a carry, E4). Its age voids it (AT13d).
+   */
+  readonly approvedAt: Date;
 }
 
 /**
@@ -205,20 +226,20 @@ export async function decisionsRead(
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SPEND_REQUESTS.subject, WINDOWS_NAMED_SUBJECT],
     subjectIds: ids,
-    actions: ['spend_request.decided', WINDOWS_NAMED_ACTION],
-    limit: (MOST_DECIDED_EVENTS + 1) * ids.length,
+    actions: [...APPROVING_ACTIONS, WINDOWS_NAMED_ACTION],
+    // A person approves a request once at most: one event more each.
+    limit: (MOST_DECIDED_EVENTS + 2) * ids.length,
   });
   if (history.outcome !== 'read') return 'tampered';
   const named = history.events.filter(({ event }) => event.action === WINDOWS_NAMED_ACTION);
   const decided = history.events
-    .filter(({ event }) => event.action !== WINDOWS_NAMED_ACTION)
-    .map(
-      ({ event, recordedAt, seq }) =>
-        [
-          event.subject.id.toLowerCase(),
-          { held: heldOf(event.details), decidedAt: recordedAt, waitHours: approvalWaitOf(event.details), seq },
-        ] as const,
-    );
+    .filter(({ event }) => event.action === 'spend_request.decided')
+    .map(({ event, recordedAt, seq }) => {
+      const held = heldOf(event.details);
+      const waitHours = approvalWaitOf(event.details);
+      const id = event.subject.id.toLowerCase();
+      return [id, { held, decidedAt: recordedAt, waitHours, seq, approvedAt: recordedAt }] as const;
+    });
   // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.
   const counts = new Map<string, number>();
   for (const [id] of decided) counts.set(id, (counts.get(id) ?? 0) + 1);
@@ -226,6 +247,13 @@ export async function decisionsRead(
     throw new TooManyEventsToRead(MOST_DECIDED_EVENTS);
   // In chain order, so each request's last decided event is the one left.
   const read = new Map<string, Decided>(decided);
+  // A person's approval comes after its decision: then it is when the request was approved. None without a decision.
+  for (const { event, recordedAt } of history.events) {
+    const id = event.subject.id.toLowerCase();
+    const approval = event.action === APPROVED && event.subject.type === SPEND_REQUESTS.subject;
+    const found = approval ? read.get(id) : undefined;
+    if (found !== undefined && recordedAt > found.approvedAt) read.set(id, { ...found, approvedAt: recordedAt });
+  }
   // A decision before GM-1b sealed no windows: those its cutover named stand for them (the chain's MAC keeps both).
   for (const { event } of named) {
     const id = event.subject.id.toLowerCase();

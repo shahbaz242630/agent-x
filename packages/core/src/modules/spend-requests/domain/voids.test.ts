@@ -5,10 +5,13 @@
 // pauses only a suspension; the bank's own suspension never voids, consent
 // it ended always does; new details a pause carries it through void nothing
 // for themselves (E3); a stop chosen to cancel since its decision voids for
-// good, whatever it is now, a pause in force too (decision 32a, F1 G1).
+// good, whatever it is now, a pause in force too (decision 32a, F1 G1); an
+// approval sealed APPROVAL_HORIZON_MS ago or more voids, one waiting never (AT13d).
 import { describe, expect, it } from 'vitest';
 
 import {
+  APPROVAL_HORIZON_MS,
+  approvalLapsed,
   type AuthorityNow,
   type DecidedUnder,
   isPending,
@@ -18,7 +21,14 @@ import {
   voidCauses,
 } from './voids.ts';
 
-const DECIDED: DecidedUnder = { mandateId: 'm', mandateVersionId: 'mv1', supplierVersionId: 'sv1' };
+/** When each is judged. */
+const AT = new Date('2026-11-21T08:00:00.000Z');
+
+/** A request still waiting for approval: no approval to age. */
+const DECIDED: DecidedUnder = { mandateId: 'm', mandateVersionId: 'mv1', supplierVersionId: 'sv1', approvedAt: null };
+
+/** Approved `ms` before AT. */
+const approvedAgo = (ms: number): DecidedUnder => ({ ...DECIDED, approvedAt: new Date(AT.getTime() - ms) });
 
 const STANDING: AuthorityNow = {
   organizationStatus: 'ACTIVE',
@@ -28,6 +38,7 @@ const STANDING: AuthorityNow = {
   supplier: { status: 'VERIFIED', currentVersionId: 'sv1', pausedFrom: [] },
   paused: new Set(),
   cancelledBy: new Set(),
+  at: AT,
 };
 
 const EVERY_PAUSED: ReadonlySet<Pausable> = new Set(['organization', 'agent', 'mandate', 'source', 'supplier']);
@@ -149,7 +160,7 @@ describe('voidCauses', () => {
 
   it('keeps every cause at once, in the engine’s order', () => {
     expect(
-      voidCauses(DECIDED, {
+      voidCauses(approvedAgo(APPROVAL_HORIZON_MS), {
         organizationStatus: 'FROZEN',
         agentStatus: 'SUSPENDED',
         mandate: null,
@@ -157,6 +168,7 @@ describe('voidCauses', () => {
         supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2', pausedFrom: [] },
         paused: new Set(),
         cancelledBy: new Set(),
+        at: AT,
       }),
     ).toEqual([
       'ORG_FROZEN',
@@ -165,6 +177,7 @@ describe('voidCauses', () => {
       'SOURCE_NOT_USABLE',
       'SUPPLIER_NOT_VERIFIED',
       'SUPPLIER_CHANGED',
+      'APPROVAL_LAPSED',
     ]);
   });
 
@@ -301,6 +314,7 @@ describe('VOID_CAUSES and the choice', () => {
       voidCauses(DECIDED, { ...STANDING, source: { ...STANDING.source, status: 'SUSPENDED' } }),
       voidCauses(DECIDED, { ...STANDING, supplier: { status: 'SUSPENDED', currentVersionId: 'sv1', pausedFrom: [] } }),
       voidCauses(DECIDED, { ...STANDING, supplier: { status: 'VERIFIED', currentVersionId: 'sv2', pausedFrom: [] } }),
+      voidCauses(approvedAgo(APPROVAL_HORIZON_MS), STANDING),
     ];
     expect(each).toEqual(VOID_CAUSES.map((cause) => [cause]));
   });
@@ -320,5 +334,40 @@ describe('VOID_CAUSES and the choice', () => {
       isPendingChoice('hold'),
       isPendingChoice(null),
     ]).toEqual([true, true, false, false]);
+  });
+});
+
+describe('an approval past its horizon (AT13d)', () => {
+  it('is seven days', () => {
+    expect(APPROVAL_HORIZON_MS).toBe(7 * 24 * 3_600_000);
+  });
+
+  it.each([
+    ['a moment old', 0, []],
+    ['six days old', 6 * 24 * 3_600_000, []],
+    ['a millisecond short of seven days', APPROVAL_HORIZON_MS - 1, []],
+    ['seven days old exactly: lapsed, erring on refusing', APPROVAL_HORIZON_MS, ['APPROVAL_LAPSED']],
+    ['a millisecond past', APPROVAL_HORIZON_MS + 1, ['APPROVAL_LAPSED']],
+    ['eight days old', 8 * 24 * 3_600_000, ['APPROVAL_LAPSED']],
+  ])('approved %s: %j', (_what, ago, causes) => {
+    expect(voidCauses(approvedAgo(ago), STANDING)).toEqual(causes);
+  });
+
+  it('ages it to when it is judged, never a clock of its own', () => {
+    const lapsed = approvedAgo(APPROVAL_HORIZON_MS);
+    expect(voidCauses(lapsed, { ...STANDING, at: new Date(AT.getTime() - 1) })).toEqual([]);
+    expect(approvalLapsed(new Date(0), new Date(APPROVAL_HORIZON_MS))).toBe(true);
+    expect(approvalLapsed(new Date(1), new Date(APPROVAL_HORIZON_MS))).toBe(false);
+  });
+
+  it('never voids one waiting for approval, however old its decision: it expires by its own wait', () => {
+    expect(voidCauses(DECIDED, { ...STANDING, at: new Date(AT.getTime() + 30 * APPROVAL_HORIZON_MS) })).toEqual([]);
+  });
+
+  it('is kept last, beside any other cause, in the engine’s order', () => {
+    expect(voidCauses(approvedAgo(APPROVAL_HORIZON_MS), { ...STANDING, agentStatus: 'SUSPENDED' })).toEqual([
+      'AGENT_SUSPENDED',
+      'APPROVAL_LAPSED',
+    ]);
   });
 });

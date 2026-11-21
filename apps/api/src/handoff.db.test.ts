@@ -32,7 +32,13 @@ import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type FakeRail, type PaymentExecution, RailUnavailable } from '@agentx/core/modules/providers';
-import { approveRequest, cancelRequest, requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import {
+  APPROVAL_HORIZON_MS,
+  approveRequest,
+  cancelRequest,
+  requestOf,
+  SPEND_REQUESTS,
+} from '@agentx/core/modules/spend-requests';
 import {
   REMITTANCE_SETTINGS,
   remittanceOf,
@@ -734,6 +740,171 @@ describe('authority withdrawn since the approval: denied now, its holdings freed
     expect(await statusOf(w, request.id)).toBe('CANCELLED');
     expect(await paymentOf(w, request.id)).toEqual({ instruction: 'missing' });
     expect(lines('handoff.failed')).toEqual([]);
+  });
+});
+
+describe('an approval older than the horizon: denied at the hand-off, its holdings freed (AT13d, partner S208)', () => {
+  /**
+   * The approval is sealed by the database's clock now; the app's clock is moved on, as days passing would: the age
+   * Tx A weighs is the app's now against the sealed time, never a row's column. The app's clock started before the
+   * request was made (beforeEach), so past the horizon by a few minutes to spare.
+   */
+  const PAST_THE_HORIZON = APPROVAL_HORIZON_MS + 5 * 60_000;
+
+  const lapsed = (w: World, requestId: string, submitted: () => number) =>
+    Promise.all([statusOf(w, requestId), holdingsOf(w, requestId), paymentOf(w, requestId), stoppedToldOf(w)]).then(
+      ([status, holdings, payment, told]) => {
+        expect(status).toBe('DENIED');
+        expect(holdings).toEqual({ reservation: 'RELEASED', released: true });
+        expect(payment).toEqual({ instruction: 'missing' });
+        expect(submitted()).toBe(0);
+        expect(told).toEqual([requestId]);
+        expect(lines('handoff.denied')).toEqual([expect.objectContaining({ requestId, causes: 'APPROVAL_LAPSED' })]);
+      },
+    );
+
+  /** The owner's own statement on the requests' table, its guards off: an editable column moved past the app. */
+  async function createdMoved(w: World, requestId: string, by: string) {
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      await owner.query('alter table spend_requests.requests disable trigger user');
+      await owner.query('update spend_requests.requests set created_at = now() + $2::interval where id = $1', [
+        requestId,
+        by,
+      ]);
+      await owner.query('alter table spend_requests.requests enable trigger user');
+    } finally {
+      await owner.end();
+    }
+  }
+
+  it('denies one the policy approved at its decision seven days ago: no call, holdings freed, admins told', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    expect(request.status).toBe('APPROVED');
+    clock.advanceBy(PAST_THE_HORIZON);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    await lapsed(w, request.id, submitted);
+    const events = await shared.eventsAbout(w.org, request.id, SPEND_REQUESTS.subject);
+    expect(events.at(-1)).toMatchObject({
+      action: 'spend_request.voided',
+      actorType: 'system',
+      details: { statusTo: 'DENIED', causes: 'APPROVAL_LAPSED' },
+    });
+  });
+
+  it('denies one a person approved seven days ago, the same', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: AED(150_000n) });
+    expect(await statusOf(w, request.id)).toBe('APPROVAL_REQUIRED');
+    await signed(w, async (tx, states) => {
+      await requestOf(tx, states, { orgId: w.org, id: request.id }, 'change');
+      return approveRequest(tx, states, keys, { orgId: w.org, id: request.id }, { userId: w.admin.userId, stepUp: {} });
+    });
+    clock.advanceBy(APPROVAL_HORIZON_MS + HOUR);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    await lapsed(w, request.id, submitted);
+  });
+
+  it('hands off one approved six days ago: the positive control', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    clock.advanceBy(6 * 24 * HOUR);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(submitted()).toBe(1);
+    expect(await stoppedToldOf(w)).toEqual([]);
+  });
+
+  it('rests on the sealed approval alone: the row forward-dated by the owner is still denied', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    // Made to look made a moment before the app's clock to come.
+    await createdMoved(w, request.id, '7 days');
+    clock.advanceBy(PAST_THE_HORIZON);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    await lapsed(w, request.id, submitted);
+  });
+
+  it('rests on the sealed approval alone: the row backdated by the owner still hands off within the horizon', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await createdMoved(w, request.id, '-30 days');
+    clock.advanceBy(6 * 24 * HOUR);
+
+    await handoffOf(w).run();
+
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+  });
+
+  it('the request voids job denies one past the horizon too, so it never sits', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    clock.advanceBy(PAST_THE_HORIZON);
+    await createRequestVoids({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    }).run();
+
+    expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'RELEASED', released: true });
+    const events = await shared.eventsAbout(w.org, request.id, SPEND_REQUESTS.subject);
+    expect(events.at(-1)).toMatchObject({ action: 'spend_request.voided', details: { causes: 'APPROVAL_LAPSED' } });
+  });
+
+  it('the request voids job leaves one within the horizon standing: the positive control', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    clock.advanceBy(APPROVAL_HORIZON_MS - HOUR);
+    await createRequestVoids({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    }).run();
+
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+  });
+
+  it.each([
+    ['paused past the horizon, then unfrozen: denied, never standing again', 8 * 24 * HOUR, 'DENIED'],
+    ['paused and unfrozen within it: it stands and hands off (the positive control)', 5 * 24 * HOUR, 'HANDED_OFF'],
+  ] as const)('counts the time a freeze held it (the horizon is absolute): %s', async (_what, frozenFor, status) => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const mandateId = await mandateIdOf(w);
+    await moved(w, mandateId, 'organization', 'pause');
+    clock.advanceBy(frozenFor);
+    await moved(w, mandateId, 'organization', 'resume');
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe(status);
+    expect(submitted()).toBe(status === 'DENIED' ? 0 : 1);
+    if (status === 'DENIED') {
+      expect(lines('handoff.denied')).toEqual([
+        expect.objectContaining({ requestId: request.id, causes: 'APPROVAL_LAPSED' }),
+      ]);
+    }
   });
 });
 

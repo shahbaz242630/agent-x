@@ -58,6 +58,8 @@ export const REASON_CODES = {
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
   ALREADY_A_MEMBER:
     "You already belong to this organisation, so its invitation can't be accepted. Ask one of its admins if your role should change.",
+  APPROVAL_LAPSED:
+    'The request was approved more than 7 days ago (time it was paused counts) and not yet paid, so it was cancelled before it reached the bank, and the money held for it was freed. The agent asks again with a new request if it is still needed.',
   APPROVAL_REJECTED:
     'A person at your organisation rejected this request, so it will not be paid. Its reservation was released; ask again only if what you need has changed.',
   APPROVAL_THRESHOLD:
