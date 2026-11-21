@@ -62,7 +62,9 @@ resource anchorRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
 }
 
 // Get Blob and List Blobs (both `blobs/read`), and nothing else: the chain
-// repair (4D2e E10) checks a repair against the anchors and adds none.
+// repair (4D2e E10) checks a repair against the anchors and adds none, and
+// production's `web` copies read them and the digest beside them (AT13b). Its
+// words left as they are, so the role itself doesn't change.
 resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   name: guid(resourceGroup().id, 'audit-anchors-reader')
   properties: {

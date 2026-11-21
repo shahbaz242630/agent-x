@@ -657,16 +657,19 @@ resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
 // a start it can't be read, so every organisation's payments wait; or it has gone
 // unwritten three intervals, so a restart would forget what moved; or unread three
 // intervals, so a restart would make payments wait; or no store was named, so
-// anchors are in memory alone. Any one line tells someone; none is a hold. Stateful,
-// as above.
+// anchors are in memory alone; or a production web copy can't read the anchors
+// past the alert limit, or can't hold them (AT13b): its decisions go on without
+// the digest. Staging's one API (AGENTX_ROLE all) and Stage G's web copies (no
+// store, an info line alone) never say those two. Any one line tells someone;
+// none is a hold. Stateful, as above.
 resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: anchorStoreAlertName
   location: location
   tags: tags
   kind: 'LogAlert'
   properties: {
-    displayName: 'Anchor store: payments waiting, or anchors not kept'
-    description: 'SEV-2. The API could not read the store that keeps the audit anchors after a start, so payments wait for every organisation; or could not write to it for three check intervals, so a restart would forget them; or could not read it for three, so a restart would make payments wait; or started with no store named, so anchors are in memory alone. Decisions go on and nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    displayName: 'Anchor store: payments waiting, anchors not kept, or web copies without the digest'
+    description: 'SEV-2. The API could not read the store that keeps the audit anchors after a start, so payments wait for every organisation; or could not write to it for three check intervals, so a restart would forget them; or could not read it for three, so a restart would make payments wait; or started with no store named, so anchors are in memory alone; or a web copy can\'t read the anchors, or hold them: its decisions go on without the digest, so check the API identity\'s audit-anchors-reader role, that foundation has run, and its heap. Nobody is held. Runbook: Incident-Response-Playbook.md section H.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -679,7 +682,7 @@ resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on", "audit.web_anchors_read_failing", "audit.web_anchors_beyond_memory") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

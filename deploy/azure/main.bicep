@@ -154,6 +154,11 @@ var jobsKeeper = {
 // `jobs` in one (apps --load-run), so both may keep them there.
 var anchorKeepers = environment == 'production' ? [jobsKeeper] : [apiKeeper, jobsKeeper]
 
+// Who reads the anchors and keeps none (AT13b): production's `web` copies, as
+// the API's identity, so their decisions are held to the signed states' digest
+// the jobs keep beside the anchors. Staging's API keeps them already.
+var anchorReaders = environment == 'production' ? [apiKeeper] : []
+
 resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   name: names.group
   location: location
@@ -360,6 +365,7 @@ module evidence 'modules/evidence.bicep' = {
     workspaceId: ids.workspace
     writerIdentityName: identityName(environment, 'operator')
     anchorKeepers: anchorKeepers
+    anchorReaders: anchorReaders
     restorerIdentityName: identityName(environment, 'chain-restore')
     retentionDays: evidenceRetentionDays
     immutability: evidenceImmutability
