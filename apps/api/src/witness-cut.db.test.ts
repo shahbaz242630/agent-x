@@ -6,7 +6,14 @@
 // and its walk each find the cut. Section 1.8 of the plan: tests (1), (7) and (10); (5)'s walk; (8) and (14) live in
 // month-totals.db.test.ts.
 import { AGENTS } from '@agentx/core/modules/agents';
-import { checkStatesWith, createAuditTrail, holdOrganisation, witnessWith } from '@agentx/core/modules/audit';
+import {
+  checkStatesWith,
+  createAuditTrail,
+  holdOrganisation,
+  withSignedStates,
+  witnessWith,
+  WriteCutBack,
+} from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import {
@@ -347,7 +354,7 @@ describe('TR-1 review finding 1: the anchor check on a witness view older than t
     );
     const anchor = j.anchors.latest({ kind: 'organisation', orgId: w.org });
     const trail = createAuditTrail({ keys, ids });
-    await createAnchorCheck({
+    const check = createAnchorCheck({
       chains: [],
       organizations: {
         list: () => Promise.resolve([w.org]),
@@ -363,7 +370,13 @@ describe('TR-1 review finding 1: the anchor check on a witness view older than t
       deadlineMs: 120_000,
       anchors: j.anchors,
       witness: jWitness,
-    }).run();
+    });
+    // The walk was asked nothing (J hadn't listed the stop): before signing, a read begun after it finds the stop at or
+    // below where it reached, never asked of it, so nothing is anchored this run.
+    await check.run();
+    expect(j.anchors.latest({ kind: 'organisation', orgId: w.org })?.seq).toBe(anchor?.seq);
+    // The next walk is asked it, and finds the cut.
+    await check.run();
     expect(j.anchors.latest({ kind: 'organisation', orgId: w.org })?.seq).toBe(anchor?.seq);
     expect(lines('audit.integrity_failed')).toContainEqual(
       expect.objectContaining({ check: 'witness', reason: 'cut_back' }),
@@ -372,18 +385,19 @@ describe('TR-1 review finding 1: the anchor check on a witness view older than t
 });
 
 describe('TR-1 review finding 2: a retry answered from the stored result', () => {
-  it('on another copy, witnesses the chain’s head as it stands before it answers, so no retry is told “done” unwitnessed', async () => {
-    const { w } = await ready();
+  /** The agent's suspension under one idempotency key, as a route runs it, through the signed states. */
+  const suspendUnderKey = (w: World, key: string) => {
     const idempotency = createIdempotentWrites({ keys, logger: testLogger(capture) });
     const request = {
       orgId: w.org,
       client: { kind: 'agent' as const, id: w.agent },
       operation: 'agents.suspend',
-      key: 'tr1-replay-key',
+      key,
       payload: '{}',
     };
-    const suspend = () =>
-      signed(w, (tx, states) =>
+    // Its lines in the test's capture: the alarm is what it says.
+    return () =>
+      withSignedStates(app, w.org, { keys, ids, logger: testLogger(capture) }, (tx, states) =>
         idempotency.run(tx, request, async () => {
           await states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
             actor: OPERATOR,
@@ -393,12 +407,29 @@ describe('TR-1 review finding 2: a retry answered from the stored result', () =>
           return { status: 200, resourceId: w.agent };
         }),
       );
-    // The first answer: saved, the store down, a 503 for it.
+  };
+
+  /** The first answer: saved, the witness store down, a 503 for it. What the owner kept from before it. */
+  async function savedUnwitnessed(w: World, suspend: () => Promise<unknown>) {
+    let head: SavedHead | undefined;
+    let row: SavedRow | undefined;
+    await asOwner(w, async (owner) => {
+      head = await owner.saveHead();
+      row = await owner.saveRow(w.agent);
+    });
     const down = createFakeWriteOnceStore();
     down.instead.put = () => Promise.reject(new Error('store down'));
     witnessWith(witnessOver(down, 100));
     await expect(suspend()).rejects.toBeInstanceOf(WitnessUnconfirmed);
-    // Sent again on another copy (or after a restart): answered from the stored result, the head witnessed first.
+    witnessWith(undefined);
+    if (head === undefined || row === undefined) throw new Error('nothing saved');
+    return { head, row };
+  }
+
+  it('on another copy, holds the chain to the head the write left, then witnesses the head as it stands before it answers', async () => {
+    const { w } = await ready();
+    const suspend = suspendUnderKey(w, 'tr1-replay-key');
+    await savedUnwitnessed(w, suspend);
     const up = createFakeWriteOnceStore();
     witnessWith(witnessOver(up));
     expect(await suspend()).toMatchObject({ result: { status: 200, resourceId: w.agent } });
@@ -412,6 +443,56 @@ describe('TR-1 review finding 2: a retry answered from the stored result', () =>
     expect(reader.pending({ kind: 'organisation', orgId: w.org }).map(({ seq }) => seq)).toEqual([
       BigInt(head?.seq ?? 'x'),
     ]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('the write cut out since (its head gone, the owner back to before it): the alarm and the hold, and never the stored answer', async () => {
+    const { w } = await ready();
+    const suspend = suspendUnderKey(w, 'tr1-replay-cut');
+    const { head, row } = await savedUnwitnessed(w, suspend);
+    await asOwner(w, async (owner) => {
+      await owner.windBack(head);
+      await owner.withoutStatusGuard(() => owner.restoreRow(row));
+    });
+    const up = createFakeWriteOnceStore();
+    witnessWith(witnessOver(up));
+    await expect(suspend()).rejects.toBeInstanceOf(WriteCutBack);
+    witnessWith(undefined);
+    expect(up.files.size).toBe(0);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'witness', reason: 'cut_back', chain: 'organisation' }),
+    );
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
+  });
+
+  it('a row whose record of the head was rewritten past the app: the alarm and the hold too', async () => {
+    const { w } = await ready();
+    const suspend = suspendUnderKey(w, 'tr1-replay-forged');
+    await savedUnwitnessed(w, suspend);
+    await asOwner(w, async (owner) => {
+      await owner.query('update idempotency.keys set head_mac = $1 where org_id = $2', [Buffer.alloc(32, 9), w.org]);
+    });
+    witnessWith(witnessOver(createFakeWriteOnceStore()));
+    await expect(suspend()).rejects.toBeInstanceOf(WriteCutBack);
+    witnessWith(undefined);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'witness', reason: 'cut_back', record: 'forged' }),
+    );
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
+  });
+
+  it('a head not sealed (planted past the app) is never witnessed: the reads alarm it, and no copy is held to it for good', async () => {
+    const { w } = await ready();
+    const suspend = suspendUnderKey(w, 'tr1-replay-planted');
+    await savedUnwitnessed(w, suspend);
+    await asOwner(w, async (owner) => {
+      await owner.query('update audit.heads set mac = $1 where org_id = $2', [Buffer.alloc(32, 7), w.org]);
+    });
+    const up = createFakeWriteOnceStore();
+    witnessWith(witnessOver(up));
+    await suspend();
+    witnessWith(undefined);
+    expect(up.files.size).toBe(0);
   });
 });
 

@@ -22,6 +22,8 @@ export {
   sweepExpiredKeys,
   sweepIdempotencyKeys,
   answeredFromEarlier,
+  chainHeadWritten,
+  type HeadKept,
 } from './idempotency.ts';
 export {
   isLockTimeout,

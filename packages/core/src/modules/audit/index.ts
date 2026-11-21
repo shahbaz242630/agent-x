@@ -136,6 +136,7 @@ export {
   waitWitnessed,
   witnessedWrite,
   witnessWith,
+  WriteCutBack,
   wroteTo,
 } from './infrastructure/witnessing.ts';
 export {

@@ -11,19 +11,28 @@ import type { ChainReport, StoredEntry } from './chain.ts';
 import type { HeadSeen } from './digest-log.ts';
 import type { ChainReader } from './store.ts';
 
-/** The walk's own reads, each event's hash kept where it is at a witnessed place: no read of their own. */
+/**
+ * The walk's own reads, each event's hash kept where it is at a witnessed place, and where `recent` is given, every
+ * event recorded from its `since` on (the anchor check holds a head landing late to them): no read of their own.
+ */
 export function watchingPlaces<Reader extends Pick<ChainReader, 'events'>>(
   reader: Reader,
   heads: readonly HeadSeen[],
   found: Map<bigint, Buffer>,
+  recent?: { readonly since: Date; readonly found: Map<bigint, Buffer> },
 ): Reader {
-  if (heads.length === 0) return reader;
+  if (heads.length === 0 && recent === undefined) return reader;
   const places = new Set(heads.map(({ seq }) => seq));
+  const since = recent?.since.getTime();
   return {
     ...reader,
     async events(after: bigint, upTo: bigint, limit: number): Promise<readonly (StoredEntry | undefined)[]> {
       const batch = await reader.events(after, upTo, limit);
-      for (const entry of batch) if (entry !== undefined && places.has(entry.seq)) found.set(entry.seq, entry.hash);
+      for (const entry of batch) {
+        if (entry === undefined) continue;
+        if (places.has(entry.seq)) found.set(entry.seq, entry.hash);
+        if (since !== undefined && entry.recordedAt.getTime() >= since) recent?.found.set(entry.seq, entry.hash);
+      }
       return batch;
     },
   };

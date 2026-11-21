@@ -4,6 +4,7 @@
 // unexpected error is logged with its detail instead. Addresses that don't
 // exist, and features that are off, get the same plain 404.
 import { isReasonCode, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
+import { WriteCutBack } from '@agentx/core/modules/audit';
 import { WitnessUnconfirmed } from '@agentx/platform/audit-chain';
 import { isLockWaitRunOut, isRetryable, isStatementLimit, OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
 import type { FastifyReply } from 'fastify';
@@ -187,6 +188,8 @@ export function troubleOf(error: unknown, operation: string | undefined): 'stop'
 export function responseFor(error: unknown, operation?: string): ErrorResponse {
   if (error instanceof IntegrityFailure) return { status: 503, code: 'INTEGRITY_FAILED' };
   if (error instanceof WitnessUnconfirmed) return { status: 503, code: 'ORGANISATION_BUSY' };
+  // A retry of a write cut out of the chain since (TR-1): tampering, never the stored answer.
+  if (error instanceof WriteCutBack) return { status: 503, code: 'INTEGRITY_FAILED' };
   if (troubleOf(error, operation) !== undefined) return { status: 503, code: 'ORGANISATION_BUSY' };
   if (error instanceof OrganisationBusy || isLockWaitRunOut(error)) return { status: 503, code: 'ORGANISATION_BUSY' };
   // Every connection in use, past the pool's own wait: the platform's, for whichever organisation or job was next.

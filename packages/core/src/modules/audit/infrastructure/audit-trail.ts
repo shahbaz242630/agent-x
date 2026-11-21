@@ -131,6 +131,7 @@ import {
 } from '@agentx/platform/audit-chain';
 import {
   afterCommit,
+  chainHeadWritten,
   type AnswersOf,
   assertTenant,
   type GatheredRead,
@@ -436,6 +437,8 @@ export interface AuditTrail {
     most?: number,
     /** The heads copies witnessed (TR-1), asked before the walk: a step that doesn't pass through each is `cut_back`. */
     heldTo?: readonly HeadSeen[],
+    /** Where the hashes of the events it reads recorded from `since` on are kept (TR-1: late heads held to them). */
+    recent?: { readonly since: Date; readonly found: Map<bigint, Buffer> },
   ): Promise<WalkedStep>;
   /**
    * checkFromAnchor from a place a check of the organisation's own reached (S206 V4: the notice check's), keeping the
@@ -1585,6 +1588,8 @@ export function createAuditTrail({
     if (last !== undefined) {
       moved.head = { seq: last.seq, hash: last.hash };
       wroteTo(tx, chain, last.seq);
+      // Kept with an idempotent write's answer (TR-1, migration 0114): a replay holds the chain to it.
+      chainHeadWritten(tx, chain.orgId, moved.head);
     }
     return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));
   };
@@ -1851,6 +1856,7 @@ export function createAuditTrail({
       from: CheckedPoint,
       most?: number,
       heldTo: readonly HeadSeen[] = [],
+      recent?: { readonly since: Date; readonly found: Map<bigint, Buffer> },
     ): Promise<WalkedStep> {
       const chain = chainOf(orgId);
       const seen = new Map<string, bigint>();
@@ -1859,7 +1865,7 @@ export function createAuditTrail({
         db,
         chain.orgId,
         (tx) => {
-          const reader = watchingPlaces(seeingSigned(readerFor(tx, chain.orgId, keys), seen), heldTo, found);
+          const reader = watchingPlaces(seeingSigned(readerFor(tx, chain.orgId, keys), seen), heldTo, found, recent);
           return verifyFromAnchor(keys, chain, reader, from, most);
         },
         JOB_LIMITS,

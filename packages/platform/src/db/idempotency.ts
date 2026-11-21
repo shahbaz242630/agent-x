@@ -50,7 +50,7 @@
 // is claimed again, once (B1e-2): a key past its retention is a new request.
 import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type { KeyProvider } from '../keys/key-provider.ts';
+import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import type { Logger } from '../observability/index.ts';
 import { isLockWaitRunOut } from './organisation-shares.ts';
@@ -224,6 +224,10 @@ interface StoredKey {
   readonly request_hash_key_version: number;
   readonly result_status: number | null;
   readonly result_id: string | null;
+  readonly head_seq: bigint | null;
+  readonly head_hash: Buffer | null;
+  readonly head_mac: Buffer | null;
+  readonly head_mac_key_version: number | null;
 }
 
 /** A key's row, in lower case as Postgres prints its IDs. */
@@ -245,14 +249,52 @@ interface KeyRow {
 const claimedIn = new WeakSet<object>();
 
 /**
- * The transactions whose write was answered from an earlier one's stored result (a replay), writing nothing (TR-1):
- * the earlier write's chain head may never have been witnessed (its answer was a 503 for that), so the caller witnesses
- * the chain's head as it stands before this answer goes out.
+ * The chain head an earlier write left, as its row kept it (TR-1, migration 0114): its place and hash, `none` for a write that
+ * recorded no chain event, `legacy` for a row from before migration 0114, `forged` for one whose MAC doesn't hold.
  */
-const replayedIn = new WeakSet<object>();
+export type HeadKept =
+  | { readonly kind: 'head'; readonly seq: bigint; readonly hash: Buffer }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'legacy' }
+  | { readonly kind: 'forged' };
 
-/** Whether the transaction's idempotent write was answered from an earlier one's result, writing nothing (TR-1). */
-export const answeredFromEarlier = (tx: object): boolean => replayedIn.has(tx);
+/**
+ * The transactions whose write was answered from an earlier one's stored result (a replay), writing nothing (TR-1),
+ * with the head that write left: the caller holds the chain to it, and witnesses the chain's head, before this answer
+ * goes out, as that write's own head may never have gone out (its answer was a 503 for that).
+ */
+const replayedIn = new WeakMap<object, HeadKept>();
+
+/** The head an earlier write left, where the transaction's idempotent write was answered from its result (TR-1). */
+export const answeredFromEarlier = (tx: object): HeadKept | undefined => replayedIn.get(tx);
+
+/** The highest head each transaction moved each organisation's chain to, as the audit trail tells it (TR-1). */
+const headsWritten = new WeakMap<object, Map<string, { readonly seq: bigint; readonly hash: Buffer }>>();
+
+/** The audit trail's word that `tx` moved the organisation's chain to `head`: kept with the write's answer (migration 0114). */
+export function chainHeadWritten(
+  tx: object,
+  orgId: string,
+  head: { readonly seq: bigint; readonly hash: Buffer },
+): void {
+  const byOrg = headsWritten.get(tx) ?? new Map<string, { readonly seq: bigint; readonly hash: Buffer }>();
+  headsWritten.set(tx, byOrg);
+  const held = byOrg.get(orgId.toLowerCase());
+  if (held === undefined || head.seq > held.seq)
+    byOrg.set(orgId.toLowerCase(), { seq: head.seq, hash: Buffer.from(head.hash) });
+}
+
+/** What a row's head MAC covers: the key's own names and the head, or none. */
+const headMessage = (row: KeyRow, head: { readonly seq: bigint; readonly hash: Buffer } | undefined): Message => [
+  'idempotent-head',
+  row.orgId,
+  row.kind,
+  row.clientId,
+  row.operation,
+  row.key,
+  head === undefined ? 'none' : head.seq.toString(),
+  head === undefined ? Buffer.alloc(0) : head.hash,
+];
 
 /**
  * The claim's savepoint, a name no other step may use: a rollback goes to the
@@ -349,11 +391,11 @@ export function createIdempotentWrites({
         );
         if ((first.rows[0] as { first: boolean | null } | undefined)?.first !== true) throw notFirst();
         const done = async (): Promise<IdempotentWrite> =>
-          Object.freeze({ outcome: 'done', result: await doAndRecord(at, work) });
+          Object.freeze({ outcome: 'done', result: await doAndRecord(at, keys, work) });
 
         if (claimed.rows.length === 1) return await done();
         const answer = await answerFromRow(at, keys, message);
-        if (answer !== undefined) return replayed(tx, answer);
+        if (answer !== undefined) return answer;
         // No row, though one stood in the claim's way: swept since (B1e-2), so
         // claimed again, once. A row still in the way and still unread is one
         // row security hides: someone past the app rewrote the table's policy.
@@ -361,7 +403,7 @@ export function createIdempotentWrites({
         const again = await orBusy(inserted.execute(tx));
         if (again.rows.length === 1) return await done();
         const second = await answerFromRow(at, keys, message);
-        if (second !== undefined) return replayed(tx, second);
+        if (second !== undefined) return second;
         log.error('idempotency.unreadable', { ...facts, problem: 'row_hidden' });
         throw new IdempotencyFailed(
           'unreadable',
@@ -389,12 +431,6 @@ export function createIdempotentWrites({
       }
     },
   });
-}
-
-/** An answer from an earlier write's row, its transaction marked so (answeredFromEarlier). */
-function replayed(tx: object, answer: IdempotentWrite): IdempotentWrite {
-  replayedIn.add(tx);
-  return answer;
 }
 
 /**
@@ -429,7 +465,8 @@ async function answerFromRow<Schema>(
 ): Promise<IdempotentWrite | undefined> {
   // READ COMMITTED: this statement sees the row the insert waited for.
   const { rows } = await sql<StoredKey>`
-    select request_hash, request_hash_key_version, result_status, result_id from idempotency.keys
+    select request_hash, request_hash_key_version, result_status, result_id,
+           head_seq, head_hash, head_mac, head_mac_key_version from idempotency.keys
     where org_id = ${row.orgId} and client_kind = ${row.kind} and client_id = ${row.clientId}
       and operation = ${row.operation} and key = ${row.key}
   `.execute(tx);
@@ -463,7 +500,23 @@ async function answerFromRow<Schema>(
     return Object.freeze({ outcome: 'conflict' });
   }
   log.info('idempotency.replayed', { ...facts, resultStatus: result.status });
+  replayedIn.set(tx, headKeptIn(keys, row, stored));
   return Object.freeze({ outcome: 'replayed', result });
+}
+
+/** The head a row kept (migration 0114), checked by its MAC: a version not held, or a MAC that fails, is `forged`. */
+function headKeptIn(keys: KeyProvider, row: KeyRow, stored: StoredKey): HeadKept {
+  const { head_seq: seq, head_hash: hash, head_mac: mac, head_mac_key_version: version } = stored;
+  if (mac === null || version === null) return seq === null && hash === null ? { kind: 'legacy' } : { kind: 'forged' };
+  const head = typeof seq === 'bigint' && hash instanceof Buffer ? { seq, hash } : undefined;
+  if ((seq === null) !== (hash === null)) return { kind: 'forged' };
+  try {
+    if (!keys.verifyMac('request-hash', version, headMessage(row, head), mac)) return { kind: 'forged' };
+  } catch (error) {
+    if (error instanceof KeyError) return { kind: 'forged' };
+    throw error;
+  }
+  return head === undefined ? { kind: 'none' } : { kind: 'head', ...head };
 }
 
 /**
@@ -473,14 +526,20 @@ async function answerFromRow<Schema>(
  */
 async function doAndRecord<Schema>(
   { tx, row, log, facts }: Claim<Schema>,
+  keys: KeyProvider,
   work: () => Promise<IdempotentResult>,
 ): Promise<IdempotentResult> {
   const answer = await work();
   const bad = resultProblem(answer);
   if (bad !== undefined) throw new IdempotencyFailed('bad_result', `An idempotent write's answer refused: ${bad}`);
   const result = Object.freeze({ status: answer.status, resourceId: answer.resourceId.toLowerCase() });
+  // The organisation's chain head the write left (TR-1, migration 0114), sealed with the key's names: a replay holds to it.
+  const head = headsWritten.get(tx)?.get(row.orgId);
+  const { mac: headMac, keyVersion: headKeyVersion } = keys.mac('request-hash', headMessage(row, head));
   const recorded = await sql<{ recorded: number }>`
-    update idempotency.keys set result_status = ${result.status}, result_id = ${result.resourceId}
+    update idempotency.keys set result_status = ${result.status}, result_id = ${result.resourceId},
+      head_seq = ${head?.seq ?? null}, head_hash = ${head?.hash ?? null}, head_mac = ${headMac},
+      head_mac_key_version = ${headKeyVersion}
     where org_id = ${row.orgId} and client_kind = ${row.kind} and client_id = ${row.clientId}
       and operation = ${row.operation} and key = ${row.key} and result_status is null
     returning 1 as recorded

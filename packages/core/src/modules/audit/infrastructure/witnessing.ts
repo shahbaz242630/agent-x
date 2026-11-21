@@ -11,8 +11,15 @@
 //
 // withSignedStates waits, after its transaction, for its `now` heads and any this process holds unconfirmed for the
 // organisation (`waitWitnessed`): WitnessUnconfirmed is the request's 503, its change saved, the head still queued.
-import type { Chain, ChainWitness, WitnessClass } from '@agentx/platform/audit-chain';
-import { afterCommit } from '@agentx/platform/db';
+import {
+  type Chain,
+  type ChainWitness,
+  headFields,
+  headIsSealed,
+  type WitnessClass,
+} from '@agentx/platform/audit-chain';
+import { afterCommit, type HeadKept } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
 
 import { strongerClass } from './witness-class.ts';
@@ -72,23 +79,57 @@ export const nowChainsOf = (tx: object): readonly Chain[] =>
   [...(writtenIn.get(tx)?.values() ?? [])].filter(({ klass }) => klass === 'now').map(({ chain }) => chain);
 
 /**
- * The organisation's chain head as it stands, witnessed `now` once `tx` commits (TR-1): for an answer that writes
- * nothing but tells of an earlier write (an idempotent replay), whose own head may never have been witnessed. A head
- * witnessed at or above that write's covers it: every read is held to it, and a walk re-hashes through it. One statement.
+ * A replay's write cut out of the chain (TR-1): the head the earlier write left is no longer the chain's (below its head,
+ * or another event at its place), or its row's record of it doesn't hold. Never answered as done: 503, the alarm and the
+ * hold.
  */
-export async function witnessHeadAsItStands(tx: Transaction<unknown>, orgId: string): Promise<void> {
-  if (witness === undefined) return;
+export class WriteCutBack extends Error {
+  readonly seq: bigint | undefined;
+
+  constructor(seq: bigint | undefined) {
+    super("The write this request repeats is no longer on the organisation's audit chain");
+    this.name = 'WriteCutBack';
+    this.seq = seq;
+  }
+}
+
+/**
+ * For an answer that writes nothing but tells of an earlier write (an idempotent replay, TR-1), whose own head may never
+ * have gone out (its answer was the 503 for that): the chain held to the head that write left (`kept`, from its row),
+ * then the chain's head as it stands witnessed `now` once `tx` commits, so the answer waits for it (withSignedStates). A
+ * head at or above the write's, with the write's event at its place, covers it: every read is held to it, and a walk
+ * re-hashes through it. Throws WriteCutBack where the write's head is gone from the chain, or its record is forged. A
+ * head not sealed is left to every read's own alarm, witnessed never: witnessing a head the owner planted would hold the
+ * organisation to it for good. One statement.
+ */
+export async function witnessReplayedWrite(
+  tx: Transaction<unknown>,
+  orgId: string,
+  keys: KeyProvider,
+  kept: HeadKept,
+): Promise<void> {
+  if (kept.kind === 'forged') throw new WriteCutBack(undefined);
   const chain: Chain = { kind: 'organisation', orgId: orgId.toLowerCase() };
-  const { rows } = await sql<{ seq: unknown; hash: unknown }>`
-    select h.seq, h.hash from audit.heads h where h.org_id = ${chain.orgId}
+  const keptAt = kept.kind === 'head' ? kept.seq : null;
+  const { rows } = await sql<Record<string, unknown>>`
+    select h.seq, h.hash, h.mac, h.mac_key_version,
+           (select e.hash from audit.events e
+            where e.org_id = ${chain.orgId} and e.seq = ${keptAt}::bigint and e.seq <= h.seq) as kept_hash
+    from audit.heads h where h.org_id = ${chain.orgId}
   `.execute(tx);
   const [row] = rows;
-  if (row === undefined || typeof row.seq !== 'bigint' || !(row.hash instanceof Buffer)) return;
-  const head = { seq: row.seq, hash: row.hash };
+  const head = row === undefined ? undefined : headFields(row);
+  if (head === undefined || !headIsSealed(keys, chain, head)) return;
+  if (kept.kind === 'head') {
+    const there = row?.kept_hash;
+    if (!(there instanceof Buffer) || !there.equals(kept.hash)) throw new WriteCutBack(kept.seq);
+  }
+  if (witness === undefined) return;
+  const sealed = { seq: head.seq, hash: head.hash };
   witnessedWrite(tx, chain, 'now');
-  wroteTo(tx, chain, head.seq);
+  wroteTo(tx, chain, sealed.seq);
   await afterCommit(tx, () => {
-    noteCommitted(tx, chain, head);
+    noteCommitted(tx, chain, sealed);
   });
 }
 

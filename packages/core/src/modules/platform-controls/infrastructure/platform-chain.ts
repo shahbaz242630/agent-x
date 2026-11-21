@@ -89,6 +89,12 @@ import { chainWitness, noteCommitted, statesDigest, witnessedWrite, wroteTo } fr
 import { checkedPlatformEvent, type PlatformEvent, platformEventContent } from '../domain/event.ts';
 import type { PlatformControlsTables } from './tables.ts';
 
+/** Where a walk keeps the hashes of the events it reads recorded from `since` on (TR-1). */
+interface RecentPlaces {
+  readonly since: Date;
+  readonly found: Map<bigint, Buffer>;
+}
+
 /** A transaction on the platform-controls tables: any transaction, since they belong to no organisation. */
 export type PlatformTransaction = Transaction<PlatformControlsTables>;
 
@@ -130,6 +136,7 @@ export interface PlatformChain {
     anchor: AnchorPoint | undefined,
     /** The heads copies witnessed (TR-1), asked before the walk: one it doesn't pass through is `cut_back`. */
     heldTo?: readonly HeadSeen[],
+    recent?: RecentPlaces,
   ): Promise<WalkedReport>;
   /**
    * Every organisation the chain records as created (`organization.created`'s
@@ -151,6 +158,8 @@ export interface PlatformChain {
     most?: number,
     /** The heads copies witnessed (TR-1), asked before the walk: a step that doesn't pass through each is `cut_back`. */
     heldTo?: readonly HeadSeen[],
+    /** Where the hashes of the events it reads recorded from `since` on are kept (TR-1: late heads held to them). */
+    recent?: RecentPlaces,
   ): Promise<ChainStep & { readonly signed?: SignedSeen }>;
   /** One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's. */
   passStep(
@@ -783,12 +792,14 @@ export function createPlatformChain({
       db: Kysely<PlatformControlsTables>,
       anchor: AnchorPoint | undefined,
       heldTo: readonly HeadSeen[] = [],
+      recent?: RecentPlaces,
     ): Promise<WalkedReport> {
       const found = new Map<bigint, Buffer>();
       // Each statement limited, waits for locks included, so the pool can be closed soon after a stop.
       const report = await limitedTransaction(
         db,
-        (tx) => walking((reader) => verifyChain(keys, CHAIN, watchingPlaces(reader, heldTo, found), anchor), tx),
+        (tx) =>
+          walking((reader) => verifyChain(keys, CHAIN, watchingPlaces(reader, heldTo, found, recent), anchor), tx),
         { answeredWithinMs: JOB_ANSWER_WITHIN_MS },
       );
       // Read whole from its first event: every witnessed head is this walk's to judge (TR-1).
@@ -833,12 +844,16 @@ export function createPlatformChain({
       from: CheckedPoint,
       most?: number,
       heldTo: readonly HeadSeen[] = [],
+      recent?: RecentPlaces,
     ) {
       const found = new Map<bigint, Buffer>();
       const step = await limitedTransaction(
         db,
         (tx) =>
-          walking((reader) => verifyFromAnchor(keys, CHAIN, watchingPlaces(reader, heldTo, found), from, most), tx),
+          walking(
+            (reader) => verifyFromAnchor(keys, CHAIN, watchingPlaces(reader, heldTo, found, recent), from, most),
+            tx,
+          ),
         { answeredWithinMs: JOB_ANSWER_WITHIN_MS },
       );
       // A walk that missed a witnessed head is the chain cut back (TR-1): nothing it read is kept, nothing anchored.
