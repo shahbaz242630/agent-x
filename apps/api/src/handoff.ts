@@ -135,7 +135,7 @@ import {
 } from '@agentx/core/modules/outcomes';
 import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { AnchorStore, Chain } from '@agentx/platform/audit-chain';
+import type { AnchorStore, Chain, StateDigest } from '@agentx/platform/audit-chain';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -393,6 +393,13 @@ export function createHandoff({
      * to Tx A, so Tx A never finds it let go. None where every shard is always held.
      */
     readonly pin?: (chain: Chain) => Promise<(() => void) | undefined>;
+    /**
+     * The signed states' digest every read in Tx A is held to (AT13): while it doesn't cover the chain to the anchor
+     * compared with (not read yet since the start, a stretch missing, a rebase), the request waits, `digest_pending`,
+     * that organisation alone, as for an anchor not made yet. A chain given way for memory goes on today's checks. None,
+     * and nothing waits for it.
+     */
+    readonly digest?: Pick<StateDigest, 'covers'>;
   };
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
@@ -525,14 +532,18 @@ export function createHandoff({
    * its head's lock (ADR-006 §6): its integrity hold, then a chain wound back
    * since its last anchor (SEC-DB-11, H11), refused now rather than at the
    * anchor check's next run; with no anchor yet (the run's anchorFirst couldn't
-   * make one), it waits rather than go uncompared (partner S146).
+   * make one), it waits rather than go uncompared (partner S146). So with a
+   * digest that can't stand for the chain (AT13): the reads above were held to
+   * what it knows, and a money move never goes on less than the whole of it.
    */
   const chainStops = async (tx: HandoffTx, states: SignedStates, orgId: string): Promise<string | undefined> => {
     const hold = await states.integrityHold(tx, orgId, 'head');
     if (hold.outcome !== 'clear') return `hold_${hold.outcome}`;
     if (anchoring === undefined) return undefined;
-    const anchor = anchoring.anchors.latest({ kind: 'organisation', orgId });
+    const chain = { kind: 'organisation', orgId } as const;
+    const anchor = anchoring.anchors.latest(chain);
     if (anchor === undefined) return 'anchor_pending';
+    if (anchoring.digest?.covers(chain, anchor.seq) === false) return 'digest_pending';
     return (await states.anchorKept(tx, orgId, anchor)).outcome === 'kept' ? undefined : 'hold_tampered';
   };
 

@@ -15,7 +15,7 @@
 // lane, so no item is read twice in a run; it ends once all it started has.
 
 /** A reason a request waits that is its whole organisation's: every request behind it would wait for the same. */
-const ORGANISATION_WIDE = new Set(['organization', 'anchor_pending']);
+const ORGANISATION_WIDE = new Set(['organization', 'anchor_pending', 'digest_pending']);
 const ORGANISATION_WIDE_FAMILIES = ['hold_', 'pause_'];
 
 /** Whether a waiting reason, comma-joined, ends its lane's turn. */

@@ -287,6 +287,36 @@ export const PLAIN_WORDS = {
     broke: 'After a start, payments wait for every organisation. Nobody is held.',
     next: 'Give the process a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
+  'audit.state_digest_near_memory': {
+    happened: 'The record of signed records’ latest versions has passed half its memory.',
+    broke: 'Nothing yet. If it fills, the largest organisation stops being held to it, its records checked as before.',
+    next: 'Plan more memory for the process in good time: the line says how much is held.',
+  },
+  'audit.state_digest_chain_gave_way': {
+    happened: 'The record of one organisation’s signed records’ latest versions outgrew its share of memory.',
+    broke: 'Its payments, or all its records, are checked as before: tampering there is found later. Others go on.',
+    next: 'Nothing waits: its payments go on, checked as before. Give the process more memory in good time.',
+  },
+  'audit.state_digest_snapshot_too_large': {
+    happened: 'The hourly copy of the record of signed records’ latest versions was larger than a start may read.',
+    broke: 'Nothing: it was not written, and a start reads the smaller files instead, more slowly.',
+    next: 'Give the process more memory, so the copy fits again.',
+  },
+  'audit.state_digest_catch_up_failed': {
+    happened: 'A walk to bring one organisation’s record of signed records’ latest versions up to date failed.',
+    broke: 'That organisation’s payments wait until it is up to date. Others go on.',
+    next: 'Nothing: it is tried again at its next turn. If it repeats, read the reason on the line.',
+  },
+  'audit.state_digest_store_failed': {
+    happened: 'The record of each signed record’s latest version could not be read from or written to the store.',
+    broke: 'Nothing yet: it is tried again each run. After a start, payments wait until it has been read once.',
+    next: 'Nothing if it passes. If it repeats, check the anchor store as for the anchors: playbook section H.',
+  },
+  'audit.state_digest_store_failing': {
+    happened: 'The record of each signed record’s latest version has failed to reach the anchor store for some time.',
+    broke: 'After a start, payments wait for every organisation. Unwritten parts are kept in memory meanwhile.',
+    next: 'Check the anchor store and the API’s access to it, as for the anchors: playbook section H.',
+  },
   'audit.anchor_store_foreign': {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',
     broke: 'Nothing: those files were left unread and the check went on without them.',
