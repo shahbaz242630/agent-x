@@ -1380,21 +1380,6 @@ export const PLAIN_WORDS = {
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
   },
-  'security.legacy_seal_failed': {
-    happened: 'The API could not seal the security records from before this release.',
-    broke: 'Those older records are not shown or counted until sealed; the API and new records are unaffected.',
-    next: 'The next start takes the sealing up again. If it keeps failing, check the database and the platform audit chain.',
-  },
-  'security.legacy_seal_stalled': {
-    happened: 'The sealing of older security records found its lock taken twice running, an hour apart.',
-    broke: 'Old records stay unsealed; a row edited meanwhile may hide.',
-    next: 'Find which database session holds the lock, and treat it as an incident.',
-  },
-  'security.legacy_seal_unanchored': {
-    happened: 'A record of the older security records’ sealing could not be anchored at once.',
-    broke: 'Until the next anchor check anchors it, that record could be removed without the next sealing noticing.',
-    next: 'Nothing to do if the next anchor check succeeds. If anchoring keeps failing, check the anchor store.',
-  },
   'security_event_seal.failed': {
     happened: 'The daily seal of the security records could not be made or checked this run.',
     broke: 'A change to them is not caught until the next run, 30 minutes later.',

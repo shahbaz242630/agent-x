@@ -9,7 +9,8 @@
 //   addresses never queues on a shared head, as a chain written row by row
 //   would make it (an attacker spraying sign-ins could then slow everyone's).
 //   A row with no MAC is never believed: those from before 0105 were given
-//   theirs at the first start on it (legacy-seal.ts). The admins' page shows
+//   theirs once, at the first start on it (S206 V6; that pass deleted S208, every
+//   environment sealed or born so). The admins' page shows
 //   only rows whose MAC holds and whose ID agrees with when they were written.
 // - Each closed UTC day of rows is digested and the digest sealed on an audit
 //   chain after the fact (the activity log's daily seal, reused: its days by
@@ -32,24 +33,16 @@
 //   deleted, edited or slipped in since shows as the day's digest no longer
 //   holding, or as rows in a day between two seals that has none.
 //
-// The rows from before 0105 (`before_macs`) are given their MACs by a pass of
-// their own (legacy-seal.ts), at the first start, in the background, so it may
-// end before or after a day of them is sealed, or part way through it (staging,
-// 20 Nov 2026: days sealed first, their rows given MACs after, each seal then
-// failing its digest). So a marked row's line in the digest never holds its
-// MAC (form 2): the seal is the same whenever the pass ran, and the MAC is
-// still checked on its own each time the day is digested. A marked row with no
-// MAC raises no alarm only if written before the time LegacyRows names
-// (legacyExcused): while the pass hasn't ended, before the moment it began
-// (`sealing_started`'s `until`), or now if it hasn't begun; once it has ended,
-// before its scope began, the rows it left to the sweep. Any other is the
-// alarm: a row the owner marks and strips today is caught, never waited for,
-// and a pass held up (its lock taken) is its job's own alarm.
-//
-// So the mark is no longer quite nothing, as 0105's header says it is (a
-// migration can't change): a marked row with no MAC, written early enough, is
-// excused the alarm, though never believed, shown or counted. The bounds above
-// keep the excuse to rows from before 0105.
+// The rows from before 0105 (`before_macs`) were given their MACs by a pass of
+// their own, at the first start, in the background, so it could end before or
+// after a day of them was sealed, or part way through it (staging, 20 Nov
+// 2026: days sealed first, their rows given MACs after, each seal then failing
+// its digest). So a marked row's line in the digest never holds its MAC (form
+// 2): the seal is the same whenever the pass ran, and the MAC is still checked
+// on its own each time the day is digested. That pass is done everywhere
+// (staging's `all_sealed`, 20 Nov; production born sealed) and was deleted
+// (S208), with the excuse it gave a marked row still waiting for its MAC: a
+// row with no MAC, marked or not, is the alarm wherever it is met.
 //
 // Rows deleted before their day is sealed are not in any digest; each run
 // logs the count of every day not yet sealed (tallyFrom), and an alert holds
@@ -83,22 +76,6 @@ export const SECURITY_LOG_SUBJECT = 'security_log';
  * before 0105 is digested without its MAC. Form 1, the first (staging's alone), is still checked: securitySealHolds.
  */
 export const SECURITY_SEAL_FORM = 2;
-
-/**
- * What the pass giving the rows from before 0105 their MACs (legacy-seal.ts) says of a marked row with no MAC, read
- * from its records on the platform chain, each MAC-checked (legacyRowsAt): one written before `excusedBefore` raises no
- * alarm; any other does. Null excuses none: a record that can't be believed, or a pass past its cutoff with no end.
- */
-export interface LegacyRows {
-  readonly excusedBefore: Date | null;
-}
-
-/** Whether a row from before 0105 with no MAC is excused the alarm (LegacyRows): any other row whose MAC fails isn't. */
-export const legacyExcused = (
-  row: { readonly before_macs: boolean; readonly mac: unknown; readonly created_at: Date },
-  legacy: LegacyRows,
-): boolean =>
-  row.before_macs && row.mac === null && legacy.excusedBefore !== null && row.created_at < legacy.excusedBefore;
 
 /** Which table: the global one (0012), or one organisation's rows of 0091. */
 export type SecurityLog = { readonly orgId: string } | 'global';
@@ -182,8 +159,8 @@ export const evidenceMessage = (facts: EvidenceFacts): Message => [
 
 /**
  * Whether a security row's MAC holds for the message, with the version it names. A row with none never does: the rows
- * from before 0105 were each given theirs at the first start on it (legacy-seal.ts). A MAC or version made up (no such
- * key version) holds for nothing.
+ * from before 0105 were each given theirs at the first start on it (S206 V6). A MAC or version made up (no such key
+ * version) holds for nothing.
  */
 export function rowMacHolds(
   keys: KeyProvider,
@@ -318,7 +295,7 @@ export interface BothForms extends DayDigest {
 
 /**
  * A day's digest of its dated rows (its `misdated` always null: they are left out), in both forms; its first row whose
- * MAC doesn't hold and isn't excused, and its first left out.
+ * MAC doesn't hold, and its first left out.
  */
 export interface SecurityDayDigest extends BothForms {
   readonly forged: string | null;
@@ -327,15 +304,14 @@ export interface SecurityDayDigest extends BothForms {
 
 /**
  * The log's digest of `day`: SHA-256 over one line a dated row, by ID, each the JSON of lineOf and a newline (in each
- * form), read `batch` rows at a time, each batch in a transaction `read` opens; each row's MAC checked as it passes, a
- * row from before 0105 with none excused by `legacy`.
+ * form), read `batch` rows at a time, each batch in a transaction `read` opens; each row's MAC checked as it passes.
  */
 export async function securityDigestOfDay(
   read: <T>(work: (tx: SealTx) => Promise<T>) => Promise<T>,
   keys: KeyProvider,
   log: SecurityLog,
   day: string,
-  { batch, legacy }: { readonly batch: number; readonly legacy: LegacyRows },
+  { batch }: { readonly batch: number },
 ): Promise<SecurityDayDigest> {
   const hash = createHash('sha256');
   const formOne = createHash('sha256');
@@ -357,7 +333,7 @@ export async function securityDigestOfDay(
       requests += 1;
       idFrom ??= row.id;
       idTo = row.id;
-      if (forged === null && !eventMacHolds(keys, factsOf(row), row) && !legacyExcused(row, legacy)) forged = row.id;
+      if (forged === null && !eventMacHolds(keys, factsOf(row), row)) forged = row.id;
     }
     after = rows.at(-1)?.id ?? after;
     if (rows.length < batch) break;
@@ -512,8 +488,8 @@ export type SecuritySealBroken = 'digest' | 'unsealed_day';
 /**
  * Whether the seal holds the day as digested now: as form 2, or as form 1 either way, the rows from before 0105 with
  * their MACs or without, as its seals (staging's first, 20 Nov 2026) were made before or after the pass gave them; the
- * MACs are checked on their own. TODO(S206 AT10-style): form 1 goes with legacy-seal.ts, its seals all past the
- * retention.
+ * MACs are checked on their own. Form 1 stays until staging's form 1 seals (days 27 Sep to 16 Nov 2026) are past the
+ * retention (90 days: about 12 February 2027); production, born sealed, never made one. TODO(S208): delete it then.
  */
 const securitySealHolds = (now: BothForms, details: Readonly<Record<string, unknown>>): boolean =>
   sealHolds(now, details, SECURITY_SEAL_FORM) ||
