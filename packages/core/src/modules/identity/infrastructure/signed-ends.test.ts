@@ -4,10 +4,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  EVERYONE,
   SESSION_ENDED,
   SESSION_ROTATED,
   sessionEndedEvent,
   sessionRotatedEvent,
+  SESSIONS_ALL_ENDED,
+  sessionsAllEndedEvent,
   SESSIONS_ENDED,
   sessionsEndedEvent,
   signedEndKey,
@@ -41,5 +44,26 @@ describe('a session’s signed ends as the digest keeps them (AT13c)', () => {
     expect(signedEndSubjectOf(SESSIONS_ENDED, '{"person":5}')).toBeUndefined();
     expect(signedEndSubjectOf(SESSION_ENDED, '{"person":"p"}')).toBeUndefined();
     expect(signedEndSubjectOf(SESSION_ROTATED, '{"person":"p","record":"r"}')).toBeUndefined();
+  });
+
+  it('every session ended at once (AT13h) is one object, everyone, its record naming the cut it answers', () => {
+    const held = { seq: 41n, hash: Buffer.alloc(32, 0xab) };
+    const event = sessionsAllEndedEvent({ held, found: 38n }, AT);
+    expect(event).toEqual({
+      actor: { type: 'system', id: 'api' },
+      action: SESSIONS_ALL_ENDED,
+      details: {
+        reason: 'platform_chain_cut',
+        at: AT.toISOString(),
+        seen: '41',
+        seenHash: 'ab'.repeat(32),
+        found: '38',
+      },
+    });
+    expect(subjectOf(event)).toEqual([SESSIONS_ALL_ENDED, EVERYONE]);
+    // No head found (its row gone): said so, never a place.
+    expect(sessionsAllEndedEvent({ held, found: null }, AT).details.found).toBe('none');
+    // Whatever its details, for the digest it is everyone's.
+    expect(signedEndSubjectOf(SESSIONS_ALL_ENDED, 'not json')).toEqual([SESSIONS_ALL_ENDED, EVERYONE]);
   });
 });

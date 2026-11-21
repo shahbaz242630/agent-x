@@ -1097,6 +1097,16 @@ export const PLAIN_WORDS = {
     broke: 'Some old sign-in sessions were not deleted this time; none can be used again.',
     next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
   },
+  'identity.sessions_all_ended': {
+    happened: 'The sign-in records were found cut back by someone with direct access to the database.',
+    broke: 'Everyone on the console was signed out once and can sign in again with their passkey.',
+    next: 'An operator should find who changed the records and follow the incident runbook.',
+  },
+  'identity.sessions_all_end_failed': {
+    happened: 'The sign-in records were found cut back, but signing everyone out once could not be saved.',
+    broke: 'Nobody can use the console on this copy of the server for now.',
+    next: 'It is tried again within a minute. Check the database, then follow the incident runbook.',
+  },
   'identity.step_up_challenge_sweep_failed': {
     happened: 'The hourly clean-up of expired identity re-checks failed.',
     broke: 'Some old identity re-checks were not deleted this time; none can be used again.',

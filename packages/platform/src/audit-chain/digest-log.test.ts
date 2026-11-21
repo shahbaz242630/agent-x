@@ -1431,6 +1431,117 @@ describe('the highest head each chain was read at (AT13f)', () => {
   });
 });
 
+describe('a chain taken as it stands after a signed answer to its cut (AT13h, S208: accept)', () => {
+  it('nothing taken at first; once taken, held to where it was taken, the head seen never lowered', async () => {
+    const { log } = digestOn();
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    const before = log.bytesHeld();
+    log.heads(CHAIN)?.accept(headAt(6n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(6n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    expect(log.bytesHeld()).toBe(before + 200);
+    // Taken again (the answer cut off and answered again): lower still, counted once.
+    log.heads(CHAIN)?.accept(headAt(5n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(5n));
+    expect(log.bytesHeld()).toBe(before + 200);
+    // Each chain its own.
+    expect(log.heads(OTHER)?.accepted).toBeUndefined();
+  });
+
+  it('its own reads raise it alone; a write or a read held to the head seen raises both', async () => {
+    const { log } = digestOn();
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    log.heads(CHAIN)?.accept(headAt(6n));
+    // A write this copy committed (or a read held to the head seen), below the head seen: raises where it was taken.
+    log.heads(CHAIN)?.saw(headAt(7n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(7n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    log.heads(CHAIN)?.accepted?.saw(headAt(8n));
+    log.heads(CHAIN)?.accepted?.saw(headAt(7n, 77));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(8n));
+    log.heads(CHAIN)?.accepted?.saw(headAt(12n));
+    // Past the head seen, its own reads still leave that alone: the other reads stay held where they were.
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(12n));
+  });
+
+  it('only over the head seen when the watch was asked, while it still is; none where the watch gave none', async () => {
+    const { log } = digestOn();
+    await log.read();
+    // A watch that gave no head seen takes nothing.
+    log.heads(CHAIN)?.accept(headAt(3n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    const asked = log.heads(CHAIN);
+    log.heads(CHAIN)?.saw(headAt(10n));
+    // The head seen moved on since the watch was asked: it is not the head the answer was to.
+    asked?.accept(headAt(6n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    // A place before the first is no head.
+    log.heads(CHAIN)?.accept(headAt(0n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+  });
+
+  it('set aside once the head seen moves past the head it was taken over, its memory given back', async () => {
+    const { log } = digestOn();
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    const before = log.bytesHeld();
+    log.heads(CHAIN)?.accept(headAt(6n));
+    log.heads(CHAIN)?.saw(headAt(11n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(11n));
+    expect(log.bytesHeld()).toBe(before);
+  });
+
+  it('a rebase after it was taken sets it aside; one asked before a rebase takes nothing and raises nothing', async () => {
+    const rebases = new Map<string, Date>();
+    const time = clock();
+    const { log } = digestOn(undefined, { time, anchors: anchorsWith(rebases) });
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    log.heads(CHAIN)?.accept(headAt(6n));
+    const askedBefore = log.heads(CHAIN);
+    time.held.at += MINUTE;
+    rebases.set(ORG, new Date(START.getTime() + 30_000));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    expect(log.bytesHeld()).toBe(0);
+    askedBefore?.accept(headAt(5n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    // Raised by a read asked before the rebase: not kept, though taken again after it.
+    log.heads(CHAIN)?.saw(headAt(4n));
+    log.heads(CHAIN)?.accept(headAt(3n));
+    askedBefore?.saw(headAt(8n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(3n));
+  });
+
+  it('forgotten with the heads by a copy that stops leading, and taken nowhere while it doesn’t', () => {
+    const leads = { now: true };
+    const log = createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: () => START,
+      epoch: 1,
+      leading: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    log.heads(CHAIN)?.saw(headAt(9n));
+    const asked = log.heads(CHAIN);
+    asked?.accept(headAt(6n));
+    expect(log.bytesHeld()).toBe(400);
+    leads.now = false;
+    expect(log.heads(CHAIN)).toBeUndefined();
+    asked?.accept(headAt(5n));
+    leads.now = true;
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    expect(log.bytesHeld()).toBe(0);
+  });
+});
+
 /** A delta's name for `at`, as the digest names its files. */
 const deltaNamed = (at: Date) =>
   `e1/digests/deltas/${String(9_999_999_999_999 - at.getTime()).padStart(13, '0')}-0199a0f0-0000-7000-8000-000000000001`;

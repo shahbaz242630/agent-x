@@ -23,6 +23,7 @@ export {
   type CheckedPlatformEvent,
   createPlatformChain,
   HEAD_WAIT_SECONDS,
+  lockedPlatformHead,
   type PlatformChain,
   platformCutBack,
   platformEventSealed,

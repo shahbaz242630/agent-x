@@ -258,17 +258,20 @@ export function platformHeadRead(seenAt: bigint | undefined) {
   ] as const;
 }
 
+/** A platform head as a read holds it: its place and hash. */
+type PlatformHead = NonNullable<HeadWatch['seen']>;
+
 /**
- * Where the platform chain was cut back below the head `watch` holds it to (AT13h, the header), as platformHeadRead read
- * it in `tx`'s statement: below it, none, two, not sealed, or another event at its place. Else none, and the head is
- * raised to the one read, unless `tx` has gone to record here. Nothing to hold to without a watch.
+ * The head `watch` holds the platform chain to, where the chain was cut back below it (AT13h, the header), as
+ * platformHeadRead read it in `tx`'s statement: below it, none, two, not sealed, or another event at its place. Else
+ * none, and the head is raised to the one read, unless `tx` has gone to record here. Nothing to hold to without a watch.
  */
 export function platformCutBack(
   keys: KeyProvider,
   tx: object,
-  watch: HeadWatch | undefined,
+  watch: Pick<HeadWatch, 'seen' | 'saw'> | undefined,
   row: PlatformHeadOfRow,
-): bigint | undefined {
+): PlatformHead | undefined {
   if (watch === undefined) return undefined;
   const fields =
     row.platform_heads === 1n
@@ -281,9 +284,24 @@ export function platformCutBack(
       : undefined;
   const head = fields !== undefined && headIsSealed(keys, CHAIN, fields) ? fields : undefined;
   const { seen } = watch;
-  if (seen !== undefined && !headHeldTo(seen, head, row.platform_seen_hash)) return seen.seq;
+  if (seen !== undefined && !headHeldTo(seen, head, row.platform_seen_hash)) return seen;
   if (head !== undefined && !headsTaken.has(tx)) watch.saw({ seq: head.seq, hash: head.hash });
   return undefined;
+}
+
+/**
+ * The platform chain's head, locked as recording locks it, the last lock of the caller's transaction, if it is the one
+ * head and sealed (AT13h: where a cut answered is taken from). One statement.
+ */
+export async function lockedPlatformHead(
+  tx: PlatformTransaction,
+  keys: KeyProvider,
+): Promise<PlatformHead | undefined> {
+  const { rows } = await sql<Record<string, unknown>>`
+    select h.seq, h.hash, h.mac, h.mac_key_version from platform_controls.audit_head h for no key update
+  `.execute(tx);
+  const head = rows.length === 1 ? headFields(rows[0] ?? {}) : undefined;
+  return head !== undefined && headIsSealed(keys, CHAIN, head) ? { seq: head.seq, hash: head.hash } : undefined;
 }
 
 /** What the platform chain's reads are held to (AT13h): the signed states' digest's watch, none where none is kept. */
