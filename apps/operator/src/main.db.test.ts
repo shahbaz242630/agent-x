@@ -494,6 +494,11 @@ describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version}
     });
     await reader.refresh();
     expect(reader.pending({ kind: 'platform' }).map(({ seq }) => seq)).toContain(BigInt(String(head?.seq)));
+    // Paused again, as the database was born, for the tests after this one.
+    const pauseId = uuidV7Ids.next();
+    const pause = path.join(folder(), `pause-${pauseId}`);
+    writeFileSync(pause, handoffRequest('handoff-pause', 'INC-2026/0209', pauseId));
+    expect((await run(['--request', pause])).code).toBe(0);
   });
 
   it('in production, refuses a command that writes a chain without the witness store, before it connects', async () => {
