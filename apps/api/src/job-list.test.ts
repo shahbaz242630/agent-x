@@ -1,19 +1,24 @@
 // The `jobs` side's list as a config makes it (4D2e D): the jobs a config can leave off (the factor removals, the
 // background downloads, a durable anchor log) made on where it names them, and listed either way. Made only: nothing
 // starts, so no database is reached.
-import { checkStatesWith, statesDigest } from '@agentx/core/modules/audit';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { chainWitness, checkStatesWith, statesDigest, witnessWith } from '@agentx/core/modules/audit';
 import { LONGEST_ABSOLUTE_SECONDS } from '@agentx/core/modules/identity';
 import { APPROVAL_HORIZON_MS } from '@agentx/core/modules/spend-requests';
-import { type DigestLog, subjectKey } from '@agentx/platform/audit-chain';
+import { createWitnessLog, type DigestLog, subjectKey } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { loadConfig } from '@agentx/platform/config';
 import { createLogger } from '@agentx/platform/observability';
+import { folderWriteOnceStore } from '@agentx/platform/storage';
 import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Leadership } from './background.ts';
 import { type Booted, sharedParts } from './boot.ts';
-import { integrityPasses, oneCopyJobs } from './job-list.ts';
+import { integrityPasses, oneCopyJobs, webCopyJobs } from './job-list.ts';
 import type { OwedPasses } from './org-passes.ts';
 
 const BASE = {
@@ -61,6 +66,11 @@ const leadership: Leadership = {
 
 /** The `jobs` side's names, as the config given makes them. */
 function namesWith(env: Record<string, string>) {
+  return jobsWith(env).map(({ name }) => name);
+}
+
+/** The `jobs` side's jobs (or a web copy's, for `web`), as the config given makes them. */
+function jobsWith(env: Record<string, string>, web = false) {
   const config = loadConfig(env);
   const logger = createLogger({ service: 'api', config, destination: new LogCapture() });
   const booted: Booted = {
@@ -71,7 +81,8 @@ function namesWith(env: Record<string, string>) {
     database: untouched as Booted['database'],
     atCrash: () => undefined,
   };
-  return oneCopyJobs(booted, sharedParts(booted, leadership), leadership).jobs.map(({ name }) => name);
+  const parts = sharedParts(booted, leadership);
+  return web ? webCopyJobs(booted, parts) : oneCopyJobs(booted, parts, leadership).jobs;
 }
 
 describe('the jobs side as a config makes it (4D2e D10)', () => {
@@ -163,6 +174,44 @@ describe('the integrity passes as the jobs side wires them, each bound (4D2e D11
     const { passes } = passesAt('2026-11-04T10:00:00.000Z');
     expect(await listedOnce(passes.sweep)).toEqual(ALL);
     expect(await passes.securitySweep.list()).toEqual(ALL);
+  });
+});
+
+describe('TR-1 the witness log on every copy, as the config names its store', () => {
+  it('lists its job on the jobs side and a web copy, holds every read to its heads, and writes what waits as the job stops', async () => {
+    const heads = mkdtempSync(join(tmpdir(), 'job-list-witness-'));
+    try {
+      const env = { ...BASE, AGENTX_AUDIT_WITNESS_DIR: heads };
+      expect(jobsWith({ ...env, AGENTX_ROLE: 'web' }, true).map(({ name }) => name)).toEqual(['witness']);
+      expect(namesWith(BASE)).not.toContain('witness');
+      const jobs = jobsWith(env);
+      expect(jobs.map(({ name }) => name)).toContain('witness');
+      // Every write of this process noted to it; the memory digest's reads held to what it holds.
+      const witness = chainWitness();
+      if (witness === undefined) throw new Error('a store is named');
+      const chain = { kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000001' } as const;
+      const head = { seq: 4n, hash: Buffer.alloc(32, 4) };
+      witness.note(chain, head, 'soon');
+      expect((statesDigest() as DigestLog).heads(chain)?.heldTo).toEqual([head]);
+      // The job's first run writes it, and reads the store; another copy's head found there goes to the leader's probe.
+      const other = createWitnessLog({
+        store: folderWriteOnceStore(heads),
+        keys,
+        logger: testLogger(),
+        now: () => new Date(),
+        epoch: 1,
+        alertAfterMs: 60_000,
+        mostBytes: 1024 * 1024,
+      });
+      await other.now({ kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000002' }, head);
+      const handle = jobs.find(({ name }) => name === 'witness')?.start();
+      await handle?.stop();
+      expect(readdirSync(join(heads, 'e1', 'heads'))).toHaveLength(2);
+    } finally {
+      checkStatesWith(undefined);
+      witnessWith(undefined);
+      rmSync(heads, { recursive: true, force: true });
+    }
   });
 });
 
