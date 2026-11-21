@@ -10,7 +10,13 @@
 // each window to its reservations; locks are taken at 11b, after the month
 // totals and in order of ID; and an organisation made before GM-1b is refused
 // busy until its cutover opens its windows from its signed requests.
-import { type AuditDetails, createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import {
+  type AuditDetails,
+  checkStatesWith,
+  createAuditTrail,
+  type SignedStates,
+  withSignedStates,
+} from '@agentx/core/modules/audit';
 import {
   hourOf,
   type LimitReservationsTables,
@@ -40,6 +46,7 @@ import {
 } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
+import { CHAIN_START, createDigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, type DatabaseTransaction } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -380,6 +387,57 @@ describe("a payee's split window, signed (GM-1b)", () => {
 
     expect(await ask(acting, w, ORDER, first)).toEqual(refused(503, 'INTEGRITY_FAILED'));
     alarmedOn('pointer');
+  });
+
+  it('AT13: is caught at decision time rolled back with its newest event deleted below the anchor; the anchor alone lets it pass', async () => {
+    const { w, acting } = await ready();
+    const theirs = await shared.secondAgent(registry, w, TERMS);
+    await decided(acting, w, 100_000n);
+    const id = payeeWindowId(w.org, supplierKey(supplierOf_(w)));
+    let saved: Awaited<ReturnType<Owner['saveRow']>> | undefined;
+    await windowTamper(w, async (owner) => {
+      saved = await owner.saveRow(id);
+    });
+    await decided(acting, w, 200_000n);
+    // The anchor check's walk of the whole chain, kept in the digest, the window's newest state in it.
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 64 * 1024 * 1024,
+    });
+    const step = await createAuditTrail({ keys, ids }).checkFromAnchor(app, w.org, CHAIN_START);
+    if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
+    digest.record({ kind: 'organisation', orgId: w.org }, step.signed, clock.now());
+    // Below that anchor, the owner deletes the window's newest event and rolls its row back to the state before.
+    const owner = await tamperAsOwner(database, PAYEE_WINDOWS, w.org);
+    try {
+      await owner.query('begin');
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query(
+        'delete from audit.events where org_id = $1 and seq = (select max(seq) from audit.events where org_id = $1 and subject_type = $2 and subject_id = $3)',
+        [w.org, PAYEE_WINDOWS.subject, id],
+      );
+      await owner.query('alter table audit.events enable trigger user');
+      await owner.query('commit');
+      await owner.restoreRow(saved ?? ({} as never));
+    } finally {
+      await owner.end();
+    }
+
+    // The positive control: with no digest, the window reads as it was, 1,000 held, and the split passes.
+    const control = await windowOf(w, supplierKey(supplierOf_(w)));
+    expect(control.outcome === 'held' ? [...control.held.values()] : control.outcome).toEqual([100_000n]);
+    // Held to the digest: the window's newest signed state is gone, so another agent's decision on it is refused.
+    checkStatesWith(digest);
+    try {
+      expect(await ask(theirs, w, 300_000n)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    } finally {
+      checkStatesWith(undefined);
+    }
+    alarmedOn('log');
   });
 
   it('is caught pointed at a forged event ID', async () => {
