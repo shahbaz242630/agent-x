@@ -163,7 +163,17 @@ async function jobsCopy(
   w: World,
   store: FakeWriteOnceStore,
   rebases: Rebases = new Map(),
-  { readsHeld = true }: { readonly readsHeld?: boolean } = {},
+  {
+    readsHeld = true,
+    writes,
+    digestBytes = 64 * 1024 * 1024,
+  }: {
+    readonly readsHeld?: boolean;
+    /** Whether its digest writes (it leads the jobs, TR-1 A); always, unless given. */
+    readonly writes?: () => boolean;
+    /** What its digest may hold: past it a chain gives way for memory (AT13e). */
+    readonly digestBytes?: number;
+  } = {},
 ): Promise<JobsCopy> {
   const witness = witnessOver(store);
   const rebasedAfter = rebasedIn(rebases);
@@ -174,7 +184,8 @@ async function jobsCopy(
     now: () => clock.now(),
     epoch: 1,
     alertAfterMs: 60_000,
-    mostBytes: 64 * 1024 * 1024,
+    mostBytes: digestBytes,
+    ...(writes === undefined ? {} : { writes }),
     // Its reads held to the heads witnessed too (PR-1c); left out, only Tx A's own walk holds to them.
     ...(readsHeld ? { witnessed: (each: Chain, most?: number) => witness.pending(each, most) } : {}),
     anchors: { rebasedAfter, holds: () => true },
@@ -195,8 +206,11 @@ async function jobsCopy(
     anchors: { latest: (each) => anchors.latest(each), rebasedAfter },
     now: () => clock.now(),
     // As job-list.ts wires it (TR-3): what each Tx A's walk read of the signed objects kept in the digest.
-    seen: (each, signed, began) => {
-      digest.record(each, signed, began);
+    facts: {
+      keep: (each, signed, began) => {
+        digest.record(each, signed, began);
+      },
+      kept: (each) => digest.factsKept(each),
     },
   });
   return { digest, anchors, witness, frontier };
@@ -692,10 +706,17 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
    * beyond it. Then, `rewrite` given, the owner moves the cancel's event to another subject (its stored hash left as it
    * was, so every one-row check still reads true) and puts the request's row back as approved. J's next run.
    */
-  async function cancelledThenRewritten(rewrite: boolean) {
+  async function cancelledThenRewritten(
+    rewrite: boolean,
+    { leaseLost = false, digestBytes }: { readonly leaseLost?: boolean; readonly digestBytes?: number } = {},
+  ) {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
-    const j = await jobsCopy(w, store);
+    const leads = { now: true };
+    const j = await jobsCopy(w, store, new Map(), {
+      writes: () => leads.now,
+      ...(digestBytes === undefined ? {} : { digestBytes }),
+    });
     const paid = await ask(acting, w, { amount: ALLOWED() });
     const stopped = await ask(acting, w, { amount: ALLOWED() });
     const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
@@ -729,13 +750,24 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
       }),
     );
     await j.witness.refresh();
+    // The lease lost through the paying Tx A: its digest takes nothing that walk read.
+    leads.now = !leaseLost;
     expect(await handOffOnJ(w, j)).toBe(1);
+    leads.now = true;
     expect(await statusOf(w, paid.id)).toBe('HANDED_OFF');
     expect(await statusOf(w, stopped.id)).toBe('CANCELLED');
-    // Kept in the digest from Tx A's walk: the cancel, a signed state; never an event carrying no state seal.
     const orgChain = { kind: 'organisation', orgId: w.org } as const;
-    expect(j.digest.latest(orgChain, SPEND_REQUESTS.subject, stopped.id)).toBeDefined();
-    expect(j.digest.latest(orgChain, 'handoff_hold', noted)).toBeUndefined();
+    if (!leaseLost && digestBytes === undefined) {
+      // Kept in the digest from Tx A's walk: the cancel, a signed state; never an event carrying no state seal.
+      expect(j.digest.latest(orgChain, SPEND_REQUESTS.subject, stopped.id)).toBeDefined();
+      expect(j.digest.latest(orgChain, 'handoff_hold', noted)).toBeUndefined();
+    } else {
+      // Not kept (the lease lost, or the chain given way for memory): so no stretch either; F at the anchor still.
+      expect(j.digest.latest(orgChain, SPEND_REQUESTS.subject, stopped.id)).toBeUndefined();
+      expect(j.frontier.startOf(orgChain)?.from.seq).toBe(j.anchors.latest(orgChain)?.seq);
+      // Given way, really: the digest says it keeps none of the chain's facts.
+      if (digestBytes !== undefined) expect(j.digest.factsKept(orgChain)).toBeUndefined();
+    }
     if (rewrite) {
       const cutting = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
       try {
@@ -860,6 +892,19 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
   it('the order-slot variant’s positive control: not rewritten, the order asked again is an honest duplicate', async () => {
     expect(await orderRewritten(false)).toEqual({ answer: 'DENY', alarms: 0 });
   });
+
+  it.each([
+    ['the lease lost through the paying Tx A (its digest writing nothing)', { leaseLost: true }],
+    ['the chain given way for memory (its facts dropped)', { digestBytes: 2_000 }],
+  ])(
+    'no residual: %s, F keeps no stretch, and the rewrite is caught by the next walk from the anchor',
+    async (_what, how) => {
+      const { w, stopped, submitted } = await cancelledThenRewritten(true, how);
+      expect(submitted).toBe(0);
+      expect(await outcome(w, stopped.id, submitted)).toMatchObject({ transaction: undefined });
+      expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
+    },
+  );
 
   it('the positive control: not rewritten, the cancelled request is never handed off, and nothing is alarmed', async () => {
     const { w, stopped, submitted } = await cancelledThenRewritten(false);

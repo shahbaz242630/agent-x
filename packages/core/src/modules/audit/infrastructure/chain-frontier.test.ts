@@ -137,7 +137,7 @@ describe('SEC-DB-20 TR-1 F.1 the walk within a transaction and the path frontier
     const frontier = createChainFrontier({
       anchors: { latest: () => chain.point(2n), rebasedAfter: () => false },
       now: () => AT,
-      seen: (each, signed) => kept.push([each.kind, signed]),
+      facts: { keep: (each, signed) => kept.push([each.kind, signed]), kept: () => 0 },
     });
     const start = frontier.startOf(CHAIN);
     if (start === undefined) throw new Error('anchored');
@@ -150,7 +150,7 @@ describe('SEC-DB-20 TR-1 F.1 the walk within a transaction and the path frontier
     const small = createChainFrontier({
       anchors: { latest: () => chain.point(2n), rebasedAfter: () => false },
       now: () => AT,
-      seen: (each, signed) => kept.push([each.kind, signed]),
+      facts: { keep: (each, signed) => kept.push([each.kind, signed]), kept: () => 0 },
       mostBytes: 32,
     });
     const smallStart = small.startOf(CHAIN);
@@ -162,6 +162,42 @@ describe('SEC-DB-20 TR-1 F.1 the walk within a transaction and the path frontier
       ['organisation', walk.signed],
       ['organisation', walk.signed],
     ]);
+  });
+
+  it('TR-3: keeps a stretch only while the digest keeps its facts: none taken, or dropped since, and the walk starts from the anchor again', async () => {
+    const chain = await new Sealed().grow(8);
+    const digest: { mark: number | undefined } = { mark: 0 };
+    const taken: SignedSeen[] = [];
+    const frontier = createChainFrontier({
+      anchors: { latest: () => chain.point(2n), rebasedAfter: () => false },
+      now: () => AT,
+      facts: { keep: (_each, signed) => taken.push(signed), kept: () => digest.mark },
+    });
+    const raised = async (): Promise<bigint | undefined> => {
+      const start = frontier.startOf(CHAIN);
+      if (start === undefined) throw new Error('anchored');
+      frontier.raise(CHAIN, start, walked(await chain.walk(start.from)));
+      return frontier.startOf(CHAIN)?.from.seq;
+    };
+    // Kept (the positive control): F rises.
+    expect(await raised()).toBe(8n);
+    // The chain given way since (its facts dropped, the mark moved): the stretch stands for nothing, back to the anchor.
+    digest.mark = 1;
+    expect(frontier.startOf(CHAIN)?.from.seq).toBe(2n);
+    expect(await raised()).toBe(8n);
+    // The digest taking no facts now (this copy lost the lease, or the chain is given way): offered, no stretch kept.
+    digest.mark = undefined;
+    expect(await raised()).toBe(2n);
+    // A stretch begun under one mark and raised under another: not kept.
+    digest.mark = 3;
+    const start = frontier.startOf(CHAIN);
+    if (start === undefined) throw new Error('anchored');
+    digest.mark = 4;
+    frontier.raise(CHAIN, start, walked(await chain.walk(start.from)));
+    digest.mark = 3;
+    expect(frontier.startOf(CHAIN)?.from.seq).toBe(2n);
+    // Every walk offered its facts all the same.
+    expect(taken).toHaveLength(4);
   });
 
   it('a row put back at a witnessed place from another branch fails the judgement; a genuine extension passes', async () => {

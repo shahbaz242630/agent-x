@@ -267,6 +267,12 @@ export interface DigestLog extends StateDigest {
   /** Where the chain is covered to, for a catch-up walk to go on from: none, from its first event. */
   coverage(chain: Chain): CheckedPoint | undefined;
   /**
+   * Whether a walk's facts of the chain are kept now (this process writes, the chain not given way at all), and a mark
+   * that moves each time the chain comes back from giving way (its give-way generation, AT13e: its facts were let go
+   * meanwhile): none where they aren't kept. What the path frontier holds its stretch to (chain-frontier.ts, TR-3).
+   */
+  factsKept(chain: Chain): number | undefined;
+  /**
    * Whether the chain, anchored at `seq`, owes a catch-up walk: read, not wholly given way, and not covered to there
    * (one coming back included, AT13e). A chain coming back whose walk has reached `seq` is back, from here.
    */
@@ -1460,6 +1466,13 @@ export function createDigestLog({
       // Given way whole, or coming back until its walk reaches the anchor: today's checks, never a wait (AT13e).
       if (held.gaveWay === 2 || held.gen % 2 === 1) return true;
       return held.covered !== undefined && held.covered.seq >= seq;
+    },
+    factsKept(chain: Chain): number | undefined {
+      if (!writing()) return undefined;
+      const held = chainOf(chainName(chain));
+      // Given way: none. Coming back, its generation moved on (beginComingBack), so nothing from before stands.
+      if (held !== undefined && held.gaveWay !== 0) return undefined;
+      return held?.gen ?? 0;
     },
     coverage(chain: Chain): CheckedPoint | undefined {
       return chainOf(chainName(chain))?.covered;
