@@ -383,6 +383,11 @@ export const PLAIN_WORDS = {
     broke: 'Copies cannot see each other’s chain heads, so a chain cut back below another copy’s write is missed.',
     next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_WITNESS_URL: playbook section H.',
   },
+  'audit.witness_head_unconfirmed': {
+    happened: 'An audit chain head below the chain’s anchor could not yet be checked against the chain.',
+    broke: 'That organisation’s chain is anchored no more, and its payments wait, until the head is checked.',
+    next: 'Nothing if it clears at the next check. If it repeats, check the database and the anchor check’s lines.',
+  },
   'audit.witness_beyond_memory': {
     happened: 'This copy had more audit chain heads than its memory allows, and let the oldest go.',
     broke: 'The chain named is anchored no more and its payments wait: a head let go cannot be checked.',

@@ -72,6 +72,8 @@ import {
   createAnchorLog,
   createWitnessLog,
   EVIDENCE_REFERENCE,
+  headFields,
+  headIsSealed,
   REBASE_REASONS,
   type RebaseReason,
   type WitnessLog,
@@ -769,7 +771,7 @@ async function run(
   try {
     // A request done before (run again after its heads failed to go out) records nothing: the chains' heads as they
     // stand go out instead, covering its events, before it says it is done.
-    if (code === 0 && writesChains) await noteHeadsAsTheyStand(config, logger, request, witness);
+    if (code === 0 && writesChains) await noteHeadsAsTheyStand(config, keys, logger, request, witness);
     await witness.drained();
     return code;
   } catch (error) {
@@ -783,8 +785,9 @@ async function run(
  * The platform chain's head as it stands, and the organisation's the request names, if any, noted `now` (TR-1): a head
  * at or above a command's own events covers them, as every read is held to it and a walk re-hashes through it.
  */
-async function noteHeadsAsTheyStand(
+export async function noteHeadsAsTheyStand(
   config: OperatorConfig,
+  keys: KeyProvider,
   logger: Logger,
   request: Request,
   witness: Pick<WitnessLog, 'note'>,
@@ -792,20 +795,29 @@ async function noteHeadsAsTheyStand(
   const database = await connect(config, logger);
   if (database === undefined) throw new Error("the chains' heads could not be read to witness them");
   try {
-    const rows = await database.selectFrom('platform_controls.audit_head').select(['seq', 'hash']).execute();
-    const noted = (chain: Chain, row: { seq: unknown; hash: unknown } | undefined): void => {
-      if (row !== undefined && typeof row.seq === 'bigint' && row.hash instanceof Buffer) {
-        witness.note(chain, { seq: row.seq, hash: row.hash }, 'now');
+    const columns = ['seq', 'hash', 'mac', 'mac_key_version'] as const;
+    // Sealed, as every read checks it, or never noted: a head the owner planted, witnessed, would hold the chain to it
+    // for good. Not sealed (or not the one row) is no "done": the command's change is left to the reads' own alarm.
+    const sealedHead = (chain: Chain, row: Readonly<Record<string, unknown>>) => {
+      const head = headFields(row);
+      if (head === undefined || !headIsSealed(keys, chain, head)) {
+        throw new Error("a chain's head isn't sealed: it was changed past the app, and is not witnessed");
       }
+      witness.note(chain, { seq: head.seq, hash: head.hash }, 'now');
     };
-    // One head row, as ever: should the owner have added a second, none is believed or noted.
-    if (rows.length === 1) noted({ kind: 'platform' }, rows[0]);
+    const rows = await database.selectFrom('platform_controls.audit_head').select(columns).execute();
+    const [platformHead, ...more] = rows;
+    if (platformHead === undefined || more.length > 0) {
+      throw new Error('the platform chain has no one head row: it was changed past the app, and is not witnessed');
+    }
+    sealedHead({ kind: 'platform' }, platformHead);
     const orgId = 'orgId' in request && typeof request.orgId === 'string' ? request.orgId : undefined;
     if (orgId !== undefined) {
       const org = await withTenant(database, orgId, (tx) =>
-        tx.selectFrom('audit.heads').select(['seq', 'hash']).where('org_id', '=', orgId).executeTakeFirst(),
+        tx.selectFrom('audit.heads').select(columns).where('org_id', '=', orgId).executeTakeFirst(),
       );
-      noted({ kind: 'organisation', orgId }, org);
+      // An organisation with no chain yet has nothing to witness: its request was refused before writing.
+      if (org !== undefined) sealedHead({ kind: 'organisation', orgId: orgId.toLowerCase() }, org);
     }
   } finally {
     await database.destroy();

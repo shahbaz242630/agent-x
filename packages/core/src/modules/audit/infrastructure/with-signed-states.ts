@@ -106,7 +106,9 @@
 // throws WitnessUnconfirmed (503: saved, not yet confirmed, retry): the change stands, the head stays queued, and every
 // later request here for the organisation waits for it too. The holds it found are still set first. Sent again under
 // its key, on any copy or after a restart, the answer from the stored result witnesses the chain's head as it stands
-// first (`answeredFromEarlier`), so no retry is told the change succeeded with no head of it outside the database.
+// first (`answeredFromEarlier`), so no retry is told the change succeeded with no head of it outside the database; and
+// holds the chain to the head that write left (kept with its answer, migration 0115): one gone from the chain is the write cut
+// out, the alarm and the hold, and the request's answer 503 (WriteCutBack), never the stored one.
 import { ChainBroken, type StateDigest } from '@agentx/platform/audit-chain';
 import { answeredFromEarlier, inBoundedSavepoint, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -115,7 +117,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import { createAuditTrail } from './audit-trail.ts';
-import { nowChainsOf, waitWitnessed, witnessHeadAsItStands } from './witnessing.ts';
+import { nowChainsOf, waitWitnessed, witnessReplayedWrite, WriteCutBack } from './witnessing.ts';
 import {
   holdNoLongerWaiting,
   holdStillWaiting,
@@ -675,8 +677,9 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
         opened.tx = tx;
         const done = await work(tx, states);
         // An answer from an earlier write's stored result (TR-1): that write's head may never have gone out (its answer
-        // was the 503 for that), so the chain's head as it stands goes out before this answer does.
-        if (answeredFromEarlier(tx)) await witnessHeadAsItStands(tx, orgId);
+        // was the 503 for that), so the chain is held to it, and the head as it stands goes out, before this answer.
+        const kept = answeredFromEarlier(tx);
+        if (kept !== undefined) await witnessReplayedWrite(tx, orgId, keys, kept);
         return done;
       },
       { limited: true },
@@ -684,7 +687,17 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   } catch (error) {
     // Named by the chain that refused: the work may record on the platform's
     // too (an operator action records on both, ADR-006 §6).
-    if (error instanceof ChainBroken && error.chain.kind === 'platform') {
+    if (error instanceof WriteCutBack) {
+      // The write this replay repeats cut out of the chain (TR-1): the alarm, and the hold once the transaction ends.
+      const own = orgId.toLowerCase();
+      logger.child({ orgId: own }).error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'witness',
+        reason: 'cut_back',
+        ...(error.seq === undefined ? { record: error.record ?? 'forged' } : { seq: error.seq.toString() }),
+      });
+      found.push({ orgId: own, subjectType: CHAIN_SUBJECT, objectId: own, sign: 'chain', chainFailure: 'cut_back' });
+    } else if (error instanceof ChainBroken && error.chain.kind === 'platform') {
       logger.error('audit.integrity_failed', { chain: 'platform', check: 'record' });
     } else if (error instanceof ChainBroken) {
       logger

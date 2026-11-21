@@ -22,6 +22,9 @@ export {
   sweepExpiredKeys,
   sweepIdempotencyKeys,
   answeredFromEarlier,
+  chainHeadWritten,
+  type HeadKept,
+  HEAD_SEALS_REQUIRED_FROM,
 } from './idempotency.ts';
 export {
   isLockTimeout,

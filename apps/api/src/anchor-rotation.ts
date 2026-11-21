@@ -109,6 +109,12 @@ interface Witnessed {
   readonly hash: Buffer;
 }
 
+/** Where a walk keeps its last events' hashes (TR-1). */
+interface Recent {
+  readonly since: Date;
+  readonly found: Map<bigint, Buffer>;
+}
+
 type PlatformReport = ChainReport & {
   readonly signed?: SignedSeen;
   readonly began?: Date;
@@ -129,22 +135,26 @@ export function platformChainCheck({
   clock,
   owed,
 }: {
-  /** Each held to the heads copies witnessed where given (TR-1). */
-  readonly fromAnchor: (from: CheckedPoint, heldTo?: readonly Witnessed[]) => Promise<PlatformReport>;
-  readonly whole: (anchor: CheckedPoint | undefined, heldTo?: readonly Witnessed[]) => Promise<PlatformReport>;
+  /** Each held to the heads copies witnessed where given, its last events' hashes kept in `recent` (TR-1). */
+  readonly fromAnchor: (from: CheckedPoint, heldTo?: readonly Witnessed[], recent?: Recent) => Promise<PlatformReport>;
+  readonly whole: (
+    anchor: CheckedPoint | undefined,
+    heldTo?: readonly Witnessed[],
+    recent?: Recent,
+  ) => Promise<PlatformReport>;
   readonly clock: Clock;
   /** Whether the digest owes the chain, anchored there, a walk from its first event: none, never. */
   readonly owed?: (anchor: CheckedPoint) => boolean;
-}): (anchor: CheckedPoint | undefined, heldTo?: readonly Witnessed[]) => Promise<PlatformReport> {
+}): (anchor: CheckedPoint | undefined, heldTo?: readonly Witnessed[], recent?: Recent) => Promise<PlatformReport> {
   let wholeAt: number | undefined;
-  return async (anchor, heldTo) => {
+  return async (anchor, heldTo, recent) => {
     const began = clock.now();
     const now = began.getTime();
     const fresh = wholeAt !== undefined && now - wholeAt < PLATFORM_WHOLE_EVERY_MS;
     if (anchor !== undefined && fresh && owed?.(anchor) !== true) {
-      return { ...(await fromAnchor(anchor, heldTo)), began };
+      return { ...(await fromAnchor(anchor, heldTo, recent)), began };
     }
-    const report = await whole(anchor, heldTo);
+    const report = await whole(anchor, heldTo, recent);
     if (!report.ok) return report;
     wholeAt = now;
     return { ...report, began, walkedFrom: 0n };

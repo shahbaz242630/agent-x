@@ -129,17 +129,19 @@
 // own admin, would do an attacker's work for them. People look at the alarm.
 //
 // Held to the witness log (TR-1, witness-log.ts): every head any copy wrote and this copy hasn't confirmed, asked
-// before each read. Each run (and each hand-off's first anchor) first reads the store again, and anchors and lets go
-// nothing unless that read began after the run did: an anchor made on a stale view could stand over a stop not yet
-// read, and the next read would find it below the anchor. The probe reads each head's hash in its statement, and a
-// chain whose head is below one, or that holds another event at one's place, is the chain cut back: the alarm
-// (`check: witness`, `cut_back`) and the hold; one that found them all lets go those at or below its anchor. A moved
-// chain's walk from its anchor re-hashes every event to the head, and a walk that didn't pass through each head below
-// where it reached refuses (the trail's checkFromAnchor), so an anchor never stands over a cut. It anchors only where
-// every head held at or below where it reached was asked of its walk (one read in during the walk waits for the next),
-// and then lets go just those. A chain that let a head go for memory is anchored no more (`audit.witness_beyond_memory`)
-// until a rebase. After each refresh of the witness log, the jobs copy probes at once the chains that gained a head
-// (`probeWitnessed`): a stop cut back is alarmed and held within the refresh, not the next run.
+// before each walk. A walk anchors only on a read of the store that began after the walk did (one is waited for
+// before signing where the last is older): an anchor made on a stale view could stand over a stop not yet read. The
+// probe reads each head's hash in its statement, and a chain whose head is below one, or that holds another event at
+// one's place, is the chain cut back: the alarm (`check: witness`, `cut_back`) and the hold. A moved chain's walk from
+// its anchor re-hashes every event to the head, and a walk that didn't pass through each head below where it reached
+// refuses (the trail's checkFromAnchor), so an anchor never stands over a cut. It anchors only where every head held at
+// or below where it reached was asked of its walk (one read in during the walk waits for the next), and then lets go
+// just those. A head held at or below the chain's anchor (one landing after the anchor, or read back at a start) is
+// confirmed before the chain is anchored again: against the hash its anchoring walk read there, where this process made
+// that anchor (the walk keeps each event's hash from the last RECENT_MS before it began, until the next); else by a walk
+// from the head's own place to the anchor, a pass step at a time, every event re-hashed (at most MOST_CONFIRMED events).
+// On the chain, it is let go; a fork is the alarm and the hold; one that can't be walked is kept, said
+// (`audit.witness_head_unconfirmed`), and the chain anchored no more until it is: never let go unseen.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type Anchor,
@@ -150,6 +152,7 @@ import {
   type ChainProbe,
   CHAIN_START,
   type ChainReport,
+  type ChainStep,
   ChainStoreError,
   type CheckedPoint,
   createMemoryAnchorStore,
@@ -178,7 +181,24 @@ export type WalkedReport = ChainReport & {
   readonly walkedFrom?: bigint;
   /** The witnessed heads its walk was asked (TR-1): the ones it confirmed, where it holds. */
   readonly heldTo?: readonly Witnessed[];
+  /** The hash of each event it read recorded in the RECENT_MS before it began (TR-1): late heads are held to them. */
+  readonly recent?: ReadonlyMap<bigint, Buffer>;
 };
+
+/** What a walk keeps of the events it read from a time on (TR-1): each one's hash, by its place. */
+export interface RecentPlaces {
+  readonly since: Date;
+  readonly found: Map<bigint, Buffer>;
+}
+
+/**
+ * How far before a walk began the events whose hashes it keeps were recorded: past how late an honest head lands (its
+ * flush, a few retries, the listing) and the clocks, so most late heads are confirmed with no read at all.
+ */
+const RECENT_MS = 90_000;
+
+/** How far below a chain's anchor a head held there may be walked from to confirm it, a pass step at a time. */
+const MOST_CONFIRMED = 50_000n;
 
 /** A witnessed head as a walk is held to it. */
 interface Witnessed {
@@ -189,8 +209,20 @@ interface Witnessed {
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
 export interface CheckedChain {
   readonly chain: Chain;
-  /** Held to the heads witnessed (TR-1) where given: a walk that missed one refuses (`cut_back`). */
-  readonly verify: (anchor: CheckedPoint | undefined, heldTo?: readonly Witnessed[]) => Promise<WalkedReport>;
+  /**
+   * Held to the heads witnessed (TR-1) where given: a walk that missed one refuses (`cut_back`); the hashes of the events
+   * it reads from `recent.since` on kept in `recent.found`.
+   */
+  readonly verify: (
+    anchor: CheckedPoint | undefined,
+    heldTo?: readonly Witnessed[],
+    recent?: RecentPlaces,
+  ) => Promise<WalkedReport>;
+  /**
+   * One step of a walk from `cursor` towards `target`, at most a pass step's events (the trail's passStep, TR-1): how a
+   * head held at or below the chain's anchor is confirmed on it. None, and such a head is never confirmed.
+   */
+  readonly confirm?: (cursor: CheckedPoint, target: CheckedPoint) => Promise<ChainStep>;
 }
 
 /** What the probe found of one organisation's chain against its anchor, or that its read failed (the trail's probeHeads). */
@@ -228,7 +260,12 @@ export interface OrganisationChains {
   /** Every organisation the platform chain records as created, by ID: each must be listed. */
   recorded(): Promise<readonly string[]>;
   /** Checks one organisation's chain from its last anchor, or from its start where it has none, held to `heldTo`. */
-  verify(orgId: string, anchor: CheckedPoint | undefined, heldTo?: readonly Witnessed[]): Promise<WalkedReport>;
+  verify(
+    orgId: string,
+    anchor: CheckedPoint | undefined,
+    heldTo?: readonly Witnessed[],
+    recent?: RecentPlaces,
+  ): Promise<WalkedReport>;
   /**
    * Each chain's head read against its anchor at a run's start (4D2e E8), in pages, stopping between them once `signal`
    * aborts. None given, every organisation is read in its turn.
@@ -248,6 +285,8 @@ export interface OrganisationChains {
    * process for it, if one is. Never throws: every outcome is logged (B1d-3).
    */
   hold(orgId: string, failure: string | undefined): Promise<void>;
+  /** One step of a walk from `cursor` towards `target` (the trail's passStep, TR-1): CheckedChain's `confirm`. */
+  confirm?(orgId: string, cursor: CheckedPoint, target: CheckedPoint): Promise<ChainStep>;
 }
 
 export interface AnchorCheckOptions {
@@ -561,15 +600,114 @@ export function createAnchorCheck({
     });
   };
 
-  // Whether this run's read of the witness log began after the run did (TR-1): none, nothing anchored or let go.
-  let witnessFresh = true;
+  /** Whether the witness log's last whole read began at or after `since`. */
+  const readSince = (since: Date | undefined): boolean =>
+    witness === undefined ||
+    (since !== undefined && (witness.freshAt()?.getTime() ?? Number.NEGATIVE_INFINITY) >= since.getTime());
 
-  /** The witness log read again, from a read that begins now: whether it ended whole. True with no witness log. */
-  const witnessReadNow = async (): Promise<boolean> => {
-    if (witness === undefined) return true;
-    const asked = clock.now().getTime();
+  /**
+   * A walk that held, on a read of the witness log begun after it did (TR-1): where the last is older, one is waited
+   * for (coalesced: one that begins after this call), so the heads landed meanwhile are known before it anchors.
+   */
+  const readAfterWalk = async (report: WalkedReport, last: Anchor | undefined): Promise<void> => {
+    // Only for one that would anchor anew: an unmoved chain's report signs nothing.
+    if (witness === undefined || !report.ok || report.seq === last?.seq || readSince(report.began)) return;
     await witness.refresh();
-    return (witness.freshAt()?.getTime() ?? Number.NEGATIVE_INFINITY) >= asked;
+  };
+
+  // Each chain's anchor this process made, with the hashes its walk kept of its last events (TR-1), until the next.
+  const anchoredHere = new Map<string, { readonly seq: bigint; readonly recent: ReadonlyMap<bigint, Buffer> }>();
+
+  // The chains holding a head at or below their anchor that couldn't be confirmed yet: anchored no more until it is.
+  const unconfirmed = new Set<string>();
+
+  /**
+   * Whether a head at `head`'s place with its hash runs to the chain's anchor (TR-1): a walk from it, a pass step at a
+   * time, to the anchor's place, ending at its hash and MAC version (the trail's passStep, every event re-hashed, so a
+   * row put back beside a cut branch can't pass). `cut` where it doesn't; `unknown` past the cap, or with no way to walk.
+   */
+  const runsToAnchor = async (
+    confirm: CheckedChain['confirm'],
+    head: Witnessed,
+    anchor: CheckedPoint,
+  ): Promise<'holds' | 'cut' | 'unknown'> => {
+    if (confirm === undefined) return 'unknown';
+    // From the head's own place, its MAC version not known: any from there on (the MACs still need the app's keys).
+    let cursor: CheckedPoint = { seq: head.seq, hash: head.hash, macKeyVersion: 0 };
+    while (cursor.seq < anchor.seq) {
+      if (anchor.seq - head.seq > MOST_CONFIRMED) return 'unknown';
+      const step = await confirm(cursor, anchor);
+      if (!step.ok) return 'cut';
+      if (step.seq <= cursor.seq) return 'unknown';
+      cursor = step;
+    }
+    return cursor.seq === anchor.seq && cursor.hash.equals(anchor.hash) ? 'holds' : 'cut';
+  };
+
+  /**
+   * One head held at or below the anchor, judged: by the hash its anchoring walk read there, where this process kept
+   * it; else by a walk from it to the anchor. A walk that throws is said, and `unknown`.
+   */
+  const lateVerdict = async (
+    chain: Chain,
+    log: Logger,
+    {
+      confirm,
+      head,
+      anchor,
+      there,
+    }: {
+      readonly confirm: CheckedChain['confirm'];
+      readonly head: Witnessed;
+      readonly anchor: CheckedPoint;
+      readonly there: Buffer | undefined;
+    },
+  ): Promise<'holds' | 'cut' | 'unknown'> => {
+    if (there !== undefined) return there.equals(head.hash) ? 'holds' : 'cut';
+    try {
+      return await runsToAnchor(confirm, head, anchor);
+    } catch (error) {
+      log.warn('audit.anchor_check_failed', { chain: chain.kind, check: 'witness', err: error });
+      return 'unknown';
+    }
+  };
+
+  /**
+   * Each head held at or below the chain's anchor, judged (TR-1, the header): held to the hash its anchoring walk read
+   * there where this process made the anchor and kept it; else walked from to the anchor. One on the chain is let go; a
+   * fork is the alarm and the hold (`failed`); one that can't be walked (past the cap, the walk failing) is kept, said,
+   * and the chain anchored no more until it is (`unconfirmed`). Never let go unseen.
+   */
+  const lateHeadsHold = async (
+    { chain, confirm }: CheckedChain,
+    log: Logger,
+  ): Promise<'held' | 'failed' | 'unconfirmed'> => {
+    const key = keyOf(chain);
+    unconfirmed.delete(key);
+    const anchor = anchors.latest(chain);
+    if (witness === undefined || anchor === undefined) return 'held';
+    const late = witness.pending(chain).filter(({ seq }) => seq <= anchor.seq);
+    if (late.length === 0) return 'held';
+    const here = anchoredHere.get(key);
+    const recent = here?.seq === anchor.seq ? here.recent : new Map<bigint, Buffer>();
+    const confirmed: Witnessed[] = [];
+    for (const head of late) {
+      const verdict = await lateVerdict(chain, log, { confirm, head, anchor, there: recent.get(head.seq) });
+      if (verdict === 'cut') {
+        alarmed(chain, log, 'cut_back', head.seq);
+        return 'failed';
+      }
+      if (verdict === 'holds') confirmed.push(head);
+    }
+    witness.prune(chain, confirmed);
+    if (confirmed.length === late.length) return 'held';
+    unconfirmed.add(key);
+    log.error('audit.witness_head_unconfirmed', {
+      chain: chain.kind,
+      heads: late.length - confirmed.length,
+      anchorSeq: anchor.seq.toString(),
+    });
+    return 'unconfirmed';
   };
 
   /**
@@ -585,7 +723,7 @@ export function createAnchorCheck({
     last: Anchor | undefined,
   ): readonly Witnessed[] | undefined => {
     if (witness === undefined) return [];
-    if (!witnessFresh) return undefined;
+    if (!readSince(report.began) || unconfirmed.has(keyOf(chain))) return undefined;
     if (witness.beyondMemory(chain)) {
       log.error('audit.witness_beyond_memory', { chain: chain.kind, anchoring: false });
       return undefined;
@@ -627,6 +765,7 @@ export function createAnchorCheck({
     anchors.keep(anchor);
     // The walk to it passed through each of them (checkFromAnchor refuses one that didn't): let go, and only those.
     witness?.prune(chain, confirmed);
+    if (witness !== undefined) anchoredHere.set(keyOf(chain), { seq: report.seq, recent: report.recent ?? new Map() });
     // What the walk to it read of each signed object, and the stretch it read whole, kept with it (AT13): facts as true
     // as the anchor, as a decision will hold the database to them. The platform chain's too (AT13c).
     recordWalk(chain, report, last, anchor.at);
@@ -830,12 +969,16 @@ export function createAnchorCheck({
 
   /** One chain's check, its shard held: apart from `checkOne`, which holds it and catches what escapes, to keep each short. */
   const checkHeld = async (
-    { chain, verify }: CheckedChain,
+    checked: CheckedChain,
     signal: AbortSignal | undefined,
     { alone, ran, log }: { alone: boolean; ran: (ms: number) => void; log: Logger },
   ): Promise<Outcome> => {
+    const { chain, verify } = checked;
     const key = keyOf(chain);
     const last = anchors.latest(chain);
+    // Heads at or below its anchor, judged first (TR-1): a fork among them is the alarm.
+    // Only with a witness log: with none it takes no turn of the event loop, as before (the lanes' timing).
+    if (witness !== undefined && (await lateHeadsHold(checked, log)) === 'failed') return 'failed';
     let report: WalkedReport;
     let cutOff = false;
     const began = performance.now();
@@ -845,11 +988,13 @@ export function createAnchorCheck({
       checkBegan.set(key, clock.now().getTime());
       // Dated when the walk began (AT13): a rebase landing during it sets what it read aside, as the anchors do.
       const walkBegan = clock.now();
-      // The heads it is held to, asked before its first statement (TR-1): each committed before it began.
+      // The heads it is held to, asked before its first statement (TR-1): each committed before it began. Its last
+      // events' hashes kept, for a head landing after it anchors.
       const heldTo = witness?.pending(chain) ?? [];
+      const recent: RecentPlaces = { since: new Date(walkBegan.getTime() - RECENT_MS), found: new Map() };
       const checking = Promise.resolve()
-        .then(() => verify(last, heldTo))
-        .then((made): WalkedReport => ({ ...made, began: walkBegan, heldTo }));
+        .then(() => (witness === undefined ? verify(last) : verify(last, heldTo, recent)))
+        .then((made): WalkedReport => ({ ...made, began: walkBegan, heldTo, recent: recent.found }));
       // Handled here too, so a check that ends after its deadline never goes unhandled.
       void checking.then(
         (ending) => {
@@ -862,6 +1007,7 @@ export function createAnchorCheck({
         },
       );
       report = await withinDeadline(checking, deadlineMs, signal);
+      await readAfterWalk(report, last);
     } catch (error) {
       cutOff = true;
       if (error instanceof Stopped) return 'unchecked';
@@ -1061,22 +1207,14 @@ export function createAnchorCheck({
 
   /** A probe's answers kept for the turns: unmoved or failing as found, read anyway; its misses said in one line. */
   const takeAnswers = (
-    asked: readonly { readonly orgId: string; readonly from: CheckedPoint; readonly heldTo?: readonly Witnessed[] }[],
+    asked: readonly { readonly orgId: string; readonly from: CheckedPoint }[],
     answers: ReadonlyMap<string, ProbeAnswer>,
   ): void => {
     const missed: unknown[] = [];
-    for (const { orgId, from: anchor, heldTo } of asked) {
+    for (const { orgId, from: anchor } of asked) {
       const answer = answers.get(orgId);
       if (answer?.kind === 'same' || answer?.kind === 'failed') probed.set(orgId, { anchor, answer });
       else if (answer?.kind === 'missed') missed.push(answer.error);
-      // Found every head it was asked at its place (TR-1): those at or below the anchor, which no walk from it reads,
-      // are confirmed so, and let go; those above wait for the walk. Only from a fresh read of the witness log.
-      if ((answer?.kind === 'same' || answer?.kind === 'moved') && witnessFresh) {
-        witness?.prune(
-          { kind: 'organisation', orgId },
-          (heldTo ?? []).filter(({ seq }) => seq <= anchor.seq),
-        );
-      }
     }
     if (missed.length > 0) sayProbeMissed(missed.length, missed[0]);
   };
@@ -1199,6 +1337,12 @@ export function createAnchorCheck({
     }
   };
 
+  /** An organisation's `confirm`, where its chains have one (TR-1). */
+  const confirmOf = (from: OrganisationChains, orgId: string): Pick<CheckedChain, 'confirm'> => {
+    const step = from.confirm?.bind(from);
+    return step === undefined ? {} : { confirm: (cursor, target) => step(orgId, cursor, target) };
+  };
+
   /** A chain's report from this run's probe, where it compared the very anchor its turn holds: none, and it is read. */
   const probedReport = (orgId: string, anchor: CheckedPoint | undefined): Promise<ChainReport> | undefined => {
     const found = probed.get(orgId);
@@ -1230,7 +1374,9 @@ export function createAnchorCheck({
       ? await checkOne(
           {
             chain: { kind: 'organisation', orgId },
-            verify: (anchor, heldTo) => probedReport(orgId, anchor) ?? from.verify(orgId, anchor, heldTo),
+            verify: (anchor, heldTo, recent) =>
+              probedReport(orgId, anchor) ?? from.verify(orgId, anchor, heldTo, recent),
+            ...confirmOf(from, orgId),
           },
           signal,
           false,
@@ -1577,13 +1723,12 @@ export function createAnchorCheck({
       // A hand-off may come before the run's first read, and joins it; once the store has failed, the run alone tries again.
       if (durable?.state() === 'unread') await readStore(durable, signal);
       if (storeUnread()) return;
-      // Anchored only on a read of the witness log begun now (TR-1), as a run's.
-      if (witness !== undefined) witnessFresh = await witnessReadNow();
       const id = orgId.toLowerCase();
       const outcome = await checkOne(
         {
           chain: { kind: 'organisation', orgId: id },
-          verify: (anchor, heldTo) => organizations.verify(id, anchor, heldTo),
+          verify: (anchor, heldTo, recent) => organizations.verify(id, anchor, heldTo, recent),
+          ...confirmOf(organizations, id),
         },
         signal,
         true,
@@ -1623,7 +1768,6 @@ export function createAnchorCheck({
       unlistedThisRun = 0;
       firstMiss = undefined;
       if (durable !== undefined) await readStore(durable, cap);
-      if (witness !== undefined) witnessFresh = await witnessReadNow();
       const endWrites = durable === undefined ? undefined : writeAlong(durable, signal);
       const outcomes = await checkAll(cap, signal);
       clearTimeout(timer);

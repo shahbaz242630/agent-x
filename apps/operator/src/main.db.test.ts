@@ -42,7 +42,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { REBASE_LOCK } from './chain-rebase.ts';
-import { type OperatorProcess, runOperator } from './main.ts';
+import { loadOperatorConfig } from '@agentx/platform/config';
+
+import { noteHeadsAsTheyStand, type OperatorProcess, runOperator } from './main.ts';
 import {
   auditExportRequest,
   chainRebaseRequest,
@@ -499,6 +501,26 @@ describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version}
     const pause = path.join(folder(), `pause-${pauseId}`);
     writeFileSync(pause, handoffRequest('handoff-pause', 'INC-2026/0209', pauseId));
     expect((await run(['--request', pause])).code).toBe(0);
+  });
+
+  it('never notes a head that isn’t sealed (one planted past the app): the command is not done, said, and nothing noted', async () => {
+    const noted: bigint[] = [];
+    const witness = { note: (_chain: Chain, head: { readonly seq: bigint }) => noted.push(head.seq) };
+    const config = loadOperatorConfig(envFor('operator'));
+    const request = { command: 'handoff-resume', reason: 'INC-2026/0210', id: uuidV7Ids.next() } as const;
+    // The platform chain started, so it has a head to read.
+    await run(['create-organization', '--name', NAME]);
+    // Control: sealed, the platform head is noted.
+    await noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness);
+    expect(noted).toHaveLength(1);
+    const [kept] = await database.as('owner').query<{ mac: Buffer }>('select mac from platform_controls.audit_head');
+    await database.as('owner').query('update platform_controls.audit_head set mac = $1', [Buffer.alloc(32, 7)]);
+    try {
+      await expect(noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness)).rejects.toThrow(/isn't sealed/);
+      expect(noted).toHaveLength(1);
+    } finally {
+      await database.as('owner').query('update platform_controls.audit_head set mac = $1', [kept?.mac]);
+    }
   });
 
   it('in production, refuses a command that writes a chain without the witness store, before it connects', async () => {

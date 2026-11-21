@@ -1071,7 +1071,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       const policy: SchemaPolicy = {
         ...POLICY,
         fillInTables: {
-          'idempotency.keys': { ...REAL_KEYS, reason: 'Keys', columns: ['result_status', 'result_id', 'result_body'] },
+          'idempotency.keys': { ...REAL_KEYS, reason: 'Keys', columns: [...REAL_KEYS.columns, 'result_body'] },
           't.keys': { reason: ' ', columns: [] },
           't.gone': { reason: 'Removed', columns: ['result'] },
           'migrations.applied': { reason: 'Not a key', columns: ['name'] },
