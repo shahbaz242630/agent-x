@@ -1,8 +1,13 @@
 // A record read back from the evidence store (AT13f): what the store's answers mean to the operator's commands.
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import type { OperatorConfig } from '@agentx/platform/config';
 import { BlobStoreFailed } from '@agentx/platform/storage';
 import { describe, expect, it } from 'vitest';
 
-import { READ_DENIED_PROBLEM, summaryIn } from './evidence-read.ts';
+import { evidenceSummary, READ_DENIED_PROBLEM, summaryIn } from './evidence-read.ts';
 
 const NAME = '0199a0f0-0000-7000-8000-000000000001/chain-restore-0199a0f0-0000-7000-8000-0000000000f1-outcome.ndjson';
 
@@ -42,5 +47,20 @@ describe('a record read back from the evidence store (AT13f)', () => {
     await expect(summaryIn(answering(busy), NAME)).rejects.toBe(busy);
     const network = new Error('connect ETIMEDOUT');
     await expect(summaryIn(answering(network), NAME)).rejects.toBe(network);
+  });
+
+  it('reads through the store the config names: none named is unset; a folder (development and test) is read', async () => {
+    // Only the evidence store's settings are read here.
+    const configWith = (directory: string | null) =>
+      ({ evidence: { container: null, directory } }) as unknown as OperatorConfig;
+    expect(await evidenceSummary(configWith(null), NAME)).toBe('unset');
+    const folder = mkdtempSync(path.join(tmpdir(), 'evidence-read-'));
+    try {
+      writeFileSync(path.join(folder, 'outcome.ndjson'), '{"k":"restore"}\n');
+      expect(await evidenceSummary(configWith(folder), 'outcome.ndjson')).toEqual({ k: 'restore' });
+      expect(await evidenceSummary(configWith(folder), 'absent.ndjson')).toBe('missing');
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
   });
 });
