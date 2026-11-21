@@ -72,6 +72,7 @@ export {
   lockedTotalOf,
   voidedWith,
   voidRequest,
+  windowsHeldOf,
 } from './infrastructure/endings.ts';
 export {
   APPROVAL_WAITS,
@@ -105,10 +106,12 @@ export {
 } from './infrastructure/order-claims.ts';
 export {
   type DecisionMonthTotal,
+  type DecisionWindows,
   monthLockedAndTotalsWeighed,
   totalsWeighed,
 } from './infrastructure/weighed-totals.ts';
 export { type CutoverDone, cutOverMonthTotals } from './infrastructure/month-totals-cutover.ts';
+export { cutOverPayeeWindows, type WindowsCutoverDone } from './infrastructure/payee-windows-cutover.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { requestDueNow, SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';

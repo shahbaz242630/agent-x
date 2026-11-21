@@ -14,6 +14,7 @@ export {
   type HandoffPauseLock,
   handoffPauseOf,
   PAUSE_ACTOR,
+  pauseSubjectOf,
 } from './infrastructure/handoff-pause.ts';
 export { jobsBeating, releaseJobLease, takeJobLease } from './infrastructure/job-lease.ts';
 export { nextMachineId } from './infrastructure/machine-ids.ts';
@@ -24,6 +25,7 @@ export {
   HEAD_WAIT_SECONDS,
   type PlatformChain,
   platformEventSealed,
+  type PlatformSubjectOf,
   platformEventsSigned,
   type PlatformTransaction,
   type PlatformPoint,
@@ -35,6 +37,7 @@ export {
   latestPlatformTime,
   latestPlatformTimeOf,
   latestPlatformTimeOfRead,
+  latestPlatformSeqRead,
   platformEventWith,
   platformEventWithRead,
   type PlatformEventsMatching,

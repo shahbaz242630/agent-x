@@ -28,6 +28,15 @@
 // which the cookie it held then would find, is no session and raises the alarm,
 // read the same way, by 0109's index.
 //
+// A signed end deleted once it lies below the platform chain's anchor, older than
+// its last 1,000 events, isn't found by the chain's check each run (R-15, AT13c).
+// So where this process keeps the signed states' digest (digest-log.ts, given as
+// `digest`), each end the anchor check's walk read is known there, and a session's
+// read that finds no end the digest knows of (or a person's newest all-ended older
+// than it) is no session. Read again on its own first: an end committed after the
+// statement's snapshot, then walked, is the session ending as it is read, refused
+// without the alarm; one still missing is put back past the app, the alarm.
+//
 // Its last use is the owner's to move too, and moved on, an idle session lived
 // again for a cookie stolen while it was live. So the last use has a MAC of
 // its own, with the cookie's hash (0111): `use` writes it with the new last use,
@@ -54,7 +63,9 @@ import type { Logger } from '@agentx/platform/observability';
 import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
+import type { StateDigest } from '../../audit/index.ts';
 import {
+  latestPlatformSeqRead,
   latestPlatformTimeOfRead,
   type PlatformControlsTables,
   platformEventWithRead,
@@ -62,7 +73,14 @@ import {
 } from '../../platform-controls/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
 import { lastUseMessage, macHolds, macOf, type RowMacs, rowForged, sessionMessage } from './row-macs.ts';
-import { type RetiredSession, SESSION_ENDED, SESSION_ROTATED, SESSIONS_ENDED, type SignedEnds } from './signed-ends.ts';
+import {
+  type RetiredSession,
+  SESSION_ENDED,
+  SESSION_ROTATED,
+  SESSIONS_ENDED,
+  signedEndKey,
+  type SignedEnds,
+} from './signed-ends.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** How long a session lives. */
@@ -344,6 +362,12 @@ const signedEndsOfRow = (db: Kysely<IdentityTables>) => {
     sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: {}, factsFrom: { person } }])})`.as(
       'all_ended_at',
     ),
+    // Its place too, for the digest (AT13c), which keeps places: by the same index, the person's few such ends.
+    sql<
+      bigint | null
+    >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: {}, factsFrom: { person } })})`.as(
+      'all_ended_seq',
+    ),
   ] as const;
 };
 
@@ -352,6 +376,51 @@ interface SignedEndsOfRow {
   readonly signed_out: boolean;
   readonly rotated_away: boolean;
   readonly all_ended_at: Date | null;
+  readonly all_ended_seq: bigint | null;
+}
+
+/** The ends the read is held to the digest by: its person, record and MAC, and what it found of each. */
+type EndsRead = Pick<SignedEndsOfRow, 'signed_out' | 'rotated_away' | 'all_ended_seq'> & {
+  readonly id: string;
+  readonly user_id: string;
+  readonly mac: Buffer;
+};
+
+const PLATFORM = { kind: 'platform' } as const;
+
+/**
+ * A signed end the digest knows of (AT13c) that the read didn't find, if any: the session's sign-out, the rotation
+ * that retired the row as it stands, or a person's all-ended newer than the newest found. None without a digest.
+ */
+function endUnseen(digest: Pick<StateDigest, 'latest'> | undefined, row: EndsRead): 'ended' | 'rotated' | undefined {
+  if (digest === undefined) return undefined;
+  const [person, record] = [row.user_id, row.id];
+  if (!row.signed_out && digest.latest(PLATFORM, SESSION_ENDED, signedEndKey.ended(person, record)) !== undefined) {
+    return 'ended';
+  }
+  const retired = signedEndKey.rotated(person, record, row.mac.toString('hex'));
+  if (!row.rotated_away && digest.latest(PLATFORM, SESSION_ROTATED, retired) !== undefined) return 'rotated';
+  const allEnded = digest.latest(PLATFORM, SESSIONS_ENDED, person.toLowerCase());
+  return allEnded !== undefined && (row.all_ended_seq === null || row.all_ended_seq < allEnded) ? 'ended' : undefined;
+}
+
+/** The row's signed ends read again on their own, from the facts the row named: one statement. */
+async function endsNow(db: Kysely<IdentityTables>, row: EndsRead): Promise<EndsRead> {
+  const platform = db as unknown as Kysely<PlatformControlsTables>;
+  const [person, record] = [row.user_id.toLowerCase(), row.id.toLowerCase()];
+  const retired = row.mac.toString('hex');
+  const read = await platform
+    .selectNoFrom([
+      sql<boolean>`exists (${platformEventWithRead(platform, SESSION_ENDED, { record, person })})`.as('signed_out'),
+      sql<boolean>`exists (${platformEventWithRead(platform, SESSION_ROTATED, { record, person, retired })})`.as(
+        'rotated_away',
+      ),
+      sql<bigint | null>`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: { person } })})`.as(
+        'all_ended_seq',
+      ),
+    ])
+    .executeTakeFirstOrThrow();
+  return { ...row, ...read };
 }
 
 /** A session's last use as the row keeps it, with its MAC (0111): none on a session from before. */
@@ -385,10 +454,16 @@ export function createSessions({
   timeouts,
   keys,
   logger,
+  digest,
 }: RowMacs & {
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly timeouts: SessionTimeouts;
+  /**
+   * The signed states' digest this process keeps, asked at each read (AT13c, the header): given at boot, kept by the
+   * jobs once they lead; none, or none yet, and the reads are as before it.
+   */
+  readonly digest?: () => Pick<StateDigest, 'latest'> | undefined;
 }): Sessions {
   const { idleSeconds, absoluteSeconds } = timeouts;
   if (!isWholeSeconds(idleSeconds) || !isWholeSeconds(absoluteSeconds)) {
@@ -445,9 +520,25 @@ export function createSessions({
     return false;
   };
 
-  /** Whether the row is a session of the app's: standing, and its last use the app's. */
-  const believed = (row: Parameters<typeof standing>[0], lastUse: LastUse): boolean =>
-    standing(row) && lastUseHolds(row, lastUse);
+  /**
+   * Whether no signed end the digest knows of is missing from the row's read (AT13c). One missing is read again on its
+   * own: found now, the end committed after the read's snapshot (the session ending as it was read), refused quietly;
+   * still missing, deleted past the app with the row put back, the alarm.
+   */
+  const heldToDigest = async (db: Kysely<IdentityTables>, row: EndsRead): Promise<boolean> => {
+    const held = digest?.();
+    if (endUnseen(held, row) === undefined) return true;
+    const unseen = endUnseen(held, await endsNow(db, row));
+    if (unseen !== undefined) rowForged(logger, 'session', row, unseen);
+    return false;
+  };
+
+  /** Whether the row is a session of the app's: standing, held to the digest, and its last use the app's. */
+  const believed = async (
+    db: Kysely<IdentityTables>,
+    row: Parameters<typeof standing>[0],
+    lastUse: LastUse,
+  ): Promise<boolean> => standing(row) && (await heldToDigest(db, row)) && lastUseHolds(row, lastUse);
 
   return {
     async open(db, userId, evidence) {
@@ -511,7 +602,7 @@ export function createSessions({
           ...signedEndsOfRow(db),
         ])
         .executeTakeFirst();
-      if (row === undefined || !standing(row)) return undefined;
+      if (row === undefined || !standing(row) || !(await heldToDigest(db, row))) return undefined;
       if (!lastUseHolds(row, { at: row.was_seen_at, mac: row.was_mac, version: row.was_mac_key_version })) {
         // The last use just written would make it whole again: ended, in the caller's transaction, before anyone sees it.
         // (A row that isn't standing stays refused whatever its last use, as it was.)
@@ -542,7 +633,7 @@ export function createSessions({
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
         .executeTakeFirst();
-      return row !== undefined && believed(row, lastUseOf(row)) ? row.user_id : undefined;
+      return row !== undefined && (await believed(db, row, lastUseOf(row))) ? row.user_id : undefined;
     },
 
     async rotate(db, sessionId) {
@@ -556,7 +647,7 @@ export function createSessions({
         .where('ends_at', '>', now)
         .executeTakeFirst();
       // Only a row whose MACs held, and never ended, gets new ones: rotating a forged or put-back row would make it genuine.
-      if (live === undefined || !believed(live, lastUseOf(live))) return undefined;
+      if (live === undefined || !(await believed(db, live, lastUseOf(live)))) return undefined;
       const cookie = newCookie();
       const cookieHash = hashOf(cookie);
       // Its last use goes with the new cookie's hash, never backwards (as `use`'s).

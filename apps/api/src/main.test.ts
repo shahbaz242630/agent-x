@@ -751,7 +751,14 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     if (verify === undefined) throw new Error('the check should cover the platform chain');
     const anchor = { seq: 3n, hash: Buffer.alloc(32, 3) };
 
-    await expect(verify(anchor)).resolves.toEqual({ ok: true, seq: 3n, hash: anchor.hash });
+    // Walked whole at the first run, from its first event, dated when it began (AT13c).
+    await expect(verify(anchor)).resolves.toEqual({
+      ok: true,
+      seq: 3n,
+      hash: anchor.hash,
+      walkedFrom: 0n,
+      began: expect.any(Date) as unknown,
+    });
     expect(platformChecks).toEqual([{ database: fake.created[0], anchor }]);
   });
 

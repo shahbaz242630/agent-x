@@ -101,9 +101,10 @@ export const insertRequestStatement = (tx: RequestsTransaction, request: NewRequ
  * where its decision leads (`spend_request.decided`, with the reasons, and,
  * when it holds capacity, its reservation's month and instant and its payee
  * seal: `held`). The request as its state was sealed and read back: a fresh
- * decision's answer (4D2d P8). `total`: the month's total its capacity was
- * added to, written on the reservation's trip, recorded in the same step of
- * the chain, first (GM-1a: no trip of its own).
+ * decision's answer (4D2d P8). `alongside`: the month's total and the payee's
+ * windows its capacity was added to, written on the reservation's trip,
+ * recorded in the same step of the chain, first (GM-1a, GM-1b: no trip of
+ * their own).
  */
 export async function signRequest(
   tx: RequestsTransaction,
@@ -111,7 +112,7 @@ export async function signRequest(
   request: NewRequest,
   actor: AuditActor,
   held: HeldAs | null,
-  total?: AlongsideChange,
+  alongside: readonly AlongsideChange[] = [],
 ): Promise<SpendRequestRecord> {
   const key = { orgId: request.orgId, id: request.id };
   const moved = await states.recordNewAndMove(
@@ -142,10 +143,12 @@ export async function signRequest(
               heldAt: held.reservedAt.toISOString(),
               payeeSeal: held.payee.mac,
               payeeSealKeyVersion: held.payee.keyVersion,
+              // The payee windows its capacity went into (GM-1b), for its ending to give back to.
+              payeeWindows: held.windows.join(','),
             }),
       },
     },
-    total,
+    alongside,
   );
   return recordFrom(request.id, moved.state);
 }

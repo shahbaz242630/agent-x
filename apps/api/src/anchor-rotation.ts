@@ -102,29 +102,43 @@ export const rotatedChecksOf = (
 /** How often the platform's chain is read whole: decision 1's day for an old event deleted, and well inside 3's 7 days for one edited. */
 const PLATFORM_WHOLE_EVERY_MS = DAY_MS;
 
+/** A platform chain check's report: for one that holds, the signed objects it read (AT13c), when, and from where. */
+type PlatformReport = ChainReport & {
+  readonly signed?: SignedSeen;
+  readonly began?: Date;
+  readonly walkedFrom?: bigint;
+};
+
 /**
  * The platform chain's check each run (4D2e E8, "Each run" step 2): whole at a process's first run and once a day after,
  * as no rotation reads it, and from its anchor in between. A whole check counts only once it has passed, dated when it
- * began; one that fails, or a chain not yet anchored, is read whole again next run.
+ * began; one that fails, or a chain not yet anchored, is read whole again next run. So is one the signed states' digest
+ * owes a walk (AT13c: not covered to its anchor, a stretch lost, coming back after it gave way): the whole walk is its
+ * catch-up, from the first event, as the organisations' catch-up walks are (anchor-check.ts). Each report says when its
+ * walk began, and a whole one that it read from the first event.
  */
 export function platformChainCheck({
   fromAnchor,
   whole,
   clock,
+  owed,
 }: {
-  readonly fromAnchor: (from: CheckedPoint) => Promise<ChainReport>;
-  readonly whole: (anchor: CheckedPoint | undefined) => Promise<ChainReport>;
+  readonly fromAnchor: (from: CheckedPoint) => Promise<PlatformReport>;
+  readonly whole: (anchor: CheckedPoint | undefined) => Promise<PlatformReport>;
   readonly clock: Clock;
-}): (anchor: CheckedPoint | undefined) => Promise<ChainReport> {
+  /** Whether the digest owes the chain, anchored there, a walk from its first event: none, never. */
+  readonly owed?: (anchor: CheckedPoint) => boolean;
+}): (anchor: CheckedPoint | undefined) => Promise<PlatformReport> {
   let wholeAt: number | undefined;
   return async (anchor) => {
-    const now = clock.now().getTime();
-    if (anchor !== undefined && wholeAt !== undefined && now - wholeAt < PLATFORM_WHOLE_EVERY_MS) {
-      return fromAnchor(anchor);
-    }
+    const began = clock.now();
+    const now = began.getTime();
+    const fresh = wholeAt !== undefined && now - wholeAt < PLATFORM_WHOLE_EVERY_MS;
+    if (anchor !== undefined && fresh && owed?.(anchor) !== true) return { ...(await fromAnchor(anchor)), began };
     const report = await whole(anchor);
-    if (report.ok) wholeAt = now;
-    return report;
+    if (!report.ok) return report;
+    wholeAt = now;
+    return { ...report, began, walkedFrom: 0n };
   };
 }
 

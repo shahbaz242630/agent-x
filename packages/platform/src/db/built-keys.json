@@ -53,6 +53,8 @@
   {"table":"limit_reservations.agent_zones","name":"one_zone_by_id","definition":"UNIQUE (org_id, id)"},
   {"table":"limit_reservations.month_totals","name":"month_totals_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"limit_reservations.month_totals","name":"one_total_a_month","definition":"UNIQUE (org_id, agent_id, month, currency)"},
+  {"table":"limit_reservations.payee_windows","name":"one_window_a_payee","definition":"UNIQUE NULLS NOT DISTINCT (org_id, supplier_id, payee_key, currency)"},
+  {"table":"limit_reservations.payee_windows","name":"payee_windows_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"limit_reservations.reservations","name":"one_reservation_a_request","definition":"UNIQUE (org_id, request_id)"},
   {"table":"limit_reservations.reservations","name":"reservations_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"mandates.allowed_currencies","name":"allowed_currencies_pkey","definition":"PRIMARY KEY (code)"},

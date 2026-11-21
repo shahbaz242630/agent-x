@@ -45,6 +45,7 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
 import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
+import { platformSubjectOf } from './platform-subjects.ts';
 import { anchorsKeptOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
@@ -283,17 +284,19 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       leading,
     });
   checkStatesWith(digest);
-  const platform = createPlatformChain({ keys, ids: uuidV7Ids });
+  // The platform chain's walks keep its signed states in the digest too (AT13c): the pause, the sessions' signed ends.
+  const platform = createPlatformChain({ keys, ids: uuidV7Ids, subjectOf: platformSubjectOf });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const anchors = createAnchorCheck({
     chains: [
       {
         chain: { kind: 'platform' },
-        // From its anchor, and whole once a day (4D2e E8).
+        // From its anchor, and whole once a day (4D2e E8), or when the digest owes it a walk (AT13c).
         verify: platformChainCheck({
           fromAnchor: (from) => platform.checkFromAnchor(database, from),
           whole: (anchor) => platform.verifyAlone(database, anchor),
           clock: systemClock,
+          owed: (anchor) => digest.owed({ kind: 'platform' }, anchor.seq),
         }),
       },
     ],

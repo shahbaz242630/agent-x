@@ -404,6 +404,34 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     ]);
   });
 
+  it("weighs the payee's orders outside the plan from its signed windows (GM-1b): another agent's to it counts", async () => {
+    const { w, acting, mandateId } = await ready();
+    const theirs = await shared.secondAgent(registry, w, FIRST);
+    const mine = await ask(acting, w, { amount: AED(60_000n) });
+    await ask(theirs, w, { amount: AED(60_000n) });
+
+    const { plan } = await carried(w, mandateId, { splitCheck: true });
+
+    expect(plan).toEqual([{ id: mine.id, outcome: 'cancel', reasons: ['AGGREGATE_THRESHOLD'] }]);
+  });
+
+  it("counts a split by whole hours (GM-1b): a day on to the millisecond, the oldest order's hour is still in the window", async () => {
+    const { w, acting, mandateId } = await ready();
+    const first = await ask(acting, w, { amount: AED(60_000n) });
+    const second = await ask(acting, w, { amount: AED(60_000n) });
+    clock.advanceBy(24 * 3_600_000);
+    // An admin signed in now: the first one's session ran out with the day.
+    const admin = await shared.member(w.org, 'admin');
+
+    const { plan } = await carried({ ...w, admin }, mandateId, { splitCheck: true });
+
+    // The window began exactly at the first order's instant: its whole hour counts, so the second still splits.
+    expect(plan).toEqual([
+      { id: first.id, outcome: 'carry', reasons: [] },
+      { id: second.id, outcome: 'cancel', reasons: ['AGGREGATE_THRESHOLD'] },
+    ]);
+  });
+
   it('lets an older order stand over a younger lookalike to its payee, which the same plan may cancel', async () => {
     const { w, acting, mandateId } = await ready();
     // The older one approved outright; the younger, a lookalike the bank would carry the same way, sent for approval.

@@ -176,7 +176,7 @@ export function spendWorld({
         .where('agent_id', '=', acting.agentId)
         .executeTakeFirstOrThrow();
       const asked = { agentId: acting.agentId, month, currency: 'AED' };
-      return (await totalsWeighed(tx, { month: asked, split: null, order: null })).spent;
+      return (await totalsWeighed(tx, { month: asked, order: null })).spent;
     });
 
   /** A change past the use cases, signed, as each brake or edit would make it, in the organisation's transaction. */

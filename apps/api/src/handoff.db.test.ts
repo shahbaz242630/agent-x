@@ -1771,8 +1771,34 @@ describe('what a handed-off request holds follows its payment (C3; ADR-006 ยง10โ
         .execute(),
     );
     expect(released).toHaveLength(1);
+    // Its payee's windows likewise, each once (GM-1b): its supplier's, its payee key's and the pair's, the kept one
+    // still in each.
+    const windowReleased = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select('details')
+        .where('subject_type', '=', 'payee_window')
+        .where('action', '=', 'payee_window.released')
+        .execute(),
+    );
+    expect(windowReleased).toHaveLength(3);
+    for (const { details } of windowReleased) {
+      expect(JSON.parse(details)).toMatchObject({
+        requestIds: cancelled.id.toLowerCase(),
+        amountMinor: SMALL(2n).minor.toString(),
+      });
+    }
     expect(await holdingsChecked(w)).toEqual([
-      expect.objectContaining({ mismatched: 0, tampered: 0, totals: 1, totalsMismatched: 0, totalsMissing: 0 }),
+      expect.objectContaining({
+        mismatched: 0,
+        tampered: 0,
+        totals: 1,
+        totalsMismatched: 0,
+        totalsMissing: 0,
+        windows: 3,
+        windowsMismatched: 0,
+        windowsMissing: 0,
+      }),
     ]);
   });
 
@@ -2523,6 +2549,30 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
       try {
         const made = await handedOnce(w, later.id, { anchors, anchorFirst: noAnchorMade, digest });
         expect(made).toMatchObject({ submitted: 2, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+      } finally {
+        checkStatesWith(undefined);
+      }
+      expect(lines('audit.integrity_failed')).toEqual([]);
+    });
+
+    it('AT13c: the platform chain anchored past what the digest covers: the payment waits, digest_pending; covered, it goes', async () => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED() });
+      const { anchors, digest } = await digestedNow(w);
+      const platform = { kind: 'platform' } as const;
+      const head = { seq: 7n, hash: Buffer.alloc(32, 7), macKeyVersion: 1 };
+      anchors.keep(signAnchor(keys, platform, head, clock.now()));
+      checkStatesWith(digest);
+      try {
+        const waited = await handedOnce(w, request.id, { anchors, anchorFirst: noAnchorMade, digest });
+        expect(waited).toMatchObject({ submitted: 0, status: 'APPROVED', hold: { outcome: 'clear' } });
+        expect(lines('handoff.waiting')).toEqual([
+          expect.objectContaining({ requestId: request.id, why: 'digest_pending' }),
+        ]);
+        // The whole walk of the platform chain recorded, as the anchor check's first run after a start does.
+        digest.record(platform, new Map(), clock.now(), { from: 0n, to: head });
+        const made = await handedOnce(w, request.id, { anchors, anchorFirst: noAnchorMade, digest });
+        expect(made).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
       } finally {
         checkStatesWith(undefined);
       }

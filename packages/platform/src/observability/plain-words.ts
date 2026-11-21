@@ -289,13 +289,13 @@ export const PLAIN_WORDS = {
   },
   'audit.state_digest_near_memory': {
     happened: 'The record of signed records’ latest versions has passed half its memory.',
-    broke: 'Nothing yet. If it fills, the largest organisation stops being held to it, its records checked as before.',
+    broke: 'Nothing yet. If it fills, the organisation most past its share stops being held to it, checked as before.',
     next: 'Plan more memory for the process in good time: the line says how much is held.',
   },
   'audit.state_digest_chain_gave_way': {
-    happened: 'The record of one organisation’s signed records’ latest versions outgrew its share of memory.',
-    broke: 'Its payments, or all its records, are checked as before: tampering there is found later. Others go on.',
-    next: 'Nothing waits: its payments go on, checked as before. Give the process more memory in good time.',
+    happened: 'The record of signed records’ latest versions, for one organisation or the platform, outgrew its share.',
+    broke: 'Its payments or session ends, or all of it, are checked as before: tampering is found later.',
+    next: 'Nothing waits. Give the process more memory in good time; it may come back once there is room.',
   },
   'audit.state_digest_snapshot_too_large': {
     happened: 'The hourly copy of the record of signed records’ latest versions was larger than a start may read.',
@@ -972,6 +972,16 @@ export const PLAIN_WORDS = {
   },
   'month_totals.cutover_held': {
     happened: "An organisation's monthly limits were not moved onto signed totals: a record can't be trusted.",
+    broke: 'The organisation is on hold and its agents are answered busy.',
+    next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
+  },
+  'payee_windows.cutover_failed': {
+    happened: "Moving an organisation's split-payment check onto signed hourly totals failed.",
+    broke: "That organisation's agents can't spend under a mandate yet: their requests are answered busy.",
+    next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database and the error.',
+  },
+  'payee_windows.cutover_held': {
+    happened: "An organisation's split-payment check was not moved onto signed totals: a record can't be trusted.",
     broke: 'The organisation is on hold and its agents are answered busy.',
     next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
   },

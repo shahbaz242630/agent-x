@@ -14,8 +14,8 @@
 //   read in a statement after the lock, never the locking one, though on the same
 //   trip (4D2e C7), so READ COMMITTED's fresh snapshot sees every reservation the
 //   transaction it waited for committed (§7.2);
-// - `splitHeldRead`: with the mandate's split check on, the payee's reservations
-//   in its rolling window, across agents, likewise (D5);
+// - the payee's split window (D5): since GM-1b its signed hourly windows
+//   (payee-windows.ts), no longer a sum of these reservations;
 // - `reserveStatement`: the request's reservation, HELD, while the request is still
 //   VALIDATING (level 11; 0039's `held_for_its_request`), at the very instant
 //   the month was worked out from.
@@ -150,50 +150,6 @@ export async function monthsSpent(
   for (const row of rows) spent.set(row.month, BigInt(row.spent));
   return spent;
 }
-
-/**
- * The split total in minor units (ADR-006 §9, ADR-014 §3 and §5; D5): what the
- * payee's reservations still hold (every state but RELEASED) that were
- * reserved since `since`, under any agent of the organisation. The payee is
- * its supplier, and its payee key where it has one: both are read, so a
- * reservation made under another supplier record with the same payee key
- * counts, and so does one the supplier made before it had a key (0041's
- * indexes). Read in a statement after the supplier's lock, which serialises
- * the payee's decisions (§7.2), never the one taking it. In `currency` alone,
- * as the threshold is (G4). `except` leaves requests out: a carry weighs its own
- * apart (Phase 3 E4c).
- */
-export async function splitHeld(tx: ReservationsTransaction, split: SplitToSum): Promise<bigint> {
-  const { held } = await splitHeldRead(tx, split).executeTakeFirstOrThrow();
-  return BigInt(held);
-}
-
-/** The payee's window to total (splitHeld). */
-export interface SplitToSum {
-  readonly supplierId: string;
-  readonly payeeKey: string | null;
-  readonly since: Date;
-  readonly currency: string;
-  readonly except?: readonly string[];
-}
-
-/** splitHeld's read, not run, for a statement that reads more beside it (4D2d P12): one row, its total as text. */
-export const splitHeldRead = (
-  tx: ReservationsTransaction,
-  { supplierId, payeeKey, since, currency, except = [] }: SplitToSum,
-) =>
-  tx
-    .selectFrom('limit_reservations.reservations')
-    .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('held'))
-    .where('state', '<>', 'RELEASED')
-    .where((where) => (except.length === 0 ? where.lit(true) : where('request_id', 'not in', except)))
-    .where('reserved_at', '>=', since)
-    .where('currency', '=', currency)
-    .where((where) =>
-      payeeKey === null
-        ? where('supplier_id', '=', supplierId)
-        : where.or([where('supplier_id', '=', supplierId), where('payee_key', '=', payeeKey)]),
-    );
 
 /** A reservation as the holdings check (E1) compares it with its request. */
 export interface ReservationSeen {

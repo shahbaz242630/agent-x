@@ -90,6 +90,10 @@
 // held to it (audit-trail.ts): an object's newest signed events deleted or moved below
 // the anchor, past the last 1,000, with its row rolled back, are refused at once, not
 // only at the day's count or the full pass, which stay as defence in depth.
+// The platform chain's walks record too (AT13c: the hand-off pause, the sessions' signed
+// ends), each from where it began: from the anchor, or the first event when walked whole,
+// a whole walk recorded even where the anchor stays; a platform chain the digest doesn't
+// cover is walked whole (anchor-rotation.ts's platformChainCheck), its catch-up.
 //
 // After the organisations' turns, the rotation (anchor-rotation.ts, 4D2e E7): each
 // organisation's daily count and walk, and the full pass's share, within what is left
@@ -150,8 +154,15 @@ import { createTurns, shuffledAfresh, startAnywhere } from './anchor-turns.ts';
 import { shardOfOrganisation, shardWalk } from './anchor-walk.ts';
 import { PastDeadline, scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
-/** A check's report, and for a walk that holds, the signed objects it read (the trail's WalkedStep, AT13). */
-export type WalkedReport = ChainReport & { readonly signed?: SignedSeen; readonly began?: Date };
+/**
+ * A check's report, and for a walk that holds, the signed objects it read (the trail's WalkedStep, AT13), when it began,
+ * and where it read from where that is not the chain's last anchor (a whole walk's first event, AT13c).
+ */
+export type WalkedReport = ChainReport & {
+  readonly signed?: SignedSeen;
+  readonly began?: Date;
+  readonly walkedFrom?: bigint;
+};
 
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
 export interface CheckedChain {
@@ -497,6 +508,19 @@ export function createAnchorCheck({
     return 'failed';
   };
 
+  /** A walk that held, into the digest: its facts, and the stretch it read, from where it began (AT13, AT13c). */
+  const recordWalk = (
+    chain: Chain,
+    report: Extract<WalkedReport, { readonly ok: true }>,
+    last: Anchor | undefined,
+    at: Date,
+  ): void => {
+    digest?.record(chain, report.signed ?? new Map(), report.began ?? at, {
+      from: report.walkedFrom ?? last?.seq ?? 0n,
+      to: { seq: report.seq, hash: report.hash, macKeyVersion: report.macKeyVersion },
+    });
+  };
+
   /** What a completed check comes to: the alarm, nothing moved, or the chain anchored where it stands. */
   const afterCheck = (chain: Chain, log: Logger, report: WalkedReport, last: Anchor | undefined): Outcome => {
     if (!report.ok) return alarmed(chain, log, report.problem.reason, report.problem.seq);
@@ -508,6 +532,8 @@ export function createAnchorCheck({
     // The check compared the anchored event already; this backs it up should a store not pass the anchor on.
     if (last !== undefined && !stillHolds(report, last)) return alarmed(chain, log, 'anchor', last.seq);
     if (last?.seq === report.seq) {
+      // A whole walk read the chain from its first event, which no walk from the anchor did: its facts kept (AT13c).
+      if (report.walkedFrom !== undefined) recordWalk(chain, report, last, clock.now());
       // Said again in the store now and then, so its time tells a restart this chain has had its turn (anchor-turns.ts).
       if (
         durable !== undefined &&
@@ -522,12 +548,8 @@ export function createAnchorCheck({
     const anchor = signAnchor(keys, chain, report, clock.now(), durable?.epoch);
     anchors.keep(anchor);
     // What the walk to it read of each signed object, and the stretch it read whole, kept with it (AT13): facts as true
-    // as the anchor, as a decision will hold the database to them.
-    if (chain.kind === 'organisation')
-      digest?.record(chain, report.signed ?? new Map(), report.began ?? anchor.at, {
-        from: last?.seq ?? 0n,
-        to: { seq: report.seq, hash: report.hash, macKeyVersion: report.macKeyVersion },
-      });
+    // as the anchor, as a decision will hold the database to them. The platform chain's too (AT13c).
+    recordWalk(chain, report, last, anchor.at);
     log.info('audit.anchored', {
       chain: chain.kind,
       seq: report.seq,
@@ -700,7 +722,8 @@ export function createAnchorCheck({
   ): Promise<boolean> => {
     const anchor = anchors.latest(chain);
     if (digest === undefined || organizations === undefined || anchor === undefined) return false;
-    if (digest.state() !== 'read' || digest.covers(chain, anchor.seq)) return false;
+    // Not covered to its anchor, a chain coming back after it gave way for memory included (AT13e).
+    if (!digest.owed(chain, anchor.seq)) return false;
     // Its regular check still under way past its deadline: the catch-up waits for a turn of its own, quietly.
     if (inFlight.has(keyOf(chain))) return false;
     const from = digest.coverage(chain) ?? CHAIN_START;

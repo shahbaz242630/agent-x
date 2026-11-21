@@ -723,3 +723,256 @@ describe('the digest in a process that loses the lease (AT13)', () => {
     expect(log.covers(CHAIN, 10n)).toBe(false);
   });
 });
+
+const THIRD_ORG = '0199a0f0-0000-7000-8000-000000000003';
+const THIRD: Chain = { kind: 'organisation', orgId: THIRD_ORG };
+const PLATFORM: Chain = { kind: 'platform' };
+
+/** `count` agents' facts, from the `from`th: authority, which grows only with what an organisation sets up. */
+const agents = (count: number, from = 0) =>
+  new Map(
+    Array.from({ length: count }, (_, at) => [
+      subjectKey('agent', `0199a0f0-0000-7000-8000-${(0x10_000 + from + at).toString(16).padStart(12, '0')}`),
+      BigInt(from + at + 1),
+    ]),
+  );
+
+const said = (capture: LogCapture, event: string) => capture.lines().filter((line) => line.event === event);
+const FIRST_REQUEST = '0199a0f0-0000-7000-8000-000000000000';
+
+describe('the digest’s fair share: many small organisations never push out a large one within its share (AT13e)', () => {
+  it('a chain past its share with growing objects gives way first, before a larger one of authority alone', async () => {
+    const capture = new LogCapture();
+    const { log } = digestOn(undefined, { capture, mostBytes: 40_000 });
+    await log.read();
+    log.record(THIRD, seen(['agent', AGENT, 1n]), START);
+    log.record(OTHER, requests(400), START);
+    expect(said(capture, 'audit.state_digest_chain_gave_way')).toEqual([]);
+    // The largest chain is of authority alone; the busy one's requests, past its share too, give way instead.
+    log.record(CHAIN, agents(900), START);
+    expect(said(capture, 'audit.state_digest_chain_gave_way')).toEqual([
+      expect.objectContaining({ orgId: OTHER_ORG, what: 'payments' }),
+    ]);
+    expect(log.latest(CHAIN, 'agent', '0199a0f0-0000-7000-8000-000000010000')).toBe(1n);
+    expect(log.latest(THIRD, 'agent', AGENT)).toBe(1n);
+    expect(log.latest(OTHER, 'spend_request', FIRST_REQUEST)).toBeUndefined();
+    expect(log.memoryHeld().bytes).toBeLessThanOrEqual(40_000);
+  });
+
+  it('a chain within its share is never chosen while one past it stands: the one past it gives way whole', async () => {
+    const capture = new LogCapture();
+    const { log } = digestOn(undefined, { capture, mostBytes: 40_000 });
+    await log.read();
+    log.record(THIRD, agents(300), START);
+    log.record(OTHER, agents(300, 1000), START);
+    log.record(CHAIN, agents(1000, 5000), START);
+    expect(said(capture, 'audit.state_digest_chain_gave_way')).toEqual([
+      expect.objectContaining({ orgId: ORG, what: 'chain' }),
+    ]);
+    // Given way whole, it reads as before the digest: no walk is owed it.
+    expect(log.owed(CHAIN, 10n)).toBe(false);
+    expect(log.owed(THIRD, 10n)).toBe(true);
+    expect(log.latest(THIRD, 'agent', '0199a0f0-0000-7000-8000-000000010000')).toBe(1n);
+    expect(log.latest(OTHER, 'agent', '0199a0f0-0000-7000-8000-0000000103e8')).toBe(1001n);
+  });
+
+  it('the platform chain’s session ends grow with use, and give way before its pause', async () => {
+    const capture = new LogCapture();
+    const { log } = digestOn(undefined, { capture, mostBytes: 12_000 });
+    await log.read();
+    log.record(PLATFORM, seen(['platform.handoff_pause', 'pause', 3n]), START);
+    const ends = new Map(
+      Array.from({ length: 400 }, (_, at) => [subjectKey('identity.session_ended', `p/${String(at)}`), BigInt(at + 4)]),
+    );
+    log.record(PLATFORM, ends, START);
+    const [line, ...others] = said(capture, 'audit.state_digest_chain_gave_way');
+    expect(others).toEqual([]);
+    expect(line).toMatchObject({ what: 'session_ends' });
+    expect(line?.orgId).toBeUndefined();
+    expect(log.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(3n);
+    expect(log.latest(PLATFORM, 'identity.session_ended', 'p/0')).toBeUndefined();
+  });
+});
+
+describe('a chain given way comes back once there is room again (AT13e)', () => {
+  /** A chain whose payments gave way under 12 KB, written: coverage to 600, its agent at 3, its requests let go. */
+  async function gaveWay() {
+    const time = clock();
+    const { log, fake } = digestOn(undefined, { time, mostBytes: 12_000 });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 4n));
+    log.record(CHAIN, requests(400), START, stretch(4n, 600n));
+    expect(log.latest(CHAIN, 'spend_request', FIRST_REQUEST)).toBeUndefined();
+    await log.flush();
+    return { fake, time };
+  }
+
+  /** A restart with `mostBytes` (room for it again, unless said). */
+  async function restartedWith(
+    fake: ReturnType<typeof createFakeWriteOnceStore>,
+    time: ReturnType<typeof clock>,
+    mostBytes = 1024 * 1024,
+  ) {
+    const capture = new LogCapture();
+    const restarted = digestOn(fake, { time, capture, mostBytes });
+    await restarted.log.read();
+    return { log: restarted.log, capture };
+  }
+
+  it('an hour after it gave way, with room, its catch-up walk reads it again from its first event; no wait meanwhile', async () => {
+    const { fake, time } = await gaveWay();
+    const { log, capture } = await restartedWith(fake, time);
+    // Within the hour it stays given way, though there is room: it never flaps.
+    log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    log.record(CHAIN, requests(1, 2000), time.now());
+    expect(log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-0000000007d0')).toBeUndefined();
+    expect(log.owed(CHAIN, 600n)).toBe(false);
+    expect(said(capture, 'audit.state_digest_chain_coming_back')).toEqual([]);
+
+    time.held.at += HOUR;
+    log.record(OTHER, seen(['agent', AGENT, 3n]), time.now());
+    expect(said(capture, 'audit.state_digest_chain_coming_back')).toEqual([
+      expect.objectContaining({ level: 'info', orgId: ORG, was: 'payments' }),
+    ]);
+    // Coming back: read as given way (no wait, today's checks), its coverage from nothing, a walk from its first event owed.
+    expect(log.covers(CHAIN, 600n)).toBe(true);
+    expect(log.coverage(CHAIN)).toBeUndefined();
+    expect(log.owed(CHAIN, 600n)).toBe(true);
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBe(3n);
+    log.record(CHAIN, requests(1, 3000), time.now());
+    expect(log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-000000000bb8')).toBe(3001n);
+
+    // The catch-up walk reaches the anchor: back, every fact held, and Tx A held to its coverage as ever.
+    log.record(CHAIN, new Map([...requests(400), ...seen(['agent', AGENT, 3n])]), time.now(), stretch(0n, 600n));
+    expect(log.owed(CHAIN, 600n)).toBe(false);
+    expect(log.covers(CHAIN, 600n)).toBe(true);
+    expect(said(capture, 'audit.state_digest_chain_back')).toEqual([expect.objectContaining({ orgId: ORG })]);
+    expect(log.latest(CHAIN, 'spend_request', FIRST_REQUEST)).toBe(1n);
+    expect(log.covers(CHAIN, 700n)).toBe(false);
+    expect(log.owed(CHAIN, 700n)).toBe(true);
+
+    // A restart agrees: back, covered, the requests held, from the deltas alone as from a snapshot.
+    time.held.at += 10 * MINUTE;
+    await log.flush();
+    for (const name of namesUnder(fake.files, 'snapshots')) fake.files.delete(name);
+    const again = await restartedWith(fake, time);
+    // Back as written, not coming back: past its coverage it waits, as any chain does.
+    expect(again.log.covers(CHAIN, 700n)).toBe(false);
+    expect(again.log.covers(CHAIN, 600n)).toBe(true);
+    expect(again.log.owed(CHAIN, 600n)).toBe(false);
+    expect(again.log.latest(CHAIN, 'spend_request', FIRST_REQUEST)).toBe(1n);
+    expect(said(again.capture, 'audit.state_digest_chain_gave_way')).toEqual([]);
+  });
+
+  it('a restart while it comes back holds it so: no wait, no stretch from before it, the walk still owed', async () => {
+    const { fake, time } = await gaveWay();
+    const first = await restartedWith(fake, time);
+    time.held.at += HOUR;
+    first.log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    first.log.record(CHAIN, requests(1, 3000), time.now());
+    expect(first.log.owed(CHAIN, 600n)).toBe(true);
+    time.held.at += 10 * MINUTE;
+    await first.log.flush();
+    // Every delta read, the oldest (the stretches from before, its give-way) after the newest: still not standing.
+    for (const name of namesUnder(fake.files, 'snapshots')) fake.files.delete(name);
+
+    const { log, capture } = await restartedWith(fake, time);
+    expect(log.covers(CHAIN, 600n)).toBe(true);
+    expect(log.coverage(CHAIN)).toBeUndefined();
+    expect(log.owed(CHAIN, 600n)).toBe(true);
+    expect(log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-000000000bb8')).toBe(3001n);
+    expect(said(capture, 'audit.state_digest_chain_gave_way')).toEqual([]);
+    // A walk from the anchor alone, not from the first event: kept beyond the gap, never standing for the chain.
+    log.record(CHAIN, new Map(), time.now(), stretch(600n, 650n));
+    expect(log.owed(CHAIN, 650n)).toBe(true);
+    log.record(CHAIN, new Map(), time.now(), stretch(0n, 600n));
+    expect(log.owed(CHAIN, 650n)).toBe(false);
+    expect(log.covers(CHAIN, 650n)).toBe(true);
+    expect(log.covers(CHAIN, 651n)).toBe(false);
+  });
+
+  it('where what it let go doesn’t fit under half, it never comes back, however long', async () => {
+    const capture = new LogCapture();
+    const time = clock();
+    const { log } = digestOn(undefined, { time, capture, mostBytes: 12_000 });
+    await log.read();
+    log.record(CHAIN, requests(400), START, stretch(0n, 400n));
+    time.held.at += 5 * HOUR;
+    log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    expect(said(capture, 'audit.state_digest_chain_coming_back')).toEqual([]);
+    expect(log.latest(CHAIN, 'spend_request', FIRST_REQUEST)).toBeUndefined();
+  });
+
+  it('given way again while it comes back: read as given way, and coming back anew later its earlier walk stands for nothing', async () => {
+    const { fake, time } = await gaveWay();
+    const middle = await restartedWith(fake, time, 40_000);
+    time.held.at += HOUR;
+    middle.log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    expect(said(middle.capture, 'audit.state_digest_chain_coming_back')).toHaveLength(1);
+    // Its catch-up walk brings more than there is room for: its payments give way again, still coming back.
+    middle.log.record(CHAIN, requests(1600), time.now(), stretch(0n, 600n));
+    expect(said(middle.capture, 'audit.state_digest_chain_gave_way')).toHaveLength(2);
+    expect(middle.log.covers(CHAIN, 600n)).toBe(true);
+    expect(middle.log.covers(CHAIN, 99_999n)).toBe(true);
+    expect(middle.log.owed(CHAIN, 600n)).toBe(false);
+    expect(said(middle.capture, 'audit.state_digest_chain_back')).toEqual([]);
+    time.held.at += 10 * MINUTE;
+    await middle.log.flush();
+
+    const { log, capture } = await restartedWith(fake, time);
+    expect(log.covers(CHAIN, 99_999n)).toBe(true);
+    time.held.at += HOUR;
+    log.record(OTHER, seen(['agent', AGENT, 3n]), time.now());
+    expect(said(capture, 'audit.state_digest_chain_coming_back')).toHaveLength(1);
+    expect(log.coverage(CHAIN)).toBeUndefined();
+    expect(log.owed(CHAIN, 600n)).toBe(true);
+    expect(log.covers(CHAIN, 600n)).toBe(true);
+    time.held.at += 10 * MINUTE;
+    await log.flush();
+    const last = await restartedWith(fake, time);
+    expect(last.log.covers(CHAIN, 600n)).toBe(true);
+    expect(last.log.owed(CHAIN, 600n)).toBe(true);
+  });
+});
+
+describe('the digest’s mark lines, read (AT13e)', () => {
+  it('a line naming what was let go but not how far is no line of ours; a generation alone is', async () => {
+    const { fake, time, capture } = digestOn();
+    const at = (minutes: number) => String(9_999_999_999_999 - (START.getTime() + minutes * MINUTE)).padStart(13, '0');
+    const named = (minutes: number, id: string) => `e1/digests/deltas/${at(minutes)}-${id}`;
+    const bad = named(1, '0199a0f0-0000-7000-8000-00000000f001');
+    const good = named(2, '0199a0f0-0000-7000-8000-00000000f002');
+    const chain = `organisation:${ORG}`;
+    fake.files.set(bad, closedFile(bad, [JSON.stringify({ c: chain, t: START.toISOString(), n: 3, b: 5 })]));
+    fake.files.set(good, closedFile(good, [JSON.stringify({ c: chain, t: START.toISOString(), n: 1 })]));
+    time.held.at += 6 * MINUTE;
+    const restarted = digestOn(fake, { time, capture });
+    await restarted.log.read();
+    expect(said(capture, 'audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'file' })]);
+    // Coming back, as the generation says: read as given way, a walk owed.
+    expect(restarted.log.covers(CHAIN, 9n)).toBe(true);
+    expect(restarted.log.owed(CHAIN, 9n)).toBe(true);
+    expect(restarted.log.owed(CHAIN, 0n)).toBe(false);
+  });
+
+  it('a stretch from before a newer generation, read first (a late delta of a copy that lost the lease), stands for nothing', async () => {
+    const { fake, time } = digestOn();
+    const at = (minutes: number) => String(9_999_999_999_999 - (START.getTime() + minutes * MINUTE)).padStart(13, '0');
+    const named = (minutes: number, id: string) => `e1/digests/deltas/${at(minutes)}-${id}`;
+    const late = named(2, '0199a0f0-0000-7000-8000-00000000f002');
+    const mark = named(1, '0199a0f0-0000-7000-8000-00000000f001');
+    const chain = `organisation:${ORG}`;
+    const hash = Buffer.alloc(32, 600 % 200).toString('hex');
+    // Named later, so read first: a walk's stretch from before the chain began coming back.
+    fake.files.set(
+      late,
+      closedFile(late, [JSON.stringify({ c: chain, t: START.toISOString(), f: '0', u: '600', h: hash, k: 1 })]),
+    );
+    fake.files.set(mark, closedFile(mark, [JSON.stringify({ c: chain, t: START.toISOString(), n: 1 })]));
+    time.held.at += 6 * MINUTE;
+    const restarted = digestOn(fake, { time });
+    await restarted.log.read();
+    expect(restarted.log.coverage(CHAIN)).toBeUndefined();
+    expect(restarted.log.owed(CHAIN, 600n)).toBe(true);
+  });
+});

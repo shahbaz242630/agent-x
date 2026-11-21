@@ -146,6 +146,9 @@ import { alertAdmins } from './payment-alerts.ts';
 import type { RailEntry, RailHealth, RailHold } from './rail-health.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
+/** The platform's own chain, which the pause is signed on. */
+const PLATFORM: Chain = { kind: 'platform' };
+
 /** The statuses a late refusal goes back on: the bank's word read as under way, or paid (decision 37b). */
 const UNDER_WAY_OR_PAID: ReadonlySet<TransactionStatus> = new Set(['SUBMITTED', 'PROCESSING', 'SUCCEEDED']);
 
@@ -397,9 +400,10 @@ export function createHandoff({
      * The signed states' digest every read in Tx A is held to (AT13): while it doesn't cover the chain to the anchor
      * compared with (not read yet since the start, a stretch missing, a rebase), the request waits, `digest_pending`,
      * that organisation alone, as for an anchor not made yet. A chain given way for memory goes on today's checks. None,
-     * and nothing waits for it.
+     * and nothing waits for it. The platform pause is held to it too (AT13c), so every request waits while it doesn't
+     * cover the platform chain to its anchor: a whole walk, the first run after a start.
      */
-    readonly digest?: Pick<StateDigest, 'covers'>;
+    readonly digest?: Pick<StateDigest, 'covers' | 'latest'>;
   };
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
@@ -544,13 +548,16 @@ export function createHandoff({
     const anchor = anchoring.anchors.latest(chain);
     if (anchor === undefined) return 'anchor_pending';
     if (anchoring.digest?.covers(chain, anchor.seq) === false) return 'digest_pending';
+    // The pause was read held to the digest: so its chain is covered too, where it is anchored (AT13c).
+    const platform = anchoring.anchors.latest(PLATFORM);
+    if (platform !== undefined && anchoring.digest?.covers(PLATFORM, platform.seq) === false) return 'digest_pending';
     return (await states.anchorKept(tx, orgId, anchor)).outcome === 'kept' ? undefined : 'hold_tampered';
   };
 
   /** Tx A's checks and moves for one request, in the lock order above. */
   const judgedA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
     const key = { orgId, id };
-    const pause = await handoffPauseOf(tx, 'share', { keys, logger: log });
+    const pause = await handoffPauseOf(tx, 'share', { keys, logger: log, digest: anchoring?.digest });
     if (pause.outcome !== 'running') return { outcome: 'waiting', why: `pause_${pause.outcome}` };
     const now = clock.now();
     const { named, authority, source, supplier, agentKey } = await authorityOf(tx, states, key, now);
@@ -1068,7 +1075,9 @@ export function createHandoff({
   /** Why every hand-off is held now (the platform pause, or a pause that can't be read), or null where none is. */
   const heldNow = async (): Promise<string | null> => {
     try {
-      const pause = await database.transaction().execute((tx) => handoffPauseOf(tx, 'share', { keys, logger }));
+      const pause = await database
+        .transaction()
+        .execute((tx) => handoffPauseOf(tx, 'share', { keys, logger, digest: anchoring?.digest }));
       return pause.outcome === 'running' ? null : `pause_${pause.outcome}`;
     } catch (error) {
       logger.error('handoff.pause_unread', { err: error });

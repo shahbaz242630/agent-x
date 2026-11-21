@@ -14,6 +14,7 @@ import {
   type LimitReservationsTables,
   lockReservationsOf,
   settleReservationsOf,
+  heldWindowsGivenBack,
 } from '../../limit-reservations/index.ts';
 import {
   lockClaimsOf,
@@ -35,9 +36,10 @@ type LockedTotal = Awaited<ReturnType<typeof lockedTotalOf>>;
 /**
  * Locks the request's reservation and order claim (level 11), then its month's
  * total for change (11a, GM-1a: a verified failure gives its capacity back),
- * before the move that settles them takes the head. The total is found by
- * the request's signed state and sealed decision; a request whose decision
- * sealed no month (decided before E1) holds none.
+ * then its payee windows (11b, GM-1b, in order of ID), before the move that
+ * settles them takes the head. The total and windows are found by the
+ * request's signed state and sealed decision; a request whose decision sealed
+ * no month (decided before E1) holds none.
  */
 export async function lockHoldingsOf(
   tx: HoldingsTransaction,
@@ -92,6 +94,12 @@ export async function settleHoldings(
         action: 'month_total.released',
         details: { requestIds: requestId.toLowerCase() },
       },
+    });
+    // Its payee windows likewise (GM-1b), read for change with the total: none read, nothing given back, which the
+    // holdings check then finds as a window holding more than its reservations, never less.
+    await heldWindowsGivenBack(tx, states, orgId, totalsLocked.get(tx)?.get(requestId.toLowerCase()), {
+      at,
+      change: { actor: { type: 'system', id: 'api' }, action: 'payee_window.released', details: {} },
     });
   }
   if (reservation !== null) await settleReservationsOf(tx, { requestId, to: reservation, at });
