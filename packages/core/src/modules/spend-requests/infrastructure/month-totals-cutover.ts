@@ -46,7 +46,7 @@ import {
   reservationsHeldIn,
 } from '../../limit-reservations/index.ts';
 import { type HeldSealed, holdsNow } from '../domain/holdings.ts';
-import { requestsOf, type SpendRequestRecord } from './decisions.ts';
+import { decidedAgainst, requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { type Decided, decisionsRead, type PaymentsOf } from './holdings-check.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -182,7 +182,7 @@ export async function eachSignedHolder<Tx extends CutoverTransaction>(
   states: SignedStates,
   orgId: string,
   payments: PaymentsOf<Tx>,
-  visit: (request: SpendRequestRecord, decided: Decided) => void,
+  visit: (request: SpendRequestRecord, decided: Decided, supplierVersionId: string | null) => void,
   ended: 'passed over' | 'kept' = 'passed over',
 ): Promise<'read' | 'tampered'> {
   let after: string | null = null;
@@ -212,14 +212,22 @@ async function holdingOf(
   orgId: string,
   ids: readonly string[],
   ended: 'passed over' | 'kept',
-): Promise<SpendRequestRecord[] | 'tampered'> {
+): Promise<Holder[] | 'tampered'> {
   if (ids.length === 0) return [];
-  const holding: SpendRequestRecord[] = [];
+  const holding: Holder[] = [];
   for (const check of (await requestsOf(tx, states, orgId, ids)).values()) {
     if (check.outcome !== 'found') return 'tampered';
-    if (holdsNow(check.request.status) || ended === 'kept') holding.push(check.request);
+    // With the supplier version its signed state names (the payee key it was decided under, TR-2 review).
+    const { supplierVersionId } = decidedAgainst(check.state);
+    if (holdsNow(check.request.status) || ended === 'kept') holding.push({ request: check.request, supplierVersionId });
   }
   return holding;
+}
+
+/** A request read as still holding, with the supplier version its signed state names. */
+interface Holder {
+  readonly request: SpendRequestRecord;
+  readonly supplierVersionId: string | null;
 }
 
 /**
@@ -232,30 +240,30 @@ async function visitHeld<Tx extends CutoverTransaction>(
   states: SignedStates,
   orgId: string,
   payments: PaymentsOf<Tx>,
-  holding: readonly SpendRequestRecord[],
-  visit: (request: SpendRequestRecord, decided: Decided) => void,
+  holding: readonly Holder[],
+  visit: (request: SpendRequestRecord, decided: Decided, supplierVersionId: string | null) => void,
 ): Promise<'added' | 'tampered'> {
-  const handedOff = holding.filter(({ status }) => status === 'HANDED_OFF').map(({ id }) => id);
+  const handedOff = holding.filter(({ request }) => request.status === 'HANDED_OFF').map(({ request }) => request.id);
   const paid = await payments(tx, states, orgId, handedOff);
   const decided = await decisionsRead(
     tx,
     states,
     orgId,
-    holding.map(({ id }) => id),
+    holding.map(({ request }) => request.id),
   );
   if (decided === 'tampered') return 'tampered';
-  for (const request of holding.filter(({ id }) => paid.get(id) !== 'ended')) {
+  for (const { request, supplierVersionId } of holding.filter(({ request }) => paid.get(request.id) !== 'ended')) {
     const decision = decided.get(request.id);
     // Ended before hand-off, it holds only where its signed ending kept its capacity (AT13d).
     if (!holdsNow(request.status)) {
-      if (decision?.capacityKept === true) visit(request, decision);
+      if (decision?.capacityKept === true) visit(request, decision, supplierVersionId);
       continue;
     }
     if (decision === undefined) {
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
       return 'tampered';
     }
-    visit(request, decision);
+    visit(request, decision, supplierVersionId);
   }
   return 'added';
 }

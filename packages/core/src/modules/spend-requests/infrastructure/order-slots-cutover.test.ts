@@ -7,7 +7,7 @@ import type { SignedStates } from '../../audit/index.ts';
 import { MOST_BANK_ENTRIES } from '../domain/order-slots.ts';
 
 import type { Decided } from './holdings-check.ts';
-import { sealedPayeeKey, slotsFilled } from './order-slots-cutover.ts';
+import { sealedPayeeKey, slotsFilled, versionKeyOf } from './order-slots-cutover.ts';
 import { sealPayee } from './payee-seal.ts';
 
 const keys = createKeyProvider({ 'decision-hash': { current: 1, versions: new Map([[1, Buffer.alloc(32, 1)]]) } }, [
@@ -27,8 +27,12 @@ const holding = (payee: 'none' | 'unreadable' | { readonly key: string | null } 
   } as unknown as Decided;
   return { request: { id: REQUEST } as never, decided };
 };
-const settled = (payee: Parameters<typeof holding>[0], claims: (string | null)[], others: (string | null)[]) =>
-  sealedPayeeKey(keys, ORG, holding(payee), { claims, others });
+const settled = (
+  payee: Parameters<typeof holding>[0],
+  claims: (string | null)[],
+  others: (string | null)[],
+  versionKey?: string | null,
+) => sealedPayeeKey(keys, ORG, holding(payee), { claims, others, versionKey });
 
 describe('a payee key sealed by its decision (E1b)', () => {
   it('is the key that holds to the seal, its claim the same or gone', () => {
@@ -52,11 +56,29 @@ describe('a payee key sealed by its decision (E1b)', () => {
 });
 
 describe('a payee key decided before E1b (no seal)', () => {
-  it("is its one claim's, else its supplier's signed key now, else none", () => {
-    expect(settled('none', ['payee-1'], ['payee-2', 'payee-3'])).toBe('payee-1');
-    expect(settled('none', [null], [null, 'payee-3'])).toBeNull();
-    expect(settled('none', [], ['payee-2', 'payee-3'])).toBe('payee-3');
-    expect(settled('before E1', [], [])).toBeNull();
+  it('is the key its sealed supplier version paid, its claim the same, gone or keyless with it', () => {
+    expect(settled('none', ['payee-1'], ['payee-2', 'payee-3'], 'payee-1')).toBe('payee-1');
+    expect(settled('none', [], ['payee-2', 'payee-3'], 'payee-1')).toBe('payee-1');
+    expect(settled('none', [null], ['payee-2', 'payee-3'], null)).toBeNull();
+    expect(settled('before E1', [], [], null)).toBeNull();
+  });
+
+  it('is settled nowhere (the cutover stops) where its claim names another key than its version paid', () => {
+    expect(settled('none', ['planted'], [], 'payee-1')).toBeUndefined();
+    expect(settled('none', ['payee-1'], [], null)).toBeUndefined();
+    expect(settled('before E1', [null], [], 'payee-1')).toBeUndefined();
+  });
+
+  it('is settled nowhere (the cutover stops) where no signed record keys its version, never by its claim', () => {
+    expect(settled('none', ['payee-1'], ['payee-2', 'payee-3'])).toBeUndefined();
+    expect(settled('none', [], [])).toBeUndefined();
+    expect(settled('before E1', [null], [])).toBeUndefined();
+  });
+});
+
+describe('a sealed payee key held to its supplier version', () => {
+  it('is found in the version it paid where its claim and reservation are gone', () => {
+    expect(settled({ key: 'payee-1' }, [], [null, null], 'payee-1')).toBe('payee-1');
   });
 });
 
@@ -91,5 +113,16 @@ describe('the slots the requests fill at the cutover', () => {
     // Its own order slot alone: the bank slot it shares was full.
     expect(filled.named.get(last.id)).toHaveLength(1);
     expect(filled.opening.size).toBe(MOST_BANK_ENTRIES + 2);
+  });
+});
+
+describe("a request's payee key by its supplier version", () => {
+  const known = { now: new Map(), byVersion: new Map([['0199a0f0-0000-7000-8000-00000000f001', 'payee-1']]) };
+
+  it('is the key its sealed version paid, undefined where no signed record says or it names none', () => {
+    const at = (supplierVersionId: string | null) => ({ ...holding('none'), supplierVersionId });
+    expect(versionKeyOf(known, at('0199A0F0-0000-7000-8000-00000000F001'))).toBe('payee-1');
+    expect(versionKeyOf(known, at('0199a0f0-0000-7000-8000-00000000f002'))).toBeUndefined();
+    expect(versionKeyOf(known, at(null))).toBeUndefined();
   });
 });

@@ -61,7 +61,6 @@ export {
   type SupplierCheck,
   SupplierContactsUnreadable,
   type SupplierRecord,
-  payeeKeysNow,
   SUPPLIERS,
   type SupplierShown,
   suppliersAddedSince,
@@ -124,3 +123,4 @@ export {
   type VersionsToVerify,
   versionsToVerify,
 } from './infrastructure/verifying.ts';
+export { type PayeeKeysKnown, payeeKeysKnown } from './infrastructure/payee-keys-known.ts';

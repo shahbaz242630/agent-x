@@ -47,7 +47,19 @@ import {
   voidedWith,
   voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
-import { payeeKeysNow, SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
+import {
+  addVersion,
+  confirmPayeeChange,
+  nextVersionNumber,
+  payeeKeysKnown,
+  recordRegistered,
+  registrationOf,
+  stagePayeeChange,
+  startRegistration,
+  SUPPLIERS,
+  supplierOf,
+  versionOf,
+} from '@agentx/core/modules/suppliers';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
 import { CHAIN_START, createDigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
@@ -987,7 +999,11 @@ describe('an organisation made before TR-2, until its cutover', () => {
    * The organisation as one before TR-2 with orders held: the slots its decisions filled, their events and the
    * cutover's taken away by the owner, each request's decision sealed again as before TR-2 (no slots named).
    */
-  const asBeforeTr2 = async (w: World, requestIds: readonly string[]) => {
+  const asBeforeTr2 = async (
+    w: World,
+    requestIds: readonly string[],
+    sealedPayee: 'payee sealed' | 'before E1b' = 'payee sealed',
+  ) => {
     for (const id of requestIds) {
       const sealed = (await eventsAbout(w.org, id, SPEND_REQUESTS.subject)).findLast(
         ({ action }) => action === 'spend_request.decided',
@@ -1006,6 +1022,8 @@ describe('an organisation made before TR-2, until its cutover', () => {
           'payeeWindows',
         ]
           .filter((name) => Object.hasOwn(kept, name))
+          // A decision before E1b sealed no payee.
+          .filter((name) => sealedPayee === 'payee sealed' || !name.startsWith('payeeSeal'))
           .map((name) => [name, kept[name]]),
       );
       await withSignedStates(app, w.org, quiet(), (tx) =>
@@ -1038,7 +1056,7 @@ describe('an organisation made before TR-2, until its cutover', () => {
       cutOverOrderSlots(tx, states, w.org, {
         keys,
         payments: paymentHoldsOf,
-        payeeKeysNow,
+        payeeKeys: payeeKeysKnown,
         record: (event) => createAuditTrail({ keys, ids }).record(tx, w.org, event),
         at: clock.now(),
       }),
@@ -1266,6 +1284,156 @@ describe('an organisation made before TR-2, until its cutover', () => {
     await visit(w);
     expect(lines('order_slots.cutover_held')).toHaveLength(1);
     expect(lines('order_slots.cut_over')).toEqual([]);
+  });
+
+  /**
+   * The supplier given a payee as E2's registration and its admin's confirmation would (as the hand-off's world does):
+   * a version made from a registration REGISTERED for it, made current with its key, its cooling-off over. Its key.
+   */
+  async function payeeRegistered(w: World, supplierId: string): Promise<string> {
+    const key = { orgId: w.org, id: supplierId };
+    const registrationId = ids.next();
+    const versionId = ids.next();
+    const signed = <Result>(work: Parameters<typeof withSignedStates<Tables, Result>>[3]) =>
+      withSignedStates(app, w.org, quiet(), work);
+    await signed(async (tx, states) => {
+      await supplierOf(tx, states, key, 'change');
+      await startRegistration(tx, states, {
+        orgId: w.org,
+        id: registrationId,
+        supplierId,
+        versionId,
+        partner: 'fake',
+        route: 'hosted',
+        startedBy: w.admin.membershipId,
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      });
+    });
+    const registration = await signed(async (tx, states) => {
+      const found = await registrationOf(tx, states, { orgId: w.org, id: registrationId }, supplierId, 'change');
+      if (found.outcome !== 'found') throw new Error(`no registration: ${found.outcome}`);
+      return recordRegistered(tx, states, { orgId: w.org, id: registrationId }, found, {
+        beneficiary: {
+          organizationId: w.org,
+          registrationId,
+          beneficiaryRef: `fake-beneficiary-${w.org.slice(-12)}`,
+          payeeIdentity: null,
+          nameCheck: 'match',
+          maskedName: 'G*** O***** S******* L**',
+          hint: 'AE…6026',
+          registeredAt: clock.now(),
+        },
+        payee: { key: `fake-payee-${'b'.repeat(32)}`, keyVersion: null },
+        actor: OPERATOR,
+      });
+    });
+    return signed(async (tx, states) => {
+      const found = await supplierOf(tx, states, key, 'change');
+      if (found.outcome !== 'found') throw new Error(`no supplier: ${found.outcome}`);
+      const current = await versionOf(tx, states, { orgId: w.org, id: found.supplier.currentVersionId }, supplierId);
+      if (current.outcome !== 'found') throw new Error(`no version: ${current.outcome}`);
+      await addVersion(tx, states, quiet().keys, {
+        orgId: w.org,
+        id: versionId,
+        supplierId,
+        version: await nextVersionNumber(tx, w.org, supplierId),
+        supplier: {
+          displayName: 'Gulf Office Supplies LLC',
+          contacts: { phone: '+971501234567', email: null, tradeLicence: null },
+          source: { kind: 'registry', ref: 'DED-123456' },
+        },
+        enteredBy: w.admin.membershipId,
+        enteredAt: clock.now(),
+        actor: OPERATOR,
+        of: found,
+        follows: current.version,
+        registration,
+      });
+      const made = await versionOf(tx, states, { orgId: w.org, id: versionId }, supplierId);
+      if (made.outcome !== 'found') throw new Error(`no new version: ${made.outcome}`);
+      const change = { version: made.version, registration, current: current.version };
+      const staged = await stagePayeeChange(tx, states, key, found, change, { actor: OPERATOR });
+      const restaged = await supplierOf(tx, states, key, 'change');
+      if (restaged.outcome !== 'found') throw new Error(`no supplier: ${restaged.outcome}`);
+      const confirmed = await confirmPayeeChange(tx, states, key, { supplier: staged, state: restaged.state }, change, {
+        actor: OPERATOR,
+        coolingOffUntil: new Date(clock.now().getTime() - 1),
+      });
+      return confirmed.payeeKey ?? '';
+    });
+  }
+
+  /** An organisation made before TR-2 holding one order decided before E1b, on a supplier keyed by its signed version. */
+  const beforeE1bKeyed = async () => {
+    const w = await world({ madeBeforeOrderSlots: true });
+    const supplierId = supplierOf_(w);
+    const payeeKey = await payeeRegistered(w, supplierId);
+    for (const id of w.suppliers) await shared.verified(w, id);
+    await shared.inForce(registry, w, TERMS);
+    const acting = await agentKey(w);
+    await cutOverByHand(w);
+    const held = await decided(acting, w, 'INV-7', supplierId);
+    await asBeforeTr2(w, [held.id], 'before E1b');
+    return { w, acting, supplierId, payeeKey, held };
+  };
+
+  it('opens the payee slots of a request decided before E1b from the key its signed supplier version paid', async () => {
+    const { w, supplierId, payeeKey, held } = await beforeE1bKeyed();
+    await visit(w);
+    expect(lines('order_slots.cut_over')).toEqual([expect.objectContaining({ opened: 4, mismatched: 0 })]);
+    const [, payeeOrder] = await slotKeys(w, 'INV-7', supplierId, payeeKey);
+    expect(await holdersIn(w, payeeOrder ?? ({} as OrderSlotKey))).toBe(held.id);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it("R-15 (TR-2 review): holds the cutover where a claim decided before E1b names another key than its signed version paid; the claim's key never trusted", async () => {
+    const { w, acting, supplierId, held } = await beforeE1bKeyed();
+    await asOwner(w, (owner) =>
+      owner.query("update spend_requests.order_claims set payee_key = 'planted-payee' where request_id = $1", [
+        held.id,
+      ]),
+    );
+
+    await visit(w);
+    // The would-fail check: the claim's key trusted (before this), the cutover went through with the payee's slots
+    // under the planted key, the real key's left unguarded.
+    expect(lines('order_slots.cutover_held')).toHaveLength(1);
+    expect(lines('order_slots.cut_over')).toEqual([]);
+    expect(await holdersIn(w, await orderSlot(w, 'INV-7', supplierId))).toBe('none');
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ subjectType: SPEND_REQUESTS.subject, objectId: held.id, reason: 'holding' }),
+    );
+    expect(await ask(acting, w, 'INV-8', supplierId)).toEqual(refused(503, 'ORGANISATION_BUSY'));
+  });
+
+  it("guards a request decided before E1b under its signed version's key though its claim was deleted", async () => {
+    const { w, supplierId, payeeKey, held } = await beforeE1bKeyed();
+    await asOwner(w, (owner) =>
+      owner.query('delete from spend_requests.order_claims where request_id = $1', [held.id]),
+    );
+    await visit(w);
+    const [, payeeOrder] = await slotKeys(w, 'INV-7', supplierId, payeeKey);
+    expect(await holdersIn(w, payeeOrder ?? ({} as OrderSlotKey))).toBe(held.id);
+    // The claim gone is still the alarm.
+    expect(lines('order_slots.cut_over')).toEqual([expect.objectContaining({ mismatched: 4 })]);
+  });
+
+  it("is not cut over where a supplier's signed record can't be believed: no payee key read from it, nothing opened", async () => {
+    const { w, acting } = await ready({ madeBeforeOrderSlots: true });
+    const supplierId = supplierOf_(w);
+    await cutOverByHand(w);
+    await decided(acting, w, 'INV-7', supplierId);
+    await asBeforeTr2(w, []);
+    const owner = await tamperAsOwner(database, SUPPLIERS, w.org);
+    try {
+      await owner.setColumn(supplierId, 'payee_key', 'planted-payee');
+    } finally {
+      await owner.end();
+    }
+    // Asked directly: its decision's sealed slots aside, the suppliers' records are read first, and refuse it.
+    expect(await cut(w)).toEqual({ outcome: 'tampered' });
+    expect(await holdersIn(w, await orderSlot(w, 'INV-7', supplierId))).toBe('none');
   });
 
   it('is not cut over over a decision that already names its slots (made past the app): alarmed', async () => {

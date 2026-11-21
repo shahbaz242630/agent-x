@@ -1233,36 +1233,3 @@ export async function suppliersFound(
     .execute();
   return rows.map(({ id }) => id);
 }
-
-/** How many suppliers one statement of payeeKeysNow reads: verifiedStates' most. */
-const SUPPLIERS_A_READ = 500;
-
-/**
- * Every supplier's payee key as its signed state holds it now, by supplier ID in lower case (null: none), each read FOR
- * SHARE a page at a time, listed from the rows and the log; `tampered` where one can't be believed (its read raised
- * the alarm). For the order slots' cutover (TR-2), which takes no payee key from a claim row on trust.
- */
-export async function payeeKeysNow(
-  tx: SuppliersTransaction,
-  states: SignedStates,
-  orgId: string,
-): Promise<ReadonlyMap<string, string | null> | 'tampered'> {
-  const found = new Map<string, string | null>();
-  let after: string | null = null;
-  do {
-    const listed: { readonly ids: readonly string[]; readonly next: string | null } = await states.objectIds(
-      tx,
-      orgId,
-      SUPPLIERS,
-      after,
-      SUPPLIERS_A_READ,
-    );
-    const checks = listed.ids.length === 0 ? [] : await states.verifiedStates(tx, SUPPLIERS, orgId, listed.ids);
-    for (const [id, check] of checks) {
-      if (check.outcome !== 'verified') return 'tampered';
-      found.set(id.toLowerCase(), check.fields.get('payee_key') ?? null);
-    }
-    after = listed.next;
-  } while (after !== null);
-  return found;
-}
