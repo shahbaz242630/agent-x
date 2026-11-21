@@ -476,6 +476,35 @@ describe('the witness log: reading', () => {
     expect(await second).toEqual([CHAIN]);
   });
 
+  it('writesSound: false once a heads Put fails, until one goes; false while a `now` head waits past its wait', async () => {
+    const store = createFakeWriteOnceStore();
+    const { log, time } = witnessOn(store);
+    expect(log.writesSound()).toBe(true);
+    store.instead.put = () => Promise.reject(new Error('store down'));
+    log.soon(CHAIN, head(3n, 3));
+    await log.flush();
+    expect(log.writesSound()).toBe(false);
+    delete store.instead.put;
+    await log.flush();
+    expect(log.writesSound()).toBe(true);
+    // A `now` head unconfirmed: sound within its wait, not past it.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    store.instead.put = async (name, bytes) => {
+      await held;
+      return store.real.put(name, bytes);
+    };
+    log.note(CHAIN, head(4n, 4), 'now');
+    expect(log.writesSound()).toBe(true);
+    time.held.at += 6_000;
+    expect(log.writesSound()).toBe(false);
+    release();
+    await log.flush();
+    expect(log.writesSound()).toBe(true);
+  });
+
   it('refreshWhole says whether the read begun after the call ended whole (TR-1 F.6: the gate sends on no failed one)', async () => {
     const store = createFakeWriteOnceStore();
     const { log } = witnessOn(store);

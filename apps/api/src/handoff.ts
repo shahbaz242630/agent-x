@@ -101,12 +101,10 @@ import {
   type AuditTables,
   type ChainFrontier,
   createAuditTrail,
-  type FrontierStart,
   headWrittenIn,
   MOST_WALKED_WITHIN,
   type SignedStates,
   type SignedStatesServices,
-  type WalkedWithin,
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import { type InstructionsTables, makeInstruction } from '@agentx/core/modules/instructions';

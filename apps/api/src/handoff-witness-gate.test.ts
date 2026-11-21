@@ -8,7 +8,15 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { LogCapture, SequentialIds, testLogger } from '@agentx/testing';
 import { describe, expect, it, vi } from 'vitest';
 
-import { createHandoffWitnessGate, type GateWalks, type WitnessedTxA } from './handoff-witness-gate.ts';
+import { HANDOFF_PAUSED, HANDOFF_RESUMED } from '@agentx/core/modules/platform-controls';
+
+import {
+  createHandoffWitnessGate,
+  type GateWalks,
+  pauseStartedIn,
+  walkedOf,
+  type WitnessedTxA,
+} from './handoff-witness-gate.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -126,6 +134,8 @@ describe('TR-1 F.6 the witness gate before the partner call', () => {
     ],
     ['a read that throws', witnessWith({ whole: () => Promise.reject(new Error('x')) }), txA(), 'witness_unread'],
     ['the log past its memory', witnessWith({ beyond: true }), txA(), 'witness_pending'],
+    ['a Tx A that walked no organisation chain', witnessWith(), { ...txA(), org: undefined }, 'not_walked'],
+    ['a Tx A that walked no platform chain', witnessWith(), { ...txA(), platform: undefined }, 'not_walked'],
     ['a head below Tx A’s stretch', witnessWith({ org: [seen(1n)] }), txA(), 'unjudged'],
     ['a platform head below Tx A’s stretch', witnessWith({ platform: [seen(1n)] }), txA(), 'unjudged'],
   ])('holds the payment, unsent, on %s', async (_what, witness, asked, reason) => {
@@ -199,6 +209,15 @@ describe('TR-1 F.6 the witness gate before the partner call', () => {
     expect(org.held).toEqual(['gate_failed']);
     const platform = await cleared(witnessWith({ platform: [seen(9n)] }), txA(), { walks: 'database' });
     expect(platform.held).toEqual(['gate_failed']);
+  });
+
+  it('a walk is whole only with its start and its reading; only a pause started is one the platform walk notes', () => {
+    const { start, walk } = walkedTo(6n);
+    expect(walkedOf(start, walk)).toEqual({ start, walk });
+    expect(walkedOf(undefined, walk)).toBeUndefined();
+    expect(walkedOf(start, undefined)).toBeUndefined();
+    expect(pauseStartedIn(HANDOFF_PAUSED)).toBeDefined();
+    expect(pauseStartedIn(HANDOFF_RESUMED)).toBeUndefined();
   });
 
   it('a store that never answers holds the payment at the deadline; a gate that fails holds it too', async () => {

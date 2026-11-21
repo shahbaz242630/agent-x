@@ -83,6 +83,10 @@ const PAUSE_STARTED = ['platform.handoff_pause', 'paused'] as const;
 
 const PLATFORM: Chain = { kind: 'platform' };
 
+/** The gate's platform walk's one object: a pause started (only a pause, never a resume, holds a payment). */
+export const pauseStartedIn = (action: string): typeof PAUSE_STARTED | undefined =>
+  action === HANDOFF_PAUSED ? PAUSE_STARTED : undefined;
+
 export function createHandoffWitnessGate({
   witness,
   database,
@@ -106,7 +110,7 @@ export function createHandoffWitnessGate({
   const platformChain = createPlatformChain({
     keys,
     ids,
-    subjectOf: (action) => (action === HANDOFF_PAUSED ? PAUSE_STARTED : undefined),
+    subjectOf: pauseStartedIn,
   });
   const { org: walkOrg, platform: walkPlatform }: GateWalks = walks ?? {
     org: (orgId, from, heldTo) => trail.checkFromAnchor(database, orgId, from, most, heldTo),

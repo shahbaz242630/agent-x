@@ -12,6 +12,7 @@ import {
   witnessWith,
 } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import {
   type AnchorStore,
@@ -573,6 +574,111 @@ describe('TR-1 F.3 Tx A’s own walk, and a frontier with no anchor', () => {
         databaseGate: handoffDatabaseGate(6),
       }),
     ).toThrow(RangeError);
+  });
+});
+
+describe('TR-1 review: the platform frontier, witness writes failing, a restart', () => {
+  it('82: each Tx A raises the platform frontier to the head it walked to, so the next walks only what came since', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const j = await jobsCopy(w, store);
+    const anchored = j.anchors.latest(PLATFORM)?.seq ?? 0n;
+    // Platform events past the anchor (starts, as copies write them): the first Tx A walks them.
+    for (const _ of [1, 2, 3]) {
+      await createPlatformChain({ keys, ids }).recordAlone(app, {
+        actor: { type: 'system', id: 'api' },
+        action: 'platform.started',
+        details: { configHash: 'a'.repeat(64), release: 'r-test' },
+      });
+    }
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await j.witness.refresh();
+    expect(await handOffOnJ(w, j)).toBe(1);
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(j.frontier.startOf(PLATFORM)?.from.seq).toBe(anchored + 3n);
+  });
+
+  it('80: witness writes failing while reads work: nothing commits, nothing left SUBMISSION_PENDING; writes back, it pays', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const j = await jobsCopy(w, store);
+    await j.witness.refresh();
+    // The store refuses this copy's writes (its flush of a head it holds fails), and still lists and gives files.
+    store.instead.put = () => Promise.reject(new Error('writes refused'));
+    const platform = await chain.checkFromAnchor(app, CHAIN_START);
+    if (!platform.ok) throw new Error('the platform chain should check out');
+    j.witness.soon(PLATFORM, platform);
+    await j.witness.flush();
+    expect(await j.witness.refreshWhole()).toBe(true);
+    expect(await handOffOnJ(w, j)).toBe(0);
+    expect(await outcome(w, request.id, 0)).toMatchObject({ request: 'APPROVED', transaction: undefined, held: [] });
+    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'witness_pending' }));
+    delete store.instead.put;
+    await j.witness.flush();
+    expect(await handOffOnJ(w, j)).toBe(1);
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+  });
+
+  it('the platform log past its memory waits (witness_pending), as the organisation’s does', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const j = await jobsCopy(w, store);
+    await j.witness.refresh();
+    const beyond: WitnessLog = { ...j.witness, beyondMemory: (each) => each.kind === 'platform' };
+    expect(await handOffOnJ(w, { ...j, witness: beyond }, { witness: beyond })).toBe(0);
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'witness_pending' }));
+  });
+
+  /**
+   * Plan 1.1 #4: a request paid, J restarted (nothing of its memory left), and the owner cuts Tx A's events off, puts the
+   * request back APPROVED with its old MAC and deletes its instruction and transaction. What the restarted J's run does.
+   */
+  async function paidThenCutAfterRestart(sharedStore: boolean) {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const first = await jobsCopy(w, store);
+    await first.witness.refresh();
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    let saved: { row: Awaited<ReturnType<typeof owner.saveRow>>; head: Awaited<ReturnType<typeof owner.saveHead>> };
+    try {
+      saved = { row: await owner.saveRow(request.id), head: await owner.saveHead() };
+    } finally {
+      await owner.end();
+    }
+    expect(await handOffOnJ(w, first)).toBe(1);
+    const cutting = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      await cutting.query('delete from transactions.transactions where org_id = $1', [w.org]);
+      await cutting.query('delete from instructions.instructions where org_id = $1', [w.org]);
+      await cutting.windBack(saved.head);
+      await cutting.withoutStatusGuard(() => cutting.restoreRow(saved.row));
+    } finally {
+      await cutting.end();
+    }
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    capture = new LogCapture();
+    // Restarted: a new digest, anchors, frontier and witness log, the store read again (or, the control, a store of
+    // its own that never saw the first run's head).
+    const restarted = await jobsCopy(w, sharedStore ? store : createFakeWriteOnceStore());
+    await restarted.witness.refresh();
+    return { w, request, submitted: await handOffOnJ(w, restarted) };
+  }
+
+  it('1.1 #4: paid, restarted, cut and the request put back: the head the first Tx A witnessed refuses a second call', async () => {
+    const { w, submitted } = await paidThenCutAfterRestart(true);
+    expect(submitted).toBe(0);
+    // Found by the reads held to that head (PR-1c) before Tx A's own walk: the alarm, and the organisation held.
+    expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
+    expect(await heldNow(w)).toBe('held');
+  });
+
+  it('the positive control: a restarted copy that never read the first head pays a second time (the attack)', async () => {
+    const { submitted } = await paidThenCutAfterRestart(false);
+    expect(submitted).toBe(1);
   });
 });
 

@@ -323,6 +323,9 @@ describe('TR-1 F.1 the walk within a transaction and the path frontier', () => {
     if (from === undefined) throw new Error('anchored');
     roomy.raise(CHAIN, from, { ...walk, path: holed });
     expect(roomy.startOf(CHAIN)?.from.seq).toBe(1n);
+    // No walk (a read not asked to walk): nothing raised.
+    roomy.raise(CHAIN, from, undefined);
+    expect(roomy.startOf(CHAIN)?.from.seq).toBe(1n);
     roomy.raise(CHAIN, from, walk);
     expect(roomy.startOf(CHAIN)?.from.seq).toBe(8n);
   });
