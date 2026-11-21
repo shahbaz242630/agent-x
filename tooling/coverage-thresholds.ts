@@ -13,7 +13,7 @@ export const MONEY_CRITICAL_GLOB =
   'packages/core/src/modules/{policies,limit-reservations,approvals,instructions,spend-requests,handoff,outcomes}/**';
 
 /** The hand-off, its fair turns and its bank breaker (4D2e Stage F): they send money, in the API's own folder. */
-const MONEY_CRITICAL_API_GLOB = 'apps/api/src/{fair-lanes,rail-health,handoff,payment-checks}.ts';
+const MONEY_CRITICAL_API_GLOB = 'apps/api/src/{fair-lanes,rail-health,handoff,handoff-witness-gate,payment-checks}.ts';
 
 /**
  * Each glob says perFile itself: since Vitest 5 a glob's entry no longer takes the top-level one, and would judge its

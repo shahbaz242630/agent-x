@@ -263,6 +263,8 @@ describe('a web copy’s logger (AT13b)', () => {
       'audit.anchor_store_read_failing': 'audit.web_anchors_read_failing',
       'audit.state_digest_store_failing': 'audit.web_anchors_read_failing',
       'audit.anchor_store_beyond_memory': 'audit.web_anchors_beyond_memory',
+      // TR-1: a read of the witness log failing once; its writes and lasting failures keep their names (they page).
+      'audit.witness_read_failed': 'audit.web_witness_read_failed',
     });
   });
 

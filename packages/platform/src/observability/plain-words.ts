@@ -347,6 +347,52 @@ export const PLAIN_WORDS = {
     broke: 'Its decisions go on with today’s checks, without the digest. Payments are not affected.',
     next: 'Give the API a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
+  'audit.witness_write_failed': {
+    happened: 'This copy could not write the latest audit chain heads to the witness store just now.',
+    broke: 'Nothing yet: they are kept and tried again in moments. A stop waiting on them may answer "retry".',
+    next: 'Nothing if it passes. If it keeps failing, a lasting error follows: check the witness store on Azure.',
+  },
+  'audit.witness_write_failing': {
+    happened: 'This copy has kept failing to write audit chain heads to the witness store.',
+    broke:
+      'Stops, approvals and other changes on this copy answer "saved but not yet confirmed; retry" until it works.',
+    next: 'Check the witness store and this copy’s audit-witness role on it: playbook section H.',
+  },
+  'audit.witness_read_failed': {
+    happened: 'This copy could not read the other copies’ audit chain heads from the witness store just now.',
+    broke: 'Nothing yet: it holds what it read before and tries again soon.',
+    next: 'Nothing if it passes. If it keeps failing, a lasting error follows.',
+  },
+  'audit.witness_read_failing': {
+    happened: 'This copy has kept failing to read the other copies’ audit chain heads from the witness store.',
+    broke: 'A chain cut back below a head another copy wrote may go unseen here. Payments wait for a fresh read.',
+    next: 'Check the witness store and this copy’s audit-witness role on it: playbook section H.',
+  },
+  'audit.web_witness_read_failed': {
+    happened: 'A web copy of the API could not read the other copies’ audit chain heads just now.',
+    broke: 'Its decisions go on with the heads it read before. Payments are checked again at the hand-off.',
+    next: 'Nothing if it passes: it tries again each minute. If it keeps failing, a lasting error follows.',
+  },
+  'audit.witness_unconfirmed': {
+    happened: 'A change was saved, but its audit chain head did not reach the witness store in time.',
+    broke: 'The person or agent was told to retry. The head is still queued and goes out as soon as the store answers.',
+    next: 'Nothing if it is rare. If it repeats, check the witness store: a write failure line will say more.',
+  },
+  'audit.witness_store_not_set': {
+    happened: 'This API was started with no witness store named for the audit chain heads.',
+    broke: 'Copies cannot see each other’s chain heads, so a chain cut back below another copy’s write is missed.',
+    next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_WITNESS_URL: playbook section H.',
+  },
+  'audit.witness_head_unconfirmed': {
+    happened: 'An audit chain head below the chain’s anchor could not yet be checked against the chain.',
+    broke: 'That organisation’s chain is anchored no more, and its payments wait, until the head is checked.',
+    next: 'Nothing if it clears at the next check. If it repeats, check the database and the anchor check’s lines.',
+  },
+  'audit.witness_beyond_memory': {
+    happened: 'This copy had more audit chain heads than its memory allows, and let the oldest go.',
+    broke: 'The chain named is anchored no more and its payments wait: a head let go cannot be checked.',
+    next: 'Give the API more memory, then rebase that chain: playbook section H.',
+  },
   'audit.anchor_store_write_refused': {
     happened: 'An API copy that only reads the audit anchors tried to write a file to their store.',
     broke: 'Nothing: the write was refused before it left the process, and the store is unchanged.',
@@ -835,6 +881,11 @@ export const PLAIN_WORDS = {
     broke: 'That payment was not sent and waits, its money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
   },
+  'handoff.held_before_sending': {
+    happened: 'A last check of the audit records before paying the bank raised a doubt.',
+    broke: 'That payment was not sent; its money stays held and the bank check settles it.',
+    next: 'Read the reason: a cut means the database was changed, so follow the incident runbook.',
+  },
   'handoff.queue_stale': {
     happened: 'Approved payments have waited over 15 minutes without being handed to the bank, for no known reason.',
     broke: 'Those payments are not sent; their money stays held.',
@@ -1125,6 +1176,11 @@ export const PLAIN_WORDS = {
     broke: 'Nobody can use the console on this copy of the server for now.',
     next: 'It is tried again within a minute. Check the database, then follow the incident runbook.',
   },
+  'identity.sign_out_unwitnessed': {
+    happened: 'Someone signed out, but the record of it did not reach the witness store in time.',
+    broke: 'Nothing: they are signed out. The record is still queued and goes out as soon as the store answers.',
+    next: 'Nothing if it is rare. If it repeats, check the witness store: a write failure line will say more.',
+  },
   'identity.step_up_challenge_sweep_failed': {
     happened: 'The hourly clean-up of expired identity re-checks failed.',
     broke: 'Some old identity re-checks were not deleted this time; none can be used again.',
@@ -1311,6 +1367,11 @@ export const PLAIN_WORDS = {
     happened: 'An operator job stopped on an unexpected error.',
     broke: 'Its work most likely did not happen, though a connection lost at the very end may have saved it.',
     next: 'Check the database, then re-run the same request file: it says if it was done. Check a new organisation was not made before typing it again.',
+  },
+  'operator.not_witnessed': {
+    happened: 'An operator job made its change but could not write its audit chain heads to the witness store.',
+    broke: 'The change is saved, but no other copy can yet tell if it is cut out of the log.',
+    next: 'Check the witness store on Azure, then run the same request file again.',
   },
   'operator.handoff_notice_failed': {
     happened: 'A pause or resume of payments to the bank was recorded, but one organisation was not told.',

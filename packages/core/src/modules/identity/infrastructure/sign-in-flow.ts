@@ -69,6 +69,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { nowChainsOf, waitWitnessed } from '../../audit/index.ts';
 import { createPlatformChain, type PlatformTransaction } from '../../platform-controls/index.ts';
 import { HOME_PATH, isReturnPath, type Subject } from '../domain/sign-in.ts';
 import { earliestAuthTime, type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
@@ -180,6 +181,9 @@ export interface SignIn {
   holderOf(cookie: string): Promise<string | undefined>;
 }
 
+/** How long a sign-out waits for its signed end to reach the witness store before it answers all the same. */
+const SIGN_OUT_WITNESS_MS = 2_000;
+
 export function createSignIn({
   db,
   oidc,
@@ -213,12 +217,49 @@ export function createSignIn({
     if (ended !== undefined)
       await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
   };
-  /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
-  const limited = <T>(work: (tx: Kysely<IdentityTables>) => Promise<T>): Promise<T> =>
-    db.transaction().execute(async (tx) => {
+  /** The work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
+  const inTransaction = async <T>(
+    work: (tx: Kysely<IdentityTables>) => Promise<T>,
+  ): Promise<{ readonly result: T; readonly tx: object | undefined }> => {
+    const opened: { tx?: object } = {};
+    const result = await db.transaction().execute(async (tx) => {
+      opened.tx = tx;
       await limitStatements(tx);
       return work(tx);
     });
+    return { result, tx: opened.tx };
+  };
+  /**
+   * inTransaction, answering only once each platform head it wrote is outside the database (TR-1): a session's end or
+   * rotation signed. WitnessUnconfirmed past the wait (503), the head still queued.
+   */
+  const limited = async <T>(work: (tx: Kysely<IdentityTables>) => Promise<T>): Promise<T> => {
+    const { result, tx } = await inTransaction(work);
+    if (tx !== undefined) await waitWitnessed(nowChainsOf(tx));
+    return result;
+  };
+  /**
+   * A sign-out's wait for its signed end to reach the witness store (TR-1), short and never failing closed (S207): past
+   * SIGN_OUT_WITNESS_MS, or the store refusing, the person is signed out all the same, said as a warning, the head still
+   * queued and retried.
+   */
+  const signedOutWitnessed = async (tx: object | undefined): Promise<void> => {
+    if (tx === undefined) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = waitWitnessed(nowChainsOf(tx)).then(
+      () => true,
+      () => false,
+    );
+    const late = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        resolve(false);
+      }, SIGN_OUT_WITNESS_MS);
+      timer.unref();
+    });
+    const confirmed = await Promise.race([waited, late]);
+    clearTimeout(timer);
+    if (!confirmed) logger.warn('identity.sign_out_unwitnessed', { waitMs: SIGN_OUT_WITNESS_MS });
+  };
 
   /** The flow as taken, its return path checked again (S207): one that isn't ours raises the alarm and is home instead. */
   function ownReturn<T extends { readonly returnTo: string }>(taken: T | undefined): T | undefined {
@@ -370,8 +411,9 @@ export function createSignIn({
       if (cookie === undefined) return undefined;
       // Set inside the transaction, as its end is signed: only a failure from there on is answered by the fallback.
       const reached = { signing: false };
+      let signedOut: { readonly result: Subject | undefined; readonly tx: object | undefined };
       try {
-        return await limited(async (tx) => {
+        signedOut = await inTransaction(async (tx) => {
           const ended = await sessions.end(tx, cookie);
           if (ended === undefined) return undefined;
           const subject = await subjectOfUser(tx, ended.userId, macs);
@@ -396,6 +438,9 @@ export function createSignIn({
           return subjectOfUser(tx, ended.userId, macs);
         });
       }
+      // Committed: signed out whatever the witness store says (S207: a sign-out never fails closed).
+      await signedOutWitnessed(signedOut.tx);
+      return signedOut.result;
     },
 
     signedIn(cookie) {

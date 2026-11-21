@@ -16,6 +16,7 @@ import {
   type Chain,
   type CheckedPoint,
   createAnchorLog,
+  createWitnessLog,
   readRebaseFile,
   rebaseFile,
   signAnchor,
@@ -41,7 +42,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { REBASE_LOCK } from './chain-rebase.ts';
-import { type OperatorProcess, runOperator } from './main.ts';
+import { loadOperatorConfig } from '@agentx/platform/config';
+
+import { noteHeadsAsTheyStand, type OperatorProcess, runOperator } from './main.ts';
 import {
   auditExportRequest,
   chainRebaseRequest,
@@ -410,6 +413,169 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
     expect(events).toContain('operator.failed');
     expect(events).not.toContain('operator.done_before');
     expect(line('operator.failed')).toMatchObject({ command: 'create-organization' });
+  });
+});
+
+describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version})`, () => {
+  const folders: string[] = [];
+  afterEach(() => {
+    for (const made of folders.splice(0)) rmSync(made, { recursive: true, force: true });
+  });
+  const folder = (): string => {
+    const made = mkdtempSync(path.join(tmpdir(), 'operator-witness-'));
+    folders.push(made);
+    return made;
+  };
+
+  it('writes every head its command left under its own folder and key, which the API reads; done only once they are out', async () => {
+    const witnessDir = folder();
+    const { code, line } = await run(
+      ['create-organization', '--name', NAME],
+      envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: witnessDir }),
+    );
+    expect(code).toBe(0);
+    expect(readdirSync(path.join(witnessDir, 'e1', 'operator')).length).toBeGreaterThan(0);
+    expect(existsSync(path.join(witnessDir, 'e1', 'heads'))).toBe(false);
+    const created = line('operator.organization_created');
+    // The API's witness log takes the operator's file under the operator's public key alone.
+    const reader = createWitnessLog({
+      store: folderWriteOnceStore(witnessDir),
+      keys: auditKeys,
+      logger: quiet(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    await reader.refresh();
+    expect(reader.pending({ kind: 'platform' }).map(({ seq }) => seq)).toEqual([BigInt(String(created?.platformSeq))]);
+    expect(reader.pending({ kind: 'organisation', orgId: String(created?.orgId) }).map(({ seq }) => seq)).toEqual([2n]);
+  });
+
+  it('a command whose heads can’t be written says so and exits 1, its change standing; the same request runs again', async () => {
+    const blocked = path.join(folder(), 'not-a-folder');
+    writeFileSync(blocked, 'x');
+    const before = await counts();
+    const { code, lines } = await run(
+      ['create-organization', '--name', NAME],
+      envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: blocked }),
+    );
+    expect(code).toBe(1);
+    expect(lines('operator.failed')).toEqual([]);
+    expect(lines('operator.not_witnessed')).toEqual([
+      expect.objectContaining({ level: 'error', command: 'create-organization' }),
+    ]);
+    expect(await counts()).toEqual({ orgs: before.orgs + 1, platform: before.platform + 1 });
+  });
+
+  it('run again after its heads failed to go out, a request done before witnesses the platform chain’s head as it stands, then exits 0', async () => {
+    const id = uuidV7Ids.next();
+    const asked = path.join(folder(), `resume-${id}`);
+    writeFileSync(asked, handoffRequest('handoff-resume', 'INC-2026/0209', id));
+    const blocked = path.join(folder(), 'not-a-folder');
+    writeFileSync(blocked, 'x');
+    const first = await run(['--request', asked], envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: blocked }));
+    expect(first.code).toBe(1);
+    expect(first.lines('operator.not_witnessed')).toHaveLength(1);
+    // The same request again, the store back: its change in force, recorded nothing, and still its head goes out.
+    const witnessDir = folder();
+    const again = await run(['--request', asked], envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: witnessDir }));
+    expect(again.code).toBe(0);
+    expect(again.events).not.toContain('operator.handoff_resumed');
+    const [head] = await database
+      .as('owner')
+      .query<{ seq: string }>('select seq::text as seq from platform_controls.audit_head');
+    const reader = createWitnessLog({
+      store: folderWriteOnceStore(witnessDir),
+      keys: auditKeys,
+      logger: quiet(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    await reader.refresh();
+    expect(reader.pending({ kind: 'platform' }).map(({ seq }) => seq)).toContain(BigInt(String(head?.seq)));
+    // Paused again, as the database was born, for the tests after this one.
+    const pauseId = uuidV7Ids.next();
+    const pause = path.join(folder(), `pause-${pauseId}`);
+    writeFileSync(pause, handoffRequest('handoff-pause', 'INC-2026/0209', pauseId));
+    expect((await run(['--request', pause])).code).toBe(0);
+  });
+
+  it('a named organisation whose head row was taken away is no “done”: nothing noted for it', async () => {
+    const created = await run(['create-organization', '--name', NAME]);
+    const orgId = String(created.line('operator.organization_created')?.orgId);
+    const noted: string[] = [];
+    const witness = { note: (chain: Chain) => noted.push(chain.kind) };
+    const config = loadOperatorConfig(envFor('operator'));
+    const request = {
+      command: 'factor-reset-notice',
+      orgId,
+      userId: uuidV7Ids.next(),
+      reason: 'INC-2026/0211',
+      id: uuidV7Ids.next(),
+    } as const;
+    // Control: its sealed head noted, the platform's too.
+    await noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness);
+    expect(noted).toEqual(['platform', 'organisation']);
+    // A chain with no events yet (an export of a new organisation's): no head to witness, and done.
+    const empty = { ...request, orgId: uuidV7Ids.next() };
+    await noteHeadsAsTheyStand(config, auditKeys, quiet(), empty, witness);
+    expect(noted).toEqual(['platform', 'organisation', 'platform']);
+    noted.length = 2;
+    const owner = await tamperAsOwner(database, ORGANIZATIONS, orgId);
+    try {
+      const [kept] = await owner.query<{ head: unknown }>(
+        'select pg_catalog.row_to_json(h) as head from audit.heads h where h.org_id = $1',
+        [orgId],
+      );
+      await owner.query('delete from audit.heads where org_id = $1', [orgId]);
+      await expect(noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness)).rejects.toThrow(/no head row/);
+      expect(noted).toEqual(['platform', 'organisation', 'platform']);
+      // Put back, for the tests after this one, which tell every organisation.
+      await owner.query(
+        'insert into audit.heads select * from pg_catalog.json_populate_record(null::audit.heads, $1::json)',
+        [JSON.stringify(kept?.head)],
+      );
+    } finally {
+      await owner.end();
+    }
+  });
+
+  it('never notes a head that isn’t sealed (one planted past the app): the command is not done, said, and nothing noted', async () => {
+    const noted: bigint[] = [];
+    const witness = { note: (_chain: Chain, head: { readonly seq: bigint }) => noted.push(head.seq) };
+    const config = loadOperatorConfig(envFor('operator'));
+    const request = { command: 'handoff-resume', reason: 'INC-2026/0210', id: uuidV7Ids.next() } as const;
+    // The platform chain started, so it has a head to read.
+    await run(['create-organization', '--name', NAME]);
+    // Control: sealed, the platform head is noted.
+    await noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness);
+    expect(noted).toHaveLength(1);
+    const [kept] = await database.as('owner').query<{ mac: Buffer }>('select mac from platform_controls.audit_head');
+    await database.as('owner').query('update platform_controls.audit_head set mac = $1', [Buffer.alloc(32, 7)]);
+    try {
+      await expect(noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness)).rejects.toThrow(/isn't sealed/);
+      expect(noted).toHaveLength(1);
+    } finally {
+      await database.as('owner').query('update platform_controls.audit_head set mac = $1', [kept?.mac]);
+    }
+  });
+
+  it('in production, refuses a command that writes a chain without the witness store, before it connects', async () => {
+    const env = {
+      ...envFor('operator'),
+      AGENTX_ENV: 'production',
+      AGENTX_DB_TLS: 'verify-full',
+      CONTAINER_APP_JOB_EXECUTION_NAME: 'job-agentx-prd-operator-7x2kq9m',
+    };
+    const { code, line, events } = await run(['create-organization', '--name', NAME], env);
+    expect(code).toBe(1);
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')).toMatchObject({
+      problems: [expect.stringMatching(/^AGENTX_AUDIT_WITNESS_URL is not set: in production every chain write/)],
+    });
   });
 });
 

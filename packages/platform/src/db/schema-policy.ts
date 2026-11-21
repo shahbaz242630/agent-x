@@ -656,7 +656,17 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'idempotency.keys': {
       reason:
         "Each write's idempotency key (ADR-007 §4): the app adds the key and fills in the write's result. A key deleted before its retention, or its namespace or hash changed, would let a retry do the write again",
-      columns: ['result_status', 'result_id'],
+      // TR-1 (migration 0115): the chain heads the write left, sealed with the key's names, filled in with its result.
+      columns: [
+        'result_status',
+        'result_id',
+        'head_seq',
+        'head_hash',
+        'platform_head_seq',
+        'platform_head_hash',
+        'head_mac',
+        'head_mac_key_version',
+      ],
       // The retention sweep (B1e, 0009); ADR-014 §3's default.
       sweptAfter: { column: 'created_at', days: IDEMPOTENCY_RETENTION_DAYS },
     },

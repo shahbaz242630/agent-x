@@ -16,13 +16,27 @@ export {
   type DigestAnchors,
   type DigestLog,
   FORGET_MARGIN_MS,
+  headCutBelow,
   headHeldTo,
+  type HeadSeen,
   heldThrough,
   type HeadWatch,
+  placesOf,
   raiseWritten,
   type StateDigest,
 } from './digest-log.ts';
 export { type SignedSeen, subjectKey } from './state-digest.ts';
+export { heldToWitnessed, watchingPlaces } from './witness-path.ts';
+export {
+  type ChainWitness,
+  createWitnessLog,
+  type WitnessAnchors,
+  type WitnessClass,
+  type WitnessedHead,
+  type WitnessLog,
+  type WitnessSigner,
+  WitnessUnconfirmed,
+} from './witness-log.ts';
 export { shardOf } from './shards.ts';
 export { OLD_EDIT_DAYS } from './limits.ts';
 export { OPERATOR_ID, operatorSignature, sealedSigned } from './operator-signature.ts';

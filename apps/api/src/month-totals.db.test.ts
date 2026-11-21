@@ -9,7 +9,13 @@
 // to it; the holdings check holds it to its reservations; and an organisation
 // made before GM-1a is refused busy until its cutover opens its months from
 // its signed requests.
-import { createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import {
+  checkStatesWith,
+  createAuditTrail,
+  type SignedStates,
+  withSignedStates,
+  witnessWith,
+} from '@agentx/core/modules/audit';
 import {
   CUTOVER_ACTION,
   CUTOVER_SUBJECT,
@@ -38,9 +44,10 @@ import {
   voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
-import type { DigestLog } from '@agentx/platform/audit-chain';
+import { createDigestLog, createWitnessLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, type DatabaseTransaction } from '@agentx/platform/db';
 import {
+  createFakeWriteOnceStore,
   createTestDatabase,
   FixedClock,
   LogCapture,
@@ -1063,6 +1070,85 @@ describe('SEC-DB-11 AT13f: a month’s total made above the last anchor, cut off
       expect.objectContaining({ check: 'state', reason: 'log', seq: String(seenAt) }),
     );
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  /** A witness log over the one store every copy shares (TR-1). */
+  const witnessOver = (store: ReturnType<typeof createFakeWriteOnceStore>) =>
+    createWitnessLog({
+      store: store.store,
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+
+  /** The month decided twice on one copy (W), its heads noted to the witness log, `soon` as a decision's are. */
+  async function decidedOnW(store: ReturnType<typeof createFakeWriteOnceStore>) {
+    const writer = witnessOver(store);
+    const { w, acting, max } = await ready();
+    const saved = await headOf(w);
+    witnessWith(writer);
+    try {
+      await decisionOf(acting, w, max);
+      await decisionOf(acting, w, max);
+    } finally {
+      witnessWith(undefined);
+    }
+    return { w, acting, max, saved, writer };
+  }
+
+  /** Another copy (J), which never read the chain: a digest with no head seen, held only to what the store witnessed. */
+  async function onJ<T>(store: ReturnType<typeof createFakeWriteOnceStore>, work: () => Promise<T>): Promise<T> {
+    const reader = witnessOver(store);
+    await reader.refresh();
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 64 * 1024 * 1024,
+      witnessed: (chain) => reader.pending(chain),
+    });
+    checkStatesWith(digest);
+    try {
+      expect(
+        digest.heads({ kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000000' })?.seen,
+      ).toBeUndefined();
+      return await work();
+    } finally {
+      checkStatesWith(undefined);
+    }
+  }
+
+  it('TR-1 (14): a copy that never saw the month refuses it cut off, held to the heads the deciding copy witnessed', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting, max, saved, writer } = await decidedOnW(store);
+    // The decisions' heads go with the flush (`soon`): its file lands, then the owner cuts.
+    await writer.flush();
+    await cutBack(w, saved);
+    await onJ(store, async () => {
+      expect(await ask(acting, w, max)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    });
+    expect(lines('audit.integrity_failed')).toContainEqual(expect.objectContaining({ check: 'state', reason: 'log' }));
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('TR-1 (8): the residual, a crash before the flush: the cut is not seen there, and the month holds only what is decided after', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting, max, saved } = await decidedOnW(store);
+    // The decision path adds no trip (TR-1): nothing written before the flush, the first decision of an agent's too.
+    expect(store.files.size).toBe(0);
+    // The deciding copy gone before its flush: its `soon` heads never landed (Section 1.4's residual 1).
+    await cutBack(w, saved);
+    await onJ(store, async () => {
+      expect((await decisionOf(acting, w, max)).decision).toBe('ALLOW');
+    });
+    // The cut took the requests with their capacity: what is held is only what was decided since, never more.
+    expect(await heldIn(w)).toBe(max);
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
   it('a month grown honestly under the heads seen decides as ever: its limit refuses, no alarm', async () => {

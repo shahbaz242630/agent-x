@@ -92,7 +92,7 @@ import type { Logger } from '@agentx/platform/observability';
 import type { Kysely, Transaction } from 'kysely';
 
 import { type Clock, DAY_MS, type IdGenerator } from '../../../shared-kernel/index.ts';
-import { type AuditTables, createAuditTrail } from '../../audit/index.ts';
+import { type AuditTables, createAuditTrail, nowChainsOf, waitWitnessed } from '../../audit/index.ts';
 import { type DirectoryTables, organizationsOf } from '../../directory/index.ts';
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import {
@@ -297,8 +297,10 @@ export function createIdpEventCopier({
     };
     /** Whose sessions the copy ended, kept once its transaction commits. */
     let ending: string | undefined;
+    const opened: { tx?: object } = {};
     const copied = await (orgId === null || person === undefined
       ? database.transaction().execute(async (tx) => {
+          opened.tx = tx;
           const copying = await judged(tx);
           if (copying === undefined) return false;
           ending = copying.ending;
@@ -306,6 +308,7 @@ export function createIdpEventCopier({
           return true;
         })
       : withTenant(database, orgId, async (tx) => {
+          opened.tx = tx;
           const copying = await judged(tx);
           if (copying === undefined) return false;
           ending = copying.ending;
@@ -323,6 +326,9 @@ export function createIdpEventCopier({
           return true;
         }));
     if (ending !== undefined) endedThisRun.add(ending);
+    // Its heads outside the database before the copy is taken as done (TR-1): WitnessUnconfirmed past the wait, the
+    // copy kept (a later run finds it copied), its heads still queued.
+    if (opened.tx !== undefined) await waitWitnessed(nowChainsOf(opened.tx));
     return copied;
   };
 

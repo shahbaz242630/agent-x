@@ -18,6 +18,12 @@ const SETTINGS: Env = {
   // Runs no job, so needs no anchors' store.
   AGENTX_ROLE: 'web',
   AGENTX_PARTNER_MODE: 'live',
+  // Every copy witnesses its chain heads in production (TR-1): the witness log's stores, on Azure's identity.
+  AGENTX_AUDIT_WITNESS_URL: 'https://stagentxevprd01.blob.core.windows.net/audit-witness',
+  AGENTX_AUDIT_WITNESS_CLIENT_ID: '1f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+  AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: 'https://stagentxevprd01.blob.core.windows.net/audit-witness-snapshots',
+  IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+  IDENTITY_HEADER: 'identity header for these tests',
   AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
   AGENTX_RELEASE: 'r-1',
   AGENTX_PUBLIC_ORIGIN: 'https://app.agentx.example',
@@ -292,7 +298,9 @@ describe('SEC-OPS-05 the config fingerprint', () => {
         !leaf.startsWith('email.accessKey: ') &&
         !leaf.startsWith('email.directoryToken: ') &&
         !leaf.startsWith('factorResets.token: ') &&
-        !leaf.startsWith('http.machineIdsKey: '),
+        !leaf.startsWith('http.machineIdsKey: ') &&
+        // The identity's header is a secret Azure hands the process: never in the fingerprint, as every store's.
+        !leaf.endsWith('container.identityHeader: "identity header for these tests"'),
     );
     expect(leaves(fingerprintedSettings(config)).toSorted()).toEqual(left.toSorted());
   });

@@ -60,7 +60,7 @@
 //    catch: the failure names the organisation's ID, to look for first)
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 
-import { markHoldsWith } from '@agentx/core/modules/audit';
+import { markHoldsWith, witnessWith } from '@agentx/core/modules/audit';
 import { markOrgWorkNow } from '@agentx/core/modules/directory';
 import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
@@ -70,9 +70,13 @@ import {
   type AnchorLog,
   type Chain,
   createAnchorLog,
+  createWitnessLog,
   EVIDENCE_REFERENCE,
+  headFields,
+  headIsSealed,
   REBASE_REASONS,
   type RebaseReason,
+  type WitnessLog,
 } from '@agentx/platform/audit-chain';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
@@ -83,6 +87,7 @@ import {
   OPERATOR_ROLE,
   transactionsReadOnly,
   UnsafeDatabaseRole,
+  withTenant,
 } from '@agentx/platform/db';
 import { type KeyProvider, loadKeys, publicKeyChecker } from '@agentx/platform/keys';
 import {
@@ -699,7 +704,28 @@ async function connect(
   return database;
 }
 
-/** Does what was asked once the settings are read: the exit code. */
+/**
+ * The commands that write a chain (TR-1): each head they leave goes to the witness log, under the operator's own key,
+ * and the command reports success only once every head is outside the database. In production one refuses to start
+ * without the witness store, as a write no copy can see is one the owner could cut back unseen.
+ */
+const CHAIN_WRITERS: ReadonlySet<string> = new Set([
+  'create-organization',
+  'invite-first-admin',
+  'handoff-pause',
+  'handoff-resume',
+  FACTOR_RESET_NOTICE,
+  CHAIN_REBASE,
+  // The exports record on the platform chain who exported what.
+  'audit-export',
+  'activity-export',
+  PERSON_ACTIVITY_EXPORT,
+]);
+
+const NO_WITNESS_PROBLEM =
+  "AGENTX_AUDIT_WITNESS_URL is not set: in production every chain write is witnessed outside the database, so this command, which writes one, doesn't run without it";
+
+/** Does what was asked once the settings are read, its chain writes witnessed (CHAIN_WRITERS): the exit code. */
 async function run(
   config: OperatorConfig,
   keys: KeyProvider,
@@ -711,6 +737,118 @@ async function run(
     logger.error('operator.refused', { problems: request.problems });
     return 1;
   }
+  const store = witnessStoreOf(config);
+  const writesChains = CHAIN_WRITERS.has(request.command);
+  if (store === undefined && writesChains && config.environment === 'production') {
+    logger.error('operator.refused', { problems: [NO_WITNESS_PROBLEM] });
+    return 1;
+  }
+  const witness =
+    store &&
+    createWitnessLog({
+      store,
+      keys,
+      logger,
+      now: () => systemClock.now(),
+      epoch: config.anchors.epoch,
+      signer: 'operator',
+      alertAfterMs: 0,
+      mostBytes: OPERATOR_WITNESS_BYTES,
+    });
+  // Its heads noted as they commit, never waited for there: a wait inside a command would read as the command failing,
+  // its change standing. The whole command waits once, at its end (drained), and only then says it is done.
+  witnessWith(
+    witness && {
+      note: (chain, head, klass) => {
+        witness.note(chain, head, klass);
+      },
+      pending: (chain) => witness.pending(chain),
+      settled: () => Promise.resolve(),
+    },
+  );
+  const code = await runRequest(config, keys, request, logger);
+  if (witness === undefined) return code;
+  try {
+    // A request done before (run again after its heads failed to go out) records nothing: the chains' heads as they
+    // stand go out instead, covering its events, before it says it is done.
+    if (code === 0 && writesChains) await noteHeadsAsTheyStand(config, keys, logger, request, witness);
+    await witness.drained();
+    return code;
+  } catch (error) {
+    // Done in the database, its heads not yet outside it: never reported as done. Run the same request again.
+    logger.error('operator.not_witnessed', { command: request.command, err: error });
+    return 1;
+  }
+}
+
+/**
+ * The platform chain's head as it stands, and the organisation's the request names, if any, noted `now` (TR-1): a head
+ * at or above a command's own events covers them, as every read is held to it and a walk re-hashes through it.
+ */
+export async function noteHeadsAsTheyStand(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  logger: Logger,
+  request: Request,
+  witness: Pick<WitnessLog, 'note'>,
+): Promise<void> {
+  const database = await connect(config, logger);
+  if (database === undefined) throw new Error("the chains' heads could not be read to witness them");
+  try {
+    const columns = ['seq', 'hash', 'mac', 'mac_key_version'] as const;
+    // Sealed, as every read checks it, or never noted: a head the owner planted, witnessed, would hold the chain to it
+    // for good. Not sealed (or not the one row) is no "done": the command's change is left to the reads' own alarm.
+    const sealedHead = (chain: Chain, row: Readonly<Record<string, unknown>>) => {
+      const head = headFields(row);
+      if (head === undefined || !headIsSealed(keys, chain, head)) {
+        throw new Error("a chain's head isn't sealed: it was changed past the app, and is not witnessed");
+      }
+      witness.note(chain, { seq: head.seq, hash: head.hash }, 'now');
+    };
+    const rows = await database.selectFrom('platform_controls.audit_head').select(columns).execute();
+    const [platformHead, ...more] = rows;
+    if (platformHead === undefined || more.length > 0) {
+      throw new Error('the platform chain has no one head row: it was changed past the app, and is not witnessed');
+    }
+    sealedHead({ kind: 'platform' }, platformHead);
+    const orgId = 'orgId' in request && typeof request.orgId === 'string' ? request.orgId : undefined;
+    if (orgId !== undefined) {
+      // Its events asked first: one written after that read leaves its head row in place for the next, as the app
+      // never deletes one.
+      const { written, org } = await withTenant(database, orgId, async (tx) => ({
+        written: await tx
+          .selectFrom('audit.events')
+          .select('seq')
+          .where('org_id', '=', orgId)
+          .limit(1)
+          .executeTakeFirst(),
+        org: await tx.selectFrom('audit.heads').select(columns).where('org_id', '=', orgId).executeTakeFirst(),
+      }));
+      // A chain with no events yet (an export of a new organisation's) has no head to witness. One with events and no
+      // head row had it taken away past the app: never witnessed as nothing.
+      if (org === undefined && written === undefined) return;
+      if (org === undefined) {
+        throw new Error(
+          "the organisation's audit chain has no head row: it was changed past the app, and is not witnessed",
+        );
+      }
+      sealedHead({ kind: 'organisation', orgId: orgId.toLowerCase() }, org);
+    }
+  } finally {
+    await database.destroy();
+  }
+}
+
+/** What the operator's witness log may hold: a command's few heads, many times over. */
+const OPERATOR_WITNESS_BYTES = 1024 * 1024;
+
+/** Does what was asked: the exit code. */
+async function runRequest(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: Request,
+  logger: Logger,
+): Promise<number> {
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });
 
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
@@ -992,13 +1130,19 @@ function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger)
   });
 }
 
-/** The anchors' store, or nothing where none is set. */
-function anchorStoreOf({ anchors: { directory, container } }: OperatorConfig): WriteOnceStore | undefined {
+/** A write-once store as the config places it: the container, or the folder in development and test, or nothing. */
+function writeOnceStoreAt({ directory, container }: OperatorConfig['witness']): WriteOnceStore | undefined {
   if (container !== null) {
     return azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
   }
   return directory === null ? undefined : folderWriteOnceStore(directory);
 }
+
+/** The witness log's heads' store (TR-1), where the operator adds its own, or nothing where none is set. */
+const witnessStoreOf = (config: OperatorConfig): WriteOnceStore | undefined => writeOnceStoreAt(config.witness);
+
+/** The anchors' store, or nothing where none is set. */
+const anchorStoreOf = (config: OperatorConfig): WriteOnceStore | undefined => writeOnceStoreAt(config.anchors);
 
 /**
  * The chains' anchors as the API keeps them, read with their public keys alone

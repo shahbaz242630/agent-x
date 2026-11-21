@@ -36,12 +36,25 @@
 // to the highest this process has seen (platformCutBack, as a session's read):
 // a head below it, or another event at its place, is tampering, read as paused.
 //
+// Tx A also walks the platform chain from the path frontier (TR-1 F.4, chain-frontier.ts) to its head, on the event's
+// trip: every head a copy witnessed on it (asked before the trip) must be the chain's own event at its place, or the
+// chain was cut back below it, a pause it took with it hidden for a moment: tampering, read as paused. The walk's head
+// (`P`) and path go back with the pause, for the hand-off's gate after Tx A commits (apps/api/src/handoff-witness-gate.ts).
+//
 // The row is the first lock any transaction that reads or moves it takes
 // (ADR-006 §6 level 1): FOR SHARE by a hand-off, FOR NO KEY UPDATE by a
 // change, so a pause can't commit halfway through a hand-off's check, and
 // whichever commits second sees the first. The change records its event
 // last, under the chain head's lock (level 13).
-import type { StateDigest } from '@agentx/platform/audit-chain';
+import {
+  type FrontierStart,
+  judgeWitnessed,
+  MOST_WALKED_WITHIN,
+  type WalkedWithin,
+  type WithinWalk,
+} from '../../audit/index.ts';
+import type { HeadSeen, StateDigest } from '@agentx/platform/audit-chain';
+import { sendTogether } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -53,6 +66,8 @@ import {
   platformEventsSigned,
   platformHeadRead,
   type PlatformTransaction,
+  platformWalked,
+  platformWalkReads,
 } from './platform-chain.ts';
 
 /** The one actor whose event moves the pause: the operator's command (apps/operator). */
@@ -78,8 +93,19 @@ export type HandoffPause =
       /** When its event was recorded; null for the row as born, paused by no event. */
       readonly since: Date | null;
       readonly eventId: string | null;
+      /** Asked `within`: the platform chain walked from the frontier to its head, `P` (TR-1 F.4). */
+      readonly walk?: WalkedWithin;
     }
-  | { readonly outcome: 'tampered' };
+  | { readonly outcome: 'tampered' }
+  /** Asked `within`: the platform chain not proven within the walk's reach, or a witnessed head it couldn't judge. */
+  | { readonly outcome: 'unverified' };
+
+/** What the platform chain's walk within Tx A is held to (TR-1 F.4): where it starts, the heads copies witnessed. */
+export interface PauseWithin {
+  readonly start: FrontierStart;
+  readonly witnessed: readonly HeadSeen[];
+  readonly most?: number;
+}
 
 /** How the read locks the row: FOR SHARE to rest a hand-off on it, FOR NO KEY UPDATE to change it. */
 export type HandoffPauseLock = 'share' | 'change';
@@ -132,6 +158,8 @@ interface Read {
   readonly known: bigint | undefined;
   /** Where the platform chain was cut back below the head this process saw (AT13h), if it was. */
   readonly cut?: bigint | undefined;
+  /** Asked `within`: the walk from the frontier to the platform chain's head (TR-1 F.4). */
+  readonly walk?: WithinWalk | undefined;
 }
 
 /** What the pause's read is held to: the digest the process keeps, if it keeps one. */
@@ -150,18 +178,31 @@ async function readPause(
   lock: HandoffPauseLock,
   keys: KeyProvider,
   digest: PauseDigest,
+  within: PauseWithin | undefined,
 ): Promise<Read> {
   const locking = tx.selectFrom('platform_controls.handoff_pause').select(['paused', 'event_seq', 'event_id']);
   const rows = await (lock === 'share' ? locking.forShare() : locking.forNoKeyUpdate()).execute();
   // Before the event's statement: what the walk read was committed before that statement's snapshot.
   const known = digest?.latest({ kind: 'platform' }, ...PAUSE_SUBJECT);
   const watch = digest?.heads?.({ kind: 'platform' });
-  const newest = await platformEventsSigned(tx)
-    .select(platformHeadRead(watch?.seen?.seq))
+  const newestRead = platformEventsSigned(tx)
+    .select(platformHeadRead(watch?.heldTo ?? []))
     .where('e.action', 'in', [HANDOFF_PAUSED, HANDOFF_RESUMED])
     .orderBy('e.seq', 'desc')
-    .limit(1)
-    .executeTakeFirst();
+    .limit(1);
+  let newest: Awaited<ReturnType<typeof newestRead.executeTakeFirst>>;
+  let walk: WithinWalk | undefined;
+  if (within === undefined) newest = await newestRead.executeTakeFirst();
+  else {
+    // The walk from the frontier on the event's own trip (TR-1 F.4): no trip of its own.
+    const most = within.most ?? MOST_WALKED_WITHIN;
+    const [event, edges, events] = await sendTogether(tx, [
+      newestRead,
+      ...platformWalkReads(tx, within.start.from, most),
+    ]);
+    newest = event.rows[0] as typeof newest;
+    walk = await platformWalked(keys, [edges, events], within.start.from, most);
+  }
   // The key holds one row at most; should the owner drop it and add a second, neither can be believed.
   const [row, ...others] = rows;
   let read: Read['row'] = 'unreadable';
@@ -170,6 +211,7 @@ async function readPause(
   return {
     row: read,
     known,
+    walk,
     // With no pause or resume ever, nothing was there to cut off but the row as born, which is paused.
     cut: newest === undefined ? undefined : platformCutBack(keys, tx, watch, newest)?.seq,
     newest:
@@ -191,7 +233,7 @@ const rolledBack = ({ newest, known }: Read): boolean =>
   known !== undefined && (newest === undefined || newest.seq < known);
 
 /** The pause its row and newest event agree on, or undefined when they don't. */
-function agreed({ row, newest }: Read): HandoffPause | undefined {
+function agreed({ row, newest }: Read): Extract<HandoffPause, { readonly since: Date | null }> | undefined {
   if (typeof row === 'string') return undefined;
   if (newest === undefined) {
     // Never moved: believed only as born, paused by no event.
@@ -215,11 +257,22 @@ function agreed({ row, newest }: Read): HandoffPause | undefined {
 export async function handoffPauseOf(
   tx: PlatformTransaction,
   lock: HandoffPauseLock,
-  { keys, logger, digest }: { readonly keys: KeyProvider; readonly logger: Logger; readonly digest?: PauseDigest },
+  {
+    keys,
+    logger,
+    digest,
+    within,
+  }: {
+    readonly keys: KeyProvider;
+    readonly logger: Logger;
+    readonly digest?: PauseDigest;
+    /** Tx A's: the platform chain walked from the frontier, every witnessed head held to it (TR-1 F.4). */
+    readonly within?: PauseWithin;
+  },
 ): Promise<HandoffPause> {
-  const read = await readPause(tx, lock, keys, digest);
+  const read = await readPause(tx, lock, keys, digest, within);
   const pause = rolledBack(read) || read.cut !== undefined ? undefined : agreed(read);
-  if (pause !== undefined) return pause;
+  if (pause !== undefined) return within === undefined ? pause : heldToWalk(pause, read.walk, within, logger);
   logger.error('audit.integrity_failed', {
     chain: 'platform',
     check: 'handoff_pause',
@@ -227,6 +280,37 @@ export async function handoffPauseOf(
     ...(placeOf(read) === undefined ? {} : { seq: String(placeOf(read)) }),
   });
   return { outcome: 'tampered' };
+}
+
+/**
+ * A pause believed, held to the walk from the frontier (TR-1 F.4): a walk broken, or a witnessed head off its path (a
+ * cut that may have hidden a pause), is tampering, the alarm raised; a walk past its reach, or a head it couldn't
+ * judge, is `unverified`. Else the pause, its walk with it.
+ */
+function heldToWalk(
+  pause: Extract<HandoffPause, { readonly since: Date | null }>,
+  walk: WithinWalk | undefined,
+  { start, witnessed }: PauseWithin,
+  logger: Logger,
+): HandoffPause {
+  if (walk === undefined || walk.kind === 'too_far') return { outcome: 'unverified' };
+  if (walk.kind === 'broken') {
+    const { reason, seq } = walk.problem;
+    logger.error('audit.integrity_failed', { chain: 'platform', check: 'frontier', reason, seq: String(seq) });
+    return { outcome: 'tampered' };
+  }
+  // Asked before the trip: a head above the one the walk reached was committed, and is gone.
+  const judged = judgeWitnessed(witnessed, start, walk, 'cut');
+  if (judged.kind === 'cut') {
+    logger.error('audit.integrity_failed', {
+      chain: 'platform',
+      check: 'witness',
+      reason: 'cut_back',
+      seq: String(judged.seq),
+    });
+    return { outcome: 'tampered' };
+  }
+  return judged.kind === 'held' ? { ...pause, walk } : { outcome: 'unverified' };
 }
 
 /** Where the alarm says the pause's newest event should be: the head seen where the chain was cut back, else the digest's. */
@@ -259,7 +343,8 @@ export async function changeHandoffPause(
     throw new PlatformEventRefused(['actor must be the operator']);
   }
   const now = await handoffPauseOf(tx, 'change', { keys, logger });
-  if (now.outcome === 'tampered') return now;
+  // Unverified only for a read asked `within` (Tx A's): never this one.
+  if (now.outcome === 'tampered' || now.outcome === 'unverified') return { outcome: 'tampered' };
   if ((now.outcome === 'paused') === paused) {
     return { outcome: 'unchanged', paused, since: now.since, eventId: now.eventId };
   }

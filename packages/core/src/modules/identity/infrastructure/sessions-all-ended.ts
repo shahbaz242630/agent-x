@@ -31,6 +31,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { nowChainsOf, waitWitnessed, WitnessUnconfirmed } from '../../audit/index.ts';
 import {
   createPlatformChain,
   lockedPlatformHead,
@@ -96,7 +97,9 @@ export function createAllSessionsEnding({
   let startedAt: number | undefined;
 
   const end = async (cut: PlatformCut): Promise<void> => {
+    const opened: { tx?: object } = {};
     const done = await db.transaction().execute(async (tx) => {
+      opened.tx = tx;
       await limitStatements(tx);
       const chain = tx as unknown as PlatformTransaction;
       // The database's clock before waiting for the lock: after the read that found the cut.
@@ -125,6 +128,9 @@ export function createAllSessionsEnding({
       }
       return { seq, ended };
     });
+    // Its record outside the database before the cut reads as answered (TR-1): past the wait, WitnessUnconfirmed (the
+    // request's 503). The cut is already accepted and the sessions ended, so the console is never locked by it.
+    if (opened.tx !== undefined) await waitWitnessed(nowChainsOf(opened.tx));
     if (done.ended === undefined) {
       logger.info('identity.sessions_all_ended_found', { seq: done.seq.toString() });
       return;
@@ -149,6 +155,12 @@ export function createAllSessionsEnding({
       try {
         await end(cut);
       } catch (error) {
+        // Saved, its record not yet outside the database: the next request may try again at once (it finds the record
+        // and records nothing more), and this one is answered 503, as any write whose head isn't witnessed yet.
+        if (error instanceof WitnessUnconfirmed) {
+          startedAt = undefined;
+          throw error;
+        }
         logger.error('identity.sessions_all_end_failed', { error: error instanceof Error ? error.name : 'unknown' });
       }
     },

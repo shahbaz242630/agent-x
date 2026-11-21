@@ -98,8 +98,12 @@ import {
   type ChainReport,
   type ChainStep,
   type CheckedPoint,
+  headCutBelow,
+  type HeadSeen,
   type HeadWatch,
   heldThrough,
+  heldToWitnessed,
+  placesOf,
   raiseWritten,
   clockOf,
   countIn,
@@ -107,7 +111,6 @@ import {
   edgesIn,
   entryIsSealed,
   headFields,
-  headHeldTo,
   headIsSealed,
   LAST_COUNTED,
   OPERATOR_ID,
@@ -124,9 +127,11 @@ import {
   verifyChain,
   verifyFromAnchor,
   walkLast,
+  watchingPlaces,
 } from '@agentx/platform/audit-chain';
 import {
   afterCommit,
+  chainHeadWritten,
   type AnswersOf,
   assertTenant,
   type GatheredRead,
@@ -157,6 +162,9 @@ import {
 } from '../domain/event.ts';
 import { HISTORY_CHECK_SUBJECT, HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
+import { witnessClassOf } from './witness-class.ts';
+import { MOST_WALKED_WITHIN, type ReadAhead, walkWithin, type WithinWalk } from './chain-frontier.ts';
+import { chainWitness, noteCommitted, witnessedWrite, wroteTo } from './witnessing.ts';
 
 /** A transaction on the audit tables, opened by withTenant for the organisation. */
 export type AuditTransaction = Transaction<AuditTables>;
@@ -369,10 +377,15 @@ export class TooManyEventsAboutObject extends Error {
   }
 }
 
-/** One organisation's chain to probe, and the place it is probed against: its anchor. */
+/** One organisation's chain to probe, the place it is probed against (its anchor), and the heads copies witnessed. */
 interface ProbeAsked {
   readonly orgId: string;
   readonly from: CheckedPoint;
+  /**
+   * The heads copies witnessed above the anchor (TR-1), asked before the probe: each one's hash read in its statement. A
+   * head above the chain's, or another event at a place, is the chain cut back (`cut_back`), whatever else it found.
+   */
+  readonly heldTo?: readonly HeadSeen[];
 }
 
 /** What the probe found of one chain, or that its read failed. */
@@ -418,7 +431,16 @@ export interface AuditTrail {
    * organisation alone, so a chain it can't see reads as empty, never another's.
    * A step that holds says which signed objects it read (WalkedStep, AT13).
    */
-  checkFromAnchor(db: Kysely<AuditTables>, orgId: string, from: CheckedPoint, most?: number): Promise<WalkedStep>;
+  checkFromAnchor(
+    db: Kysely<AuditTables>,
+    orgId: string,
+    from: CheckedPoint,
+    most?: number,
+    /** The heads copies witnessed (TR-1), asked before the walk: a step that doesn't pass through each is `cut_back`. */
+    heldTo?: readonly HeadSeen[],
+    /** Where the hashes of the events it reads recorded from `since` on are kept (TR-1: late heads held to them). */
+    recent?: { readonly since: Date; readonly found: Map<bigint, Buffer> },
+  ): Promise<WalkedStep>;
   /**
    * checkFromAnchor from a place a check of the organisation's own reached (S206 V4: the notice check's), keeping the
    * events of `actions` its walk read. They are given only for a step that holds, each then in its place in one
@@ -442,6 +464,8 @@ export interface AuditTrail {
     cursor: CheckedPoint,
     target: CheckedPoint,
     most: number,
+    /** The places whose hashes the step keeps as it reads them (TR-1: witnessed heads confirmed on the way). */
+    watch?: { readonly heads: readonly HeadSeen[]; readonly found: Map<bigint, Buffer> },
   ): Promise<WalkedStep>;
   /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as passStep's. */
   countStep(db: Kysely<AuditTables>, orgId: string, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
@@ -467,6 +491,18 @@ export interface AuditTrail {
    * in withTenant's transaction for the organisation, its head locked.
    */
   keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean>;
+  /**
+   * keepsAnchor, with the chain walked from `from` (the path frontier, chain-frontier.ts: TR-1 F.3) to its head on the
+   * same trip: the edges at `from` and the events past it read in statements of their own, sent together with the
+   * anchor's, then re-hashed (walkWithin). More than `most` past `from` is `too_far`. Its head locked, as keepsAnchor's.
+   */
+  keepsAnchorWithin(
+    tx: AuditTransaction,
+    orgId: string,
+    anchor: AnchorPoint,
+    from: CheckedPoint,
+    most?: number,
+  ): Promise<{ readonly kept: boolean; readonly walk: WithinWalk }>;
   /**
    * record, with `statement` (a data-modifying one, given the event's ID and
    * a condition to AND to its filter: that the event was written) run in the
@@ -802,8 +838,8 @@ export const SIGNED_EVENT_COLUMNS = sql`${EVENT_COLUMNS}, ${OPERATOR_COLUMNS}`;
  */
 export const headJoins = (
   chain: Chain & { readonly kind: 'organisation' },
-  /** The place of the highest head this process has seen (AT13f): the hash of its event there read too, by the key. */
-  seenAt?: bigint,
+  /** The heads the read is held to (AT13f, TR-1): the hash of each one's event read too, by the key, in their order. */
+  heldTo: readonly HeadSeen[] = [],
 ): RawBuilder<unknown> => sql`
   left join audit.heads h on h.org_id = ${chain.orgId}
   cross join lateral (
@@ -811,12 +847,22 @@ export const headJoins = (
       then (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${chain.orgId} and p.seq > 0)
       else (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${chain.orgId} and p.seq > h.seq)
     end as past_head,
-    ${
-      seenAt === undefined
-        ? sql`null::bytea`
-        : sql`(select s.hash from audit.events s where s.org_id = ${chain.orgId} and s.seq = ${seenAt})`
-    } as seen_hash
+    ${hashesAt(chain.orgId, heldTo)} as seen_hash
   ) as past`;
+
+/**
+ * The hashes of the events at the places of `heads` (TR-1), in their order, a null where there is none, at or below
+ * `upTo` where given: one statement's subquery, each a seek on the events' key. A null array with none to read.
+ */
+function hashesAt(orgId: string, heads: readonly HeadSeen[], upTo?: RawBuilder<unknown>): RawBuilder<unknown> {
+  if (heads.length === 0) return sql`null::bytea[]`;
+  return sql`array(
+    select (select s.hash from audit.events s
+            where s.org_id = ${orgId} and s.seq = a.seq ${upTo === undefined ? sql`` : sql`and s.seq <= ${upTo}`})
+    from pg_catalog.unnest(${placesOf(heads)}::bigint[]) with ordinality as a (seq, n)
+    order by a.n
+  )`;
+}
 
 /**
  * The events `which` picks, in chain order and at most `limit`, each beside
@@ -834,12 +880,12 @@ async function eventsWithHead(
     each,
     newest = false,
     alongside,
-    seenAt,
+    heldTo,
   }: {
     readonly each?: readonly string[];
     readonly newest?: boolean;
     readonly alongside?: RawBuilder<unknown>;
-    readonly seenAt?: bigint | undefined;
+    readonly heldTo?: readonly HeadSeen[] | undefined;
   } = {},
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
   // The oldest events first, or the newest (HistoryToRead.newest); either way handed back in chain order, below.
@@ -863,7 +909,7 @@ async function eventsWithHead(
     select ${HEAD_COLUMNS},
            ${SIGNED_EVENT_COLUMNS}${rowColumn}
     from (values (1)) as one (x)
-    ${headJoins(chain, seenAt)}
+    ${headJoins(chain, heldTo)}
     left join lateral (${picked}) as e on true
     order by e.seq
   `.execute(tx);
@@ -884,7 +930,7 @@ async function historiesWithHead(
   tx: AuditTransaction,
   chain: Chain & { readonly kind: 'organisation' },
   picks: readonly HistoryPick[],
-  seenAt: bigint | undefined,
+  heldTo: readonly HeadSeen[] | undefined,
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
   const each = picks.map(
     ({ which, limit, newest }, find) =>
@@ -896,7 +942,7 @@ async function historiesWithHead(
     select ${HEAD_COLUMNS}, e.find,
            ${SIGNED_EVENT_COLUMNS}
     from (values (1)) as one (x)
-    ${headJoins(chain, seenAt)}
+    ${headJoins(chain, heldTo)}
     left join lateral (${sql.join(each, sql` union all `)}) as e on true
     order by e.find, e.seq
   `.execute(tx);
@@ -927,7 +973,7 @@ export interface GatheredLatest {
 function gatheredWithHead(
   chain: Chain & { readonly kind: 'organisation' },
   reads: readonly GatheredRead[],
-  seenAt: bigint | undefined,
+  heldTo: readonly HeadSeen[] | undefined,
 ): RawBuilder<Record<string, unknown>> {
   const each = reads.map(
     (read, item) =>
@@ -941,7 +987,7 @@ function gatheredWithHead(
            ${HEAD_COLUMNS},
            ${SIGNED_EVENT_COLUMNS}
     from objects o
-    ${headJoins(chain, seenAt)}
+    ${headJoins(chain, heldTo)}
     left join lateral (
       select e.* from audit.events e
       where e.org_id = ${chain.orgId} and e.subject_type = o.subject_type and e.subject_id = o.subject_id
@@ -1045,7 +1091,7 @@ interface HeadMoved {
  * the head held to goes on from the cut, and raising it would hide the cut.
  */
 interface WriteHold {
-  readonly seen: NonNullable<HeadWatch['seen']> | undefined;
+  readonly seen: readonly HeadSeen[];
   held: boolean;
 }
 
@@ -1103,8 +1149,7 @@ function writerFor(
           for no key update
         )
         select l.*, pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as now,
-               (select e.hash from audit.events e
-                where e.org_id = ${orgId} and e.seq = ${hold.seen?.seq ?? null}::bigint and e.seq <= l.seq) as seen_hash
+               ${hashesAt(orgId, hold.seen, sql`l.seq`)} as seen_hash
         from locked l
       `.execute(tx),
       );
@@ -1229,8 +1274,9 @@ interface Along {
  * A chain's edges and the event numbered `anchored` (ChainEdgeReader.edges), in one statement, so all of it comes from
  * one moment; each on the events' key, whatever the chain's length. The probe sends it for each organisation in turn.
  */
-const edgesRead = (orgId: string, anchored: bigint) => sql<Record<string, unknown>>`
+const edgesRead = (orgId: string, anchored: bigint, heldTo: readonly HeadSeen[] = []) => sql<Record<string, unknown>>`
   select (select pg_catalog.count(*) from audit.heads c where c.org_id = ${orgId}) as heads,
+         ${hashesAt(orgId, heldTo)} as seen_hash,
          h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
          (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${orgId}) as lowest,
          (select pg_catalog.max(p.seq) from audit.events p where p.org_id = ${orgId}) as highest,
@@ -1242,6 +1288,22 @@ const edgesRead = (orgId: string, anchored: bigint) => sql<Record<string, unknow
   left join (select * from audit.heads a where a.org_id = ${orgId} limit 1) as h on true
   left join audit.events e on e.org_id = ${orgId} and e.seq = ${anchored}
 `;
+
+/**
+ * A probe's answer held to the witnessed heads (TR-1), read in its statement: a chain whose head is below one, or that
+ * holds another event at one's place, was cut back, whatever the probe found of it against its anchor. Else as it was.
+ */
+function heldToProbe(
+  answer: ChainProbe,
+  heldTo: readonly HeadSeen[],
+  row: Readonly<Record<string, unknown>> | undefined,
+): ChainProbe {
+  if (answer.kind === 'failed' || heldTo.length === 0) return answer;
+  const { head_seq: seq, head_hash: hash } = row ?? {};
+  const head = typeof seq === 'bigint' && hash instanceof Buffer ? { seq, hash } : undefined;
+  const cut = headCutBelow(heldTo, head, row?.seen_hash);
+  return cut === undefined ? answer : { kind: 'failed', problem: { reason: 'cut_back', seq: cut.seq } };
+}
 
 /** The edges from edgesRead's rows: one always (`values` and left joins), but two where two events share a number, the table's key gone, and neither is the one anchored. */
 function edgesOf(rows: readonly Readonly<Record<string, unknown>>[]): ChainEdges {
@@ -1288,20 +1350,47 @@ function readerFor(
     },
 
     async events(after, upTo, limit) {
-      const { rows } = await sql<Record<string, unknown>>`
-        select ${SIGNED_EVENT_COLUMNS} from audit.events e
-        where e.org_id = ${orgId} and e.seq > ${after} and e.seq <= ${upTo}
-        order by e.seq limit ${limit}
-      `.execute(tx);
-      const chain: Chain = { kind: 'organisation', orgId };
+      const { rows } = await eventsRead(orgId, after, upTo, limit).execute(tx);
       if (seen !== undefined) rows.forEach(seen);
-      return rows.map((row) => {
-        const sealed = sealedSigned(keys, chain, row);
-        const content = contentOf(row);
-        return sealed === undefined || content === undefined ? undefined : { ...sealed, content };
-      });
+      return rows.map((row) => entryOfRow(keys, orgId, row));
     },
   };
+}
+
+/** Up to `limit` of the organisation's events after `after` and at most `upTo`, in number order, as the walk reads them. */
+const eventsRead = (orgId: string, after: bigint, upTo: bigint, limit: number) => sql<Record<string, unknown>>`
+  select ${SIGNED_EVENT_COLUMNS} from audit.events e
+  where e.org_id = ${orgId} and e.seq > ${after} and e.seq <= ${upTo}
+  order by e.seq limit ${limit}
+`;
+
+/** One event row as the chain checks it, or undefined where it can't be read. */
+function entryOfRow(keys: KeyProvider, orgId: string, row: Readonly<Record<string, unknown>>): StoredEntry | undefined {
+  const sealed = sealedSigned(keys, { kind: 'organisation', orgId }, row);
+  const content = contentOf(row);
+  return sealed === undefined || content === undefined ? undefined : { ...sealed, content };
+}
+
+/** Whether the chain holds the anchor (keepsAnchor), as one statement: the head's place and the event anchored. */
+const keepsAnchorRead = (orgId: string, anchor: AnchorPoint) => sql<{
+  head_seq: bigint | null;
+  anchored: Buffer | null;
+}>`
+  select h.seq as head_seq,
+         (select e.hash from audit.events e where e.org_id = ${orgId} and e.seq = ${anchor.seq}) as anchored
+  from (values (1)) as one (x)
+  left join audit.heads h on h.org_id = ${orgId}
+`;
+
+/** keepsAnchorRead's answer: no head, a head behind the anchor, or another event where the anchored one was, is wound back. */
+function keptIn(
+  row: { readonly head_seq: bigint | null; readonly anchored: Buffer | null } | undefined,
+  anchor: AnchorPoint,
+) {
+  // An empty chain's anchor (seq 0, the genesis hash) is held by every chain grown from it: no event to compare.
+  if (anchor.seq === 0n) return true;
+  const head = row?.head_seq ?? null;
+  return head !== null && head >= anchor.seq && row?.anchored?.equals(anchor.hash) === true;
 }
 
 /** Who recorded an event, and its details' JSON text, as eventsSinceChecked gives them. */
@@ -1510,10 +1599,15 @@ export function createAuditTrail({
     // AT13h, the header: given before the write, so anything that could undo it, sent from here on, keeps it unraised.
     const moved: { head?: { readonly seq: bigint; readonly hash: Buffer } } = {};
     const watch = watchOf(chain);
-    const held: WriteHold = { seen: watch?.seen, held: false };
-    if (watch !== undefined) {
+    const held: WriteHold = { seen: watch?.heldTo ?? [], held: false };
+    // TR-1: the transaction's head to the witness log once it commits, `now` unless every event here may wait.
+    const witnessed = chainWitness() !== undefined;
+    if (witnessed) witnessedWrite(tx, chain, witnessClassOf(events.map(({ event }) => event.action)));
+    if (watch !== undefined || witnessed) {
       await afterCommit(tx, () => {
-        if (moved.head !== undefined) raiseWritten(watch, moved.head, { seen: held.held, accepted: true });
+        if (moved.head === undefined) return;
+        if (watch !== undefined) raiseWritten(watch, moved.head, { seen: held.held, accepted: true });
+        noteCommitted(tx, chain, moved.head);
       });
     }
     const append = (reuse: boolean) =>
@@ -1533,7 +1627,12 @@ export function createAuditTrail({
       sealed = await append(false);
     }
     const last = sealed.at(-1);
-    if (last !== undefined) moved.head = { seq: last.seq, hash: last.hash };
+    if (last !== undefined) {
+      moved.head = { seq: last.seq, hash: last.hash };
+      wroteTo(tx, chain, moved.head);
+      // Kept with an idempotent write's answer (TR-1, migration 0115): a replay holds the chain to it.
+      chainHeadWritten(tx, chain.orgId, moved.head);
+    }
     return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));
   };
 
@@ -1597,8 +1696,8 @@ export function createAuditTrail({
   ): BrokenRead | undefined => {
     if (watch === undefined) return undefined;
     const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
-    const { seen } = watch;
-    if (seen !== undefined && !headHeldTo(seen, head, first?.seen_hash)) return brokenAt(seen.seq);
+    const cut = headCutBelow(watch.heldTo, head, first?.seen_hash);
+    if (cut !== undefined) return brokenAt(cut.seq);
     if (head !== undefined && headsTaken.get(tx)?.has(chain.orgId) !== true)
       watch.saw({ seq: head.seq, hash: head.hash });
     return undefined;
@@ -1720,7 +1819,7 @@ export function createAuditTrail({
             and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
         )`,
       LATER_EVENTS_READ + 1,
-      { seenAt: watch?.seen?.seq, ...(rowRead === undefined ? {} : { alongside: rowRead }) },
+      { heldTo: watch?.heldTo, ...(rowRead === undefined ? {} : { alongside: rowRead }) },
     );
     const rows = rowRead === undefined ? undefined : rowsAlong(events[0]);
     const cut = cutBack(tx, chain, watch, events[0]);
@@ -1798,16 +1897,23 @@ export function createAuditTrail({
       orgId: string,
       from: CheckedPoint,
       most?: number,
+      heldTo: readonly HeadSeen[] = [],
+      recent?: { readonly since: Date; readonly found: Map<bigint, Buffer> },
     ): Promise<WalkedStep> {
       const chain = chainOf(orgId);
       const seen = new Map<string, bigint>();
+      const found = new Map<bigint, Buffer>();
       const step = await withTenant(
         db,
         chain.orgId,
-        (tx) => verifyFromAnchor(keys, chain, seeingSigned(readerFor(tx, chain.orgId, keys), seen), from, most),
+        (tx) => {
+          const reader = watchingPlaces(seeingSigned(readerFor(tx, chain.orgId, keys), seen), heldTo, found, recent);
+          return verifyFromAnchor(keys, chain, reader, from, most);
+        },
         JOB_LIMITS,
       );
-      return walked(step, seen);
+      // A walk that missed a witnessed head is the chain cut back (TR-1): nothing it read is kept, nothing anchored.
+      return walked(heldToWitnessed(step, heldTo, found, from.seq), seen);
     },
 
     async walkFrom(
@@ -1849,13 +1955,18 @@ export function createAuditTrail({
       cursor: CheckedPoint,
       target: CheckedPoint,
       most: number,
+      watch?: { readonly heads: readonly HeadSeen[]; readonly found: Map<bigint, Buffer> },
     ): Promise<WalkedStep> {
       const chain = chainOf(orgId);
       const seen = new Map<string, bigint>();
       const step = await withTenant(
         db,
         chain.orgId,
-        (tx) => passStep(keys, chain, seeingSigned(readerFor(tx, chain.orgId, keys), seen), cursor, target, most),
+        (tx) => {
+          const reader = seeingSigned(readerFor(tx, chain.orgId, keys), seen);
+          const watching = watch === undefined ? reader : watchingPlaces(reader, watch.heads, watch.found);
+          return passStep(keys, chain, watching, cursor, target, most);
+        },
         JOB_LIMITS,
       );
       return walked(step, seen);
@@ -1889,9 +2000,9 @@ export function createAuditTrail({
     ): Promise<ReadonlyMap<string, HeadProbe>> {
       // Once each, in lower case, as the wall and the anchors name them.
       const byOrganisation = new Map<string, ProbeAsked>();
-      for (const { orgId, from } of chains) {
+      for (const { orgId, from, heldTo } of chains) {
         const id = chainOf(orgId).orgId;
-        byOrganisation.set(id, { orgId: id, from });
+        byOrganisation.set(id, { orgId: id, from, ...(heldTo === undefined ? {} : { heldTo }) });
       }
       const asked = [...byOrganisation.values()];
       const found = new Map<string, HeadProbe>();
@@ -1901,16 +2012,19 @@ export function createAuditTrail({
         while (next < asked.length && signal?.aborted !== true) {
           const page = asked.slice(next, next + PROBE_PAGE);
           next += PROBE_PAGE;
-          const reads = await readEachTenant(db, page, ({ orgId, from }) => edgesRead(orgId, from.seq), {
-            answeredWithinMs: JOB_ANSWER_WITHIN_MS,
-          });
+          const reads = await readEachTenant(
+            db,
+            page,
+            ({ orgId, from, heldTo }) => edgesRead(orgId, from.seq, heldTo),
+            { answeredWithinMs: JOB_ANSWER_WITHIN_MS },
+          );
           for (const { item, read } of reads) {
-            const { orgId, from } = item;
+            const { orgId, from, heldTo = [] } = item;
             found.set(
               orgId,
               'failed' in read
                 ? { kind: 'missed', error: read.failed }
-                : probeEdges(keys, chainOf(orgId), edgesOf(read.rows), from),
+                : heldToProbe(probeEdges(keys, chainOf(orgId), edgesOf(read.rows), from), heldTo, read.rows[0]),
             );
           }
         }
@@ -1921,19 +2035,35 @@ export function createAuditTrail({
 
     async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {
       await assertTenant(tx, orgId);
-      // An empty chain's anchor (seq 0, the genesis hash) is held by every chain grown from it: no event to compare.
       if (anchor.seq === 0n) return true;
+      const { rows } = await keepsAnchorRead(chainOf(orgId).orgId, anchor).execute(tx);
+      return keptIn(rows[0], anchor);
+    },
+
+    async keepsAnchorWithin(
+      tx: AuditTransaction,
+      orgId: string,
+      anchor: AnchorPoint,
+      from: CheckedPoint,
+      most = MOST_WALKED_WITHIN,
+    ) {
+      await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const { rows } = await sql<{ head_seq: bigint | null; anchored: Buffer | null }>`
-        select h.seq as head_seq,
-               (select e.hash from audit.events e where e.org_id = ${chain.orgId} and e.seq = ${anchor.seq}) as anchored
-        from (values (1)) as one (x)
-        left join audit.heads h on h.org_id = ${chain.orgId}
-      `.execute(tx);
-      const head = rows[0]?.head_seq ?? null;
-      const anchored = rows[0]?.anchored ?? null;
-      // No head, a head behind the anchor, or another event where the anchored one was: wound back.
-      return head !== null && head >= anchor.seq && anchored?.equals(anchor.hash) === true;
+      // The events past `from`, as many as the walk may take: one more would be past its reach, read no further.
+      const [kept, edges, events] = await sendTogether(tx, [
+        keepsAnchorRead(chain.orgId, anchor),
+        edgesRead(chain.orgId, from.seq),
+        eventsRead(chain.orgId, from.seq, from.seq + BigInt(most), most),
+      ]);
+      const read: ReadAhead[] = (events.rows as Readonly<Record<string, unknown>>[]).map((row) => ({
+        seq: typeof row.seq === 'bigint' ? row.seq : -1n,
+        entry: entryOfRow(keys, chain.orgId, row),
+      }));
+      const edgeRows = edges.rows as Readonly<Record<string, unknown>>[];
+      return {
+        kept: keptIn(kept.rows[0] as Parameters<typeof keptIn>[0], anchor),
+        walk: await walkWithin(keys, chain, edgesOf(edgeRows), read, from, most),
+      };
     },
 
     async latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState> {
@@ -1959,7 +2089,7 @@ export function createAuditTrail({
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       const watch = watchOf(chain);
-      const found = await gatheredWithHead(chain, reads, watch?.seen?.seq).execute(tx);
+      const found = await gatheredWithHead(chain, reads, watch?.heldTo).execute(tx);
       return gatheredAnswers(tx, chain, reads, found, watch);
     },
 
@@ -1973,7 +2103,7 @@ export function createAuditTrail({
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       const watch = watchOf(chain);
-      const query = gatheredWithHead(chain, reads, watch?.seen?.seq);
+      const query = gatheredWithHead(chain, reads, watch?.heldTo);
       const answered: readonly QueryResult<unknown>[] = await sendTogether(tx, [...before, query]);
       const gathered = answered.at(-1) as Awaited<ReturnType<typeof query.execute>>;
       return {
@@ -2015,7 +2145,7 @@ export function createAuditTrail({
               and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
           )`,
         LATER_EVENTS_READ + 1,
-        { each: asked, seenAt: watch?.seen?.seq },
+        { each: asked, heldTo: watch?.heldTo },
       );
       const [first] = rows;
       const cut = cutBack(tx, chain, watch, first);
@@ -2096,7 +2226,7 @@ export function createAuditTrail({
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       const watch = watchOf(chain);
-      const [row] = await eventsWithHead(tx, chain, which, 1, { seenAt: watch?.seen?.seq });
+      const [row] = await eventsWithHead(tx, chain, which, 1, { heldTo: watch?.heldTo });
       const cut = cutBack(tx, chain, watch, row);
       const past = row?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);
@@ -2114,7 +2244,7 @@ export function createAuditTrail({
       const watch = watchOf(chain);
       const rows = await eventsWithHead(tx, chain, pick.which, pick.limit, {
         newest: pick.newest,
-        seenAt: watch?.seen?.seq,
+        heldTo: watch?.heldTo,
       });
       const cut = cutBack(tx, chain, watch, rows[0]);
       return unlessCut(historyIn(chain, rows, rows[0], find.limit), cut);
@@ -2133,7 +2263,7 @@ export function createAuditTrail({
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       const watch = watchOf(chain);
-      const rows = await historiesWithHead(tx, chain, picks, watch?.seen?.seq);
+      const rows = await historiesWithHead(tx, chain, picks, watch?.heldTo);
       const cut = cutBack(tx, chain, watch, rows[0]);
       return finds.map((find, index) =>
         unlessCut(
@@ -2169,7 +2299,7 @@ export function createAuditTrail({
       );
       // One past the limit tells there is a next page; the rows come back in chain order.
       const watch = watchOf(chain);
-      const rows = await eventsWithHead(tx, chain, which, limit + 1, { newest: true, seenAt: watch?.seen?.seq });
+      const rows = await eventsWithHead(tx, chain, which, limit + 1, { newest: true, heldTo: watch?.heldTo });
       const [first] = rows;
       const cut = cutBack(tx, chain, watch, first);
       const past = first?.past_head;

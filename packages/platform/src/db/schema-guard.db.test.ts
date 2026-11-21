@@ -1264,14 +1264,16 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
   });
 
   /**
-   * Puts back the rights 0006 and 0009 give the app, whatever a case changed,
+   * Puts back the rights 0006, 0009 and 0115 (the write's head, TR-1) give the app, whatever a case changed,
    * and proves they are exactly theirs: both checkers only allow-list, so a
    * restore that gave back less would pass unseen.
    */
   afterEach(async () => {
     await owner.query('revoke all on idempotency.keys from agentx_app');
     await owner.query('grant select, insert, delete on idempotency.keys to agentx_app');
-    await owner.query('grant update (result_status, result_id) on idempotency.keys to agentx_app');
+    await owner.query(
+      'grant update (result_status, result_id, head_seq, head_hash, platform_head_seq, platform_head_hash, head_mac, head_mac_key_version) on idempotency.keys to agentx_app',
+    );
     expect(await keyRights()).toEqual(migrated);
   });
 
@@ -1337,7 +1339,13 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
     await owner.query('grant update (key) on idempotency.keys to agentx_app');
 
     expect(await liveSchemaProblems(app, { ...ROLES, authorityTables: [asAuthority] })).toEqual([
+      'agentx_app may UPDATE idempotency.keys\'s column "head_hash"',
+      'agentx_app may UPDATE idempotency.keys\'s column "head_mac"',
+      'agentx_app may UPDATE idempotency.keys\'s column "head_mac_key_version"',
+      'agentx_app may UPDATE idempotency.keys\'s column "head_seq"',
       'agentx_app may UPDATE idempotency.keys\'s column "key"',
+      'agentx_app may UPDATE idempotency.keys\'s column "platform_head_hash"',
+      'agentx_app may UPDATE idempotency.keys\'s column "platform_head_seq"',
       'agentx_app may UPDATE idempotency.keys\'s column "result_status"',
       'idempotency.keys is listed as both an authority table and a fill-in table',
     ]);

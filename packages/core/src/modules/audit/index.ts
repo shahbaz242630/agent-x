@@ -25,6 +25,9 @@ export { CHAIN_START, ChainBroken, type CheckedPoint, type StateDigest } from '@
 export { FORGET_MARGIN_MS as DIGEST_FORGET_MARGIN_MS } from '@agentx/platform/audit-chain';
 // The digest itself, for another module's tamper tests to hold its reads to one (sessions-tamper.db.test, AT13g).
 export { createDigestLog } from '@agentx/platform/audit-chain';
+// The witness log's refusal and maker (TR-1), for another module answering a `now` write unconfirmed (identity's
+// sessions-all-ended) and its tests.
+export { createWitnessLog, WitnessUnconfirmed } from '@agentx/platform/audit-chain';
 export {
   lockChainHead,
   REPAIR_ROLE,
@@ -102,6 +105,8 @@ export {
   SignedStateFailed,
   type SignedStates,
   type SignedStatusChange,
+  type AnchorKeptWithin,
+  type AnchorWithin,
   checkOf,
   judgeSignedRow,
   type StateCheck,
@@ -128,6 +133,31 @@ export {
 } from './infrastructure/newest-detail.ts';
 export type { AuditTables } from './infrastructure/tables.ts';
 export { type PageAsked, type PageShown, type VerifiedPage, verifiedPage } from './infrastructure/verified-page.ts';
+export { WITNESSED_SOON, witnessClassOf } from './infrastructure/witness-class.ts';
+export {
+  type ChainFrontier,
+  createChainFrontier,
+  type FrontierAnchors,
+  type FrontierStart,
+  judgeWitnessed,
+  MOST_WALKED_WITHIN,
+  type ReadAhead,
+  type WalkedWithin,
+  walkWithin,
+  type WithinWalk,
+  type WitnessJudgement,
+} from './infrastructure/chain-frontier.ts';
+export {
+  chainWitness,
+  headWrittenIn,
+  noteCommitted,
+  nowChainsOf,
+  waitWitnessed,
+  witnessedWrite,
+  witnessWith,
+  WriteCutBack,
+  wroteTo,
+} from './infrastructure/witnessing.ts';
 export {
   checkStatesWith,
   holdOrganisation,

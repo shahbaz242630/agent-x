@@ -14,7 +14,7 @@
 // first, so none are lost.
 import type { AgentsTables } from '@agentx/core/modules/agents';
 import type { OauthTables } from '@agentx/core/modules/oauth';
-import { type AuditTables, markHoldsWith, statesDigest } from '@agentx/core/modules/audit';
+import { type AuditTables, markHoldsWith, statesDigest, witnessWith } from '@agentx/core/modules/audit';
 import { type DirectoryTables, markOrgWorkNow } from '@agentx/core/modules/directory';
 import {
   createLoginFlows,
@@ -77,6 +77,7 @@ import { directoryNamesFrom } from './kept-names.ts';
 import { createJobWatch } from './job-watch.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { recordStart } from './start-record.ts';
+import { witnessOf } from './witness-store.ts';
 
 /** Every table the API reaches, module by module. */
 export type ApiTables = PlatformControlsTables &
@@ -355,6 +356,14 @@ export function leadershipOf({ config, logger, database }: Booted): Leadership |
 
 /** What both sides of the API use: none opens a connection or starts a timer as it is made. */
 export function sharedParts({ config, keys, logger, database }: Booted, leadership: Leadership | undefined) {
+  // Every chain write of this process noted to the witness log from here (TR-1), before anything serves or runs.
+  const witness = witnessOf(config, {
+    keys,
+    logger,
+    clock: systemClock,
+    leading: leadership && (() => leadership.leading()),
+  });
+  witnessWith(witness);
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock, keys });
   const directory = directoryNamesFrom(config, createOutboundFetch(config.outbound.allowedOrigins));
   const securityEvents = createSecurityEvents({
@@ -364,6 +373,7 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
     retentionDays: config.securityEvents.retentionDays,
   });
   return {
+    witness,
     flows: createLoginFlows({ clock: systemClock }),
     // Held to the signed states' digest once the jobs keep it (AT13c): a session put back after its signed end. A cut
     // platform chain answered in the database by every session ended, signed (AT13h).

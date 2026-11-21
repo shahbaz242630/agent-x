@@ -98,14 +98,26 @@
 // its waits bounded (HOLD_MARK_LIMITS): one that fails or waits too long is
 // rolled back alone, said (`org_work.hold_mark_skipped`), and the hold commits;
 // the hourly look marks it.
+//
+// Its answer waits for the witness log (TR-1, witnessing.ts): once its transaction has committed, for every `now` head
+// it wrote (the organisation's chain, the platform's) and any this process holds unconfirmed for the organisation, so
+// nothing a stop or an approval wrote is told it succeeded before its head is outside the database. With none waiting
+// (an agent's decision: `soon`, and nothing unconfirmed) it answers at once, no trip. Past the witness log's wait it
+// throws WitnessUnconfirmed (503: saved, not yet confirmed, retry): the change stands, the head stays queued, and every
+// later request here for the organisation waits for it too. The holds it found are still set first. Sent again under
+// its key, on any copy or after a restart, the answer from the stored result witnesses the chain's head as it stands
+// first (`answeredFromEarlier`), so no retry is told the change succeeded with no head of it outside the database; and
+// holds the chain to the head that write left (kept with its answer, migration 0115): one gone from the chain is the write cut
+// out, the alarm and the hold, and the request's answer 503 (WriteCutBack), never the stored one.
 import { ChainBroken, type StateDigest } from '@agentx/platform/audit-chain';
-import { inBoundedSavepoint, withTenant } from '@agentx/platform/db';
+import { answeredFromEarlier, inBoundedSavepoint, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import { createAuditTrail } from './audit-trail.ts';
+import { nowChainsOf, waitWitnessed, witnessReplayedWrite, WriteCutBack } from './witnessing.ts';
 import {
   holdNoLongerWaiting,
   holdStillWaiting,
@@ -633,6 +645,15 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   orgId: string,
   services: SignedStatesServices,
   work: (tx: Transaction<Tables>, states: SignedStates) => Promise<Result>,
+  {
+    witnessedByCaller,
+  }: {
+    /**
+     * Whether the caller waits for the transaction's `now` heads itself once it has `result` (TR-1 F.6: the hand-off's
+     * gate witnesses Tx A's head before the bank's call, a wait of its own, never two). Else they are waited for here.
+     */
+    readonly witnessedByCaller?: (result: Result) => boolean;
+  } = {},
 ): Promise<Result> {
   const { keys, ids, logger, correlationId } = services;
   const trail = createAuditTrail({ keys, ids, correlationId, digest: stateDigest });
@@ -645,21 +666,38 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     unrecorded: (id) => waitingOnAClearHold(id.toLowerCase()),
   });
   // Whether the work's transaction began: one refused outright (nested, a bad ID) found nothing, and tries nothing.
-  const opened = { began: false };
+  const opened: { began: boolean; tx?: object } = { began: false };
+  let result: Result;
   try {
-    return await withTenant(
+    result = await withTenant(
       db,
       orgId,
-      (tx) => {
+      async (tx) => {
         opened.began = true;
-        return work(tx, states);
+        opened.tx = tx;
+        const done = await work(tx, states);
+        // An answer from an earlier write's stored result (TR-1): that write's head may never have gone out (its answer
+        // was the 503 for that), so the chain is held to it, and the head as it stands goes out, before this answer.
+        const kept = answeredFromEarlier(tx);
+        if (kept !== undefined) await witnessReplayedWrite(tx, orgId, keys, kept);
+        return done;
       },
       { limited: true },
     );
   } catch (error) {
     // Named by the chain that refused: the work may record on the platform's
     // too (an operator action records on both, ADR-006 §6).
-    if (error instanceof ChainBroken && error.chain.kind === 'platform') {
+    if (error instanceof WriteCutBack) {
+      // The write this replay repeats cut out of the chain (TR-1): the alarm, and the hold once the transaction ends.
+      const own = orgId.toLowerCase();
+      logger.child({ orgId: own }).error('audit.integrity_failed', {
+        chain: error.chain,
+        check: 'witness',
+        reason: 'cut_back',
+        ...(error.seq === undefined ? { record: error.record ?? 'forged' } : { seq: error.seq.toString() }),
+      });
+      found.push({ orgId: own, subjectType: CHAIN_SUBJECT, objectId: own, sign: 'chain', chainFailure: 'cut_back' });
+    } else if (error instanceof ChainBroken && error.chain.kind === 'platform') {
       logger.error('audit.integrity_failed', { chain: 'platform', check: 'record' });
     } else if (error instanceof ChainBroken) {
       logger
@@ -674,4 +712,10 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     if (opened.began && waiting !== undefined && !due.has(own) && !recording.has(own)) due.set(own, waiting);
     for (const [held, one] of due) await setHold(db, held, one, services);
   }
+  // Committed: its `now` heads, and any held unconfirmed here for the organisation, outside the database first (TR-1).
+  if (witnessedByCaller?.(result) === true) return result;
+  const written = opened.tx === undefined ? [] : nowChainsOf(opened.tx);
+  const platform = written.filter(({ kind }) => kind === 'platform');
+  await waitWitnessed([{ kind: 'organisation', orgId: orgId.toLowerCase() }, ...platform]);
+  return result;
 }

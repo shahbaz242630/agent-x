@@ -82,6 +82,16 @@
 // (Phase 4 C2b, partner decision 34a): the setting and the address are read
 // as it is sent, after this, never here, out of the lock order.
 //
+// TR-1 F (the witness log, witness-log.ts): Tx A walks the organisation's chain
+// from the path frontier (chain-frontier.ts) to the head it locked, on the
+// anchor's own trip, and the platform chain from its frontier on the pause's;
+// every head a copy witnessed must be on those paths, or the chain was cut back
+// below it (alarm, hold). A witness view older than WITNESS_FRESH_MS, or a log
+// past its memory, waits (`witness_pending`). Once Tx A commits, the gate
+// (handoff-witness-gate.ts) witnesses its head and reads every copy's again
+// before the partner is called: on any doubt nothing is sent, the payment left
+// SUBMISSION_PENDING for the bank check (never resent).
+//
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next. The platform pause is read once a
 // run first: while it holds every hand-off, no request is read (gate H5; Tx A
@@ -89,7 +99,10 @@
 // reason, not every run; the sweep takes every page of those past their wait.
 import {
   type AuditTables,
+  type ChainFrontier,
   createAuditTrail,
+  headWrittenIn,
+  MOST_WALKED_WITHIN,
   type SignedStates,
   type SignedStatesServices,
   withSignedStates,
@@ -136,13 +149,14 @@ import {
 } from '@agentx/core/modules/outcomes';
 import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { AnchorStore, Chain, StateDigest } from '@agentx/platform/audit-chain';
+import type { AnchorStore, Chain, StateDigest, WitnessLog } from '@agentx/platform/audit-chain';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { finishedWithinStop } from './background.ts';
 import { createFairLanes, createGate, type Gate, isOrganisationWide, type LaneStep } from './fair-lanes.ts';
+import { createHandoffWitnessGate, type HandoffWitnessGate, type Walked, walkedOf } from './handoff-witness-gate.ts';
 import { alertAdmins } from './payment-alerts.ts';
 import type { RailEntry, RailHealth, RailHold } from './rail-health.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
@@ -164,6 +178,12 @@ export const UNKNOWN_AFTER_MS = 10 * 60_000;
 
 /** How old the hand-off's heartbeat may grow before /health says it has stopped (ADR-013): many runs' worth. */
 export const HEARTBEAT_STALE_MS = 5 * 60_000;
+
+/**
+ * How old the witness log's last whole read may be when Tx A begins its checks (TR-1 F.2): the jobs copy reads it every
+ * 10 s, so older is a store that isn't answering, and a stop another copy wrote may be unread here.
+ */
+const WITNESS_FRESH_MS = 30_000;
 
 /** How often a run sweeps for transactions left waiting: often enough for UNKNOWN_AFTER_MS, few database calls. */
 const SWEEP_EVERY_MS = 60_000;
@@ -245,7 +265,18 @@ type HandoffTx = DatabaseTransaction<HandoffTables>;
 
 /** What Tx A came to: the intent handed off with its transaction's ID; or left as it is, and why. */
 type TxA =
-  | { readonly outcome: 'handed_off'; readonly intent: ApprovedPaymentIntent; readonly transactionId: string }
+  | {
+      readonly outcome: 'handed_off';
+      readonly intent: ApprovedPaymentIntent;
+      readonly transactionId: string;
+      /**
+       * Where the witness log is kept: each chain's walk from its frontier (TR-1 F.3, F.4), and once committed, its head
+       * (`H_A`, F.5), for the gate after its commit.
+       */
+      readonly org?: Walked | undefined;
+      readonly platform?: Walked | undefined;
+      readonly head?: { readonly seq: bigint; readonly hash: Buffer } | undefined;
+    }
   | { readonly outcome: 'denied'; readonly causes: string }
   | { readonly outcome: 'waiting'; readonly why: string }
   | { readonly outcome: 'not_approved' };
@@ -354,6 +385,7 @@ export function createHandoff({
   anchoring,
   unfinished,
   waitsAsAWhole,
+  witnessing,
 }: {
   /** The organisations to hand off in: those marked (org-work.ts), which job-list.ts passes; read only while not held. */
   readonly list: () => Promise<readonly string[]>;
@@ -409,13 +441,44 @@ export function createHandoff({
      */
     readonly digest?: Pick<StateDigest, 'covers' | 'latest'>;
   };
+  /**
+   * The witness log and the path frontier (TR-1 F), where this process keeps them, with `anchoring`: Tx A held to
+   * every head a copy witnessed, and the gate before every partner call. None (some tests), and neither is.
+   */
+  readonly witnessing?: {
+    readonly witness: Pick<
+      WitnessLog,
+      'now' | 'settled' | 'refreshWhole' | 'pending' | 'beyondMemory' | 'freshAt' | 'writesSound'
+    >;
+    readonly frontier: ChainFrontier;
+    /** The gate (handoff-witness-gate.ts) unless a test gives its own. */
+    readonly gate?: HandoffWitnessGate;
+    /** The most events a walk within Tx A or the gate re-hashes (MOST_WALKED_WITHIN unless a test names fewer). */
+    readonly mostWalked?: number;
+  };
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
   if (unknownAfterMs <= callTimeoutMs) {
     throw new RangeError("A transaction's wait for its answer must be longer than the partner's call may take");
   }
+  // Refused at start (TR-1 F): the walks the gate holds a call to go from the anchors, so a witness log needs them.
+  if (witnessing !== undefined && anchoring === undefined) {
+    throw new RangeError('The witness log holds hand-offs only with the anchors to walk from');
+  }
   const anchorGate = createGate(ANCHOR_GATE);
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
+  const gate =
+    witnessing === undefined
+      ? undefined
+      : (witnessing.gate ??
+        createHandoffWitnessGate({
+          witness: witnessing.witness,
+          database,
+          keys,
+          ids,
+          most: witnessing.mostWalked ?? MOST_WALKED_WITHIN,
+        }));
+  const mostWalked = witnessing?.mostWalked ?? MOST_WALKED_WITHIN;
   // Its first beat is its start, so /health gives a new process HEARTBEAT_STALE_MS to make its first run; after that
   // only a run that reads its organisations beats, so one failing every time reads as stopped.
   let beat = clock.now().getTime();
@@ -544,25 +607,81 @@ export function createHandoff({
    * digest that can't stand for the chain (AT13): the reads above were held to
    * what it knows, and a money move never goes on less than the whole of it.
    */
-  const chainStops = async (tx: HandoffTx, states: SignedStates, orgId: string): Promise<string | undefined> => {
+  const chainStops = async (
+    tx: HandoffTx,
+    states: SignedStates,
+    orgId: string,
+  ): Promise<string | Walked | undefined> => {
+    const chain = { kind: 'organisation', orgId } as const;
+    // TR-1 F.2: a witness view gone stale, or a log past its memory, may miss a stop another copy wrote.
+    if (witnessing !== undefined && !witnessFresh(witnessing.witness, chain)) return 'witness_pending';
     const hold = await states.integrityHold(tx, orgId, 'head');
     if (hold.outcome !== 'clear') return `hold_${hold.outcome}`;
     if (anchoring === undefined) return undefined;
-    const chain = { kind: 'organisation', orgId } as const;
     const anchor = anchoring.anchors.latest(chain);
     if (anchor === undefined) return 'anchor_pending';
     if (anchoring.digest?.covers(chain, anchor.seq) === false) return 'digest_pending';
     // The pause was read held to the digest: so its chain is covered too, where it is anchored (AT13c).
     const platform = anchoring.anchors.latest(PLATFORM);
     if (platform !== undefined && anchoring.digest?.covers(PLATFORM, platform.seq) === false) return 'digest_pending';
-    return (await states.anchorKept(tx, orgId, anchor)).outcome === 'kept' ? undefined : 'hold_tampered';
+    if (witnessing === undefined) {
+      return (await states.anchorKept(tx, orgId, anchor)).outcome === 'kept' ? undefined : 'hold_tampered';
+    }
+    // TR-1 F.3: the walk from the frontier to the head just locked, on the anchor's trip, held to every head witnessed
+    // (asked first, so each was committed before it).
+    const start = witnessing.frontier.startOf(chain);
+    if (start === undefined) return 'anchor_pending';
+    const witnessed = witnessing.witness.pending(chain);
+    const kept = await states.anchorKeptWithin(tx, orgId, anchor, { start, witnessed, most: mostWalked });
+    if (kept.outcome === 'tampered') return 'hold_tampered';
+    if (kept.outcome === 'unverified') return 'chain_unverified';
+    // Committed or not, the head locked was: F rises to it now.
+    witnessing.frontier.raise(chain, start, kept.walk);
+    return { start, walk: kept.walk };
+  };
+
+  /** Whether the witness log's view is fresh enough to hold Tx A to, holds every head it read, and its writes go out. */
+  const witnessFresh = (witness: NonNullable<typeof witnessing>['witness'], chain: Chain): boolean => {
+    const fresh = witness.freshAt();
+    if (fresh === undefined || clock.now().getTime() - fresh.getTime() > WITNESS_FRESH_MS) return false;
+    // Heads not going out (plan §1.4 #2): a Tx A now would commit and be held at the gate, SUBMISSION_PENDING. It waits.
+    return witness.writesSound() && !witness.beyondMemory(chain) && !witness.beyondMemory(PLATFORM);
+  };
+
+  /** The platform chain's walk within the pause's read (TR-1 F.4): from its frontier, held to its witnessed heads. */
+  const pauseWithin = () => {
+    if (witnessing === undefined) return undefined;
+    const start = witnessing.frontier.startOf(PLATFORM);
+    return start === undefined
+      ? null
+      : { within: { start, witnessed: witnessing.witness.pending(PLATFORM), most: mostWalked }, ...witnessing };
+  };
+
+  /**
+   * The platform pause, the first lock of Tx A (level 1), and where the witness log is kept, the platform chain walked
+   * from its frontier (TR-1 F.4): running, with that walk; else why the request waits.
+   */
+  const pauseRead = async (tx: HandoffTx, log: Logger): Promise<string | { readonly platform: Walked | undefined }> => {
+    const asked = pauseWithin();
+    // No platform anchor yet to walk from: waits, as an organisation with none does.
+    if (asked === null) return 'anchor_pending';
+    const pause = await handoffPauseOf(tx, 'share', {
+      keys,
+      logger: log,
+      digest: anchoring?.digest,
+      ...(asked === undefined ? {} : { within: asked.within }),
+    });
+    if (pause.outcome !== 'running') return `pause_${pause.outcome}`;
+    // The platform head it walked to was committed: F_p rises to it now, so the next Tx A walks only what came since.
+    asked?.frontier.raise(PLATFORM, asked.within.start, pause.walk);
+    return { platform: walkedOf(asked?.within.start, pause.walk) };
   };
 
   /** Tx A's checks and moves for one request, in the lock order above. */
   const judgedA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
     const key = { orgId, id };
-    const pause = await handoffPauseOf(tx, 'share', { keys, logger: log, digest: anchoring?.digest });
-    if (pause.outcome !== 'running') return { outcome: 'waiting', why: `pause_${pause.outcome}` };
+    const pause = await pauseRead(tx, log);
+    if (typeof pause === 'string') return { outcome: 'waiting', why: pause };
     const now = clock.now();
     const { named, authority, source, supplier, agentKey, approvedAt } = await authorityOf(tx, states, key, now);
     if (agentKey.outcome !== 'found') throw new Error(`A request's agent key can't be believed: ${id}`);
@@ -602,7 +721,7 @@ export function createHandoff({
       return { outcome: 'denied', causes: 'SUPPLIER_CHANGED' };
     }
     const stopped = await chainStops(tx, states, orgId);
-    if (stopped !== undefined) return { outcome: 'waiting', why: stopped };
+    if (typeof stopped === 'string') return { outcome: 'waiting', why: stopped };
     if (request.status === 'APPROVED') await moveRequest(tx, states, key, 'make_ready');
     await moveRequest(tx, states, key, 'hand_off');
     const intent: ApprovedPaymentIntent = {
@@ -645,7 +764,7 @@ export function createHandoff({
       { orgId, id: transactionId, instructionId: intent.instructionId, createdAt: now },
       { actor: ACTOR, details: {} },
     );
-    return { outcome: 'handed_off', intent, transactionId };
+    return { outcome: 'handed_off', intent, transactionId, org: stopped, platform: pause.platform };
   };
 
   /**
@@ -809,10 +928,23 @@ export function createHandoff({
       return { outcome: 'stopped' };
     }
     try {
-      const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
-        txA(tx, states, orgId, id, log),
+      // The transaction once it begins: nothing written in this placeholder, so no head read from it.
+      const opened: { tx: object } = { tx: {} };
+      const done = await withSignedStates(
+        database,
+        orgId,
+        services(log),
+        (tx, states) => {
+          opened.tx = tx;
+          return txA(tx, states, orgId, id, log);
+        },
+        // A hand-off's head is witnessed by the gate before the bank's call (TR-1 F.6): one wait, its own.
+        { witnessedByCaller: (result) => gate !== undefined && result.outcome === 'handed_off' },
       );
-      if (done.outcome === 'handed_off') return { ...done, settle };
+      if (done.outcome === 'handed_off') {
+        const head = headWrittenIn(opened.tx, { kind: 'organisation', orgId });
+        return { ...done, head, settle };
+      }
       settle('not_sent');
       return done;
     } catch (error) {
@@ -861,13 +993,31 @@ export function createHandoff({
     return whole ? 'end_turn' : 'next';
   };
 
+  /**
+   * Whether the gate lets the payment go (TR-1 F.6): with no witness log there is no gate. One held is never sent:
+   * SUBMISSION_PENDING, for the bank check. A Tx A that didn't walk both chains is the gate's doubt (`not_walked`).
+   */
+  const gateLetsGo = (
+    orgId: string,
+    id: string,
+    { org, platform, head }: Extract<Cleared, { outcome: 'handed_off' }>,
+    log: Logger,
+  ): Promise<boolean> =>
+    gate === undefined ? Promise.resolve(true) : gate.clear({ orgId, requestId: id, head, org, platform }, log);
+
   /** Tx A committed, known by this run: the partner called (ADR-007 §8), and Tx B records what it answered. */
   const sent = async (
     orgId: string,
     id: string,
-    { intent, transactionId, settle }: Extract<Cleared, { outcome: 'handed_off' }>,
+    cleared: Extract<Cleared, { outcome: 'handed_off' }>,
     log: Logger,
   ): Promise<void> => {
+    const { intent, transactionId, settle } = cleared;
+    // First of all (TR-1 F.6): no partner call on any doubt.
+    if (!(await gateLetsGo(orgId, id, cleared, log))) {
+      settle('not_sent');
+      return;
+    }
     const answer = await answerOf(intent, id, log);
     // Before Tx B, the moment it is known, so no new Tx A can start between an outage's answers.
     const word = breakerWordOf(answer, intent);

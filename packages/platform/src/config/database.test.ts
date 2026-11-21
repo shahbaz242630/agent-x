@@ -39,6 +39,12 @@ const APP: Env = {
   AGENTX_DB_HOST: 'db.internal.example',
   AGENTX_DB_PASSWORD: APP_LOGIN,
   AGENTX_KEYS_DIR: '/mnt/secrets',
+  // Every copy witnesses its chain heads in production (TR-1): the witness log's stores, on Azure's identity.
+  AGENTX_AUDIT_WITNESS_URL: 'https://stagentxevprd01.blob.core.windows.net/audit-witness',
+  AGENTX_AUDIT_WITNESS_CLIENT_ID: '1f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+  AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: 'https://stagentxevprd01.blob.core.windows.net/audit-witness-snapshots',
+  IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+  IDENTITY_HEADER: 'identity header for these tests',
 };
 const LOCAL_APP: Env = {
   AGENTX_ENV: 'development',
