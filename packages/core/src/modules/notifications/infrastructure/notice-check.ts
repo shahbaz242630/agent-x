@@ -122,8 +122,8 @@ interface Carried {
 
 /**
  * Whether the notice is to whom and of what its record says (S206 V4 review): its record is the chain's, its seal the
- * outbox's, and a notice from before seals sealed at a start (notice-legacy.ts) would hold a seal over a row changed
- * first; the record can't be.
+ * outbox's, and a notice from before seals sealed at a start (the S206 pass, deleted S208) would hold a seal over a
+ * row changed first; the record can't be.
  */
 function asRecorded(recorded: string, row: NoticeRow): boolean {
   let said: unknown;
