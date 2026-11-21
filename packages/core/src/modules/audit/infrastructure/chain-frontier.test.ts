@@ -166,6 +166,24 @@ describe('TR-1 F.1 the walk within a transaction and the path frontier', () => {
     ).toEqual({ kind: 'cut', seq: 2n });
   });
 
+  it('walks past one read’s batch (500 events), each event once', async () => {
+    const chain = await new Sealed().grow(620);
+    expect(walked(await chain.walk(CHAIN_START)).head.seq).toBe(620n);
+    expect(walked(await chain.walk(chain.point(90n))).path.size).toBe(530);
+  });
+
+  it('a head at F itself is judged by F’s own hash, never left to the walk past it', async () => {
+    const chain = await new Sealed().grow(8);
+    const start = {
+      ...startAt(chain.point(2n)),
+      from: chain.point(5n),
+      hashes: Buffer.concat([3n, 4n].map((seq) => chain.point(seq).hash)),
+    };
+    const walk = walked(await chain.walk(start.from));
+    expect(judgeWitnessed([chain.witnessed(5n)], start, walk, 'cut')).toEqual({ kind: 'held' });
+    expect(judgeWitnessed([chain.witnessed(4n), chain.witnessed(3n)], start, walk, 'cut')).toEqual({ kind: 'held' });
+  });
+
   it('more than the walk may take is too far, never a walk short of the head', async () => {
     const chain = await new Sealed().grow(6);
     expect(await chain.walk(chain.point(2n), 3)).toEqual({ kind: 'too_far' });
@@ -199,6 +217,19 @@ describe('TR-1 F.1 the walk within a transaction and the path frontier', () => {
       kind: 'cut',
       seq: 6n,
     });
+    // A stretch of exactly what it keeps (6 events, 3 to 9) is kept whole below a later anchor.
+    if (second === undefined) throw new Error('raised');
+    const exact = createChainFrontier({
+      anchors: { latest: () => latest.anchor, rebasedAfter: () => false },
+      now: () => AT,
+      mostKept: 6,
+    });
+    latest.anchor = chain.point(3n);
+    const exactStart = exact.startOf(CHAIN);
+    if (exactStart === undefined) throw new Error('anchored');
+    exact.raise(CHAIN, exactStart, walked(await (await chain.cutTo(9n)).walk(exactStart.from)));
+    latest.anchor = chain.point(5n);
+    expect(exact.startOf(CHAIN)?.base.seq).toBe(3n);
     // A later anchor on the stretch, the stretch past what it keeps: trimmed to the anchor, F kept.
     latest.anchor = chain.point(8n);
     const trimmed = frontier.startOf(CHAIN);
