@@ -1168,6 +1168,9 @@ export function createDigestLog({
         const snapshot = await readSnapshot(store);
         if (snapshot !== undefined) lastSnapshotAt = snapshot;
         await readDeltas(store, snapshot === undefined ? undefined : snapshot - LAG_MS);
+        // Read whole from the snapshot on: the next read looks back from there even where no delta came after it, never
+        // the whole epoch's deltas again.
+        if (snapshot !== undefined) deltasFrom = Math.max(deltasFrom ?? snapshot, snapshot);
         state = 'read';
       }
       // Names older than any later look back reaches need no remembering.

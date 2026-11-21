@@ -809,6 +809,75 @@ describe('the digest in a process that loses the lease (AT13, TR-1 A)', () => {
     expect(fromSnapshot.latest(OTHER, 'agent_key', KEY)).toBe(5n);
   });
 
+  it('its own deltas never move its look back: leading again past the lag, a read still takes in what another wrote', async () => {
+    const leads = { now: true };
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const log = createDigestLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(),
+      now: time.now,
+      epoch: 1,
+      writes: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await log.flush();
+    await log.read();
+
+    // It follows; another copy writes a delta, this one's reads failing.
+    leads.now = false;
+    time.held.at += MINUTE;
+    const { log: leader } = digestOn(fake, { time });
+    await leader.read();
+    leader.record(OTHER, seen(['agent_key', KEY, 5n]), time.now());
+    await leader.flush();
+    fake.instead.list = () => Promise.reject(new Error('the store is away'));
+    await log.read();
+    delete fake.instead.list;
+
+    // Leading again ten minutes on, past the lag: its own delta first, then a read.
+    time.held.at += 10 * MINUTE;
+    leads.now = true;
+    log.record(CHAIN, seen(['agent', AGENT, 12n]), time.now(), stretch(10n, 12n));
+    await log.flush();
+    await log.read();
+    expect(log.latest(OTHER, 'agent_key', KEY)).toBe(5n);
+  });
+
+  it('a start that finds no delta after its snapshot looks back from the snapshot, never the whole epoch again', async () => {
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const { log: before } = digestOn(fake, { time });
+    await before.read();
+    before.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await before.flush();
+    const old = namesUnder(fake.files, 'deltas');
+    time.held.at += 2 * HOUR;
+    before.record(CHAIN, seen(['agent', AGENT, 12n]), time.now(), stretch(10n, 12n));
+    await before.flush();
+    // The delta beside the newer snapshot gone from the listing: quiet hours, nothing written since the snapshot.
+    for (const name of namesUnder(fake.files, 'deltas')) if (!old.includes(name)) fake.files.delete(name);
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(2);
+
+    const fetched: string[] = [];
+    fake.instead.getAtMost = (name, most) => {
+      fetched.push(name);
+      return fake.real.getAtMost(name, most);
+    };
+    time.held.at += MINUTE;
+    const { log } = digestOn(fake, { time });
+    await log.read();
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBe(12n);
+    log.record(OTHER, seen(['agent', AGENT, 4n]), time.now());
+    await log.flush();
+    await log.read();
+    expect(fetched.filter((name) => old.includes(name))).toEqual([]);
+  });
+
   it('a read begun while it followed and ended once it leads stands for no snapshot; the next one does', async () => {
     const leads = { now: true };
     const fake = createFakeWriteOnceStore();
