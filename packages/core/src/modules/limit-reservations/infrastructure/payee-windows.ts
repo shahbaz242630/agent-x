@@ -388,7 +388,10 @@ interface ReservedInHour {
   readonly currency: string;
   readonly hour: number;
   readonly amount: bigint;
-  /** Decided since GM-1b (its decision seals `payeeWindows`): counted in every row of its payee; else its supplier's alone. */
+  /**
+   * Its decision sealed `payeeWindows`, or (decided before GM-1b) the windows' cutover named its windows: counted in
+   * every row of its payee; else in its supplier's alone.
+   */
   readonly windowed: boolean;
 }
 
@@ -397,7 +400,8 @@ interface ReservedInHour {
  * were reserved in, from `fromHour` on, in one statement: those of the suppliers or keys named, or every one. Unsealed:
  * only ever compared with the signed windows (the holdings check, the cutover), never weighed. A reservation whose
  * decision sealed no month (decided before E1) is left out, as no window counts it; one whose decision sealed no
- * windows (decided before GM-1b) is counted in its supplier's row alone, as the cutover opened it.
+ * windows (decided before GM-1b) is counted in its supplier's row alone, as the cutover opened it, unless the
+ * windows' cutover named its windows.
  */
 async function reservedByHour(
   tx: WindowsTransaction,
@@ -467,7 +471,10 @@ export function addToWindows(
   }
 }
 
-/** The windows the reservations would fill: a windowed one in every row of its payee, one before in its supplier's. */
+/**
+ * The windows the reservations would fill: a windowed one (sealed, or named by the windows' cutover) in every row of
+ * its payee, one before GM-1b and never named in its supplier's alone.
+ */
 function windowsOfReserved(orgId: string, reserved: readonly ReservedInHour[]): WindowsHeld {
   const windows: WindowsHeld = new Map();
   for (const { supplierId, payeeKey, currency, hour, amount, windowed } of reserved) {

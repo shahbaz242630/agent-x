@@ -641,8 +641,8 @@ interface HeldIn {
 /**
  * Where each request's capacity is held, by its verified state and its decision as sealed (one statement). One whose
  * decision sealed no month (decided before E1) has none: no month total or window counts it (the cutovers' rule
- * alike). Its windows are those its decision sealed; one decided before GM-1b sealed none, and is counted in its
- * supplier's window alone, as the windows' cutover opened it (windowsHeldOf).
+ * alike). Its windows are those its decision sealed; one decided before GM-1b sealed none, and is counted in those
+ * the windows' cutover named for it, else in its supplier's window alone, as that cutover opened it (windowsHeldOf).
  */
 async function heldInOf(
   tx: EndingsTransaction,
@@ -666,7 +666,8 @@ async function heldInOf(
 
 /**
  * The windows a request's capacity is in, each with its sealed hour and amount (GM-1b): those its decision sealed,
- * or, decided before GM-1b, its supplier's alone (the windows' cutover counts it there, by its signed supplier).
+ * or, decided before GM-1b, those the windows' cutover named for it (read with its decision), else its supplier's
+ * alone (the windows' cutover counts it there, by its signed supplier).
  */
 export function windowsHeldOf(
   orgId: string,

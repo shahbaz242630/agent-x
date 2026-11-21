@@ -879,6 +879,7 @@ describe('an organisation made before GM-1b, until its cutover', () => {
     w: World,
     requestIds: readonly string[],
     windows: 'delete windows' | 'keep windows' = 'delete windows',
+    sealedPayee: 'payee sealed' | 'before E1b' = 'payee sealed',
   ) => {
     for (const id of requestIds) {
       const sealed = (await eventsAbout(w.org, id, SPEND_REQUESTS.subject)).findLast(
@@ -897,6 +898,8 @@ describe('an organisation made before GM-1b, until its cutover', () => {
           'approvalWaitHours',
         ]
           .filter((name) => Object.hasOwn(details, name))
+          // A decision before E1b sealed no payee.
+          .filter((name) => sealedPayee === 'payee sealed' || !name.startsWith('payeeSeal'))
           .map((name) => [name, details[name]]),
       ) as AuditDetails;
       await withSignedStates(app, w.org, quiet(), (tx) =>
@@ -1023,6 +1026,50 @@ describe('an organisation made before GM-1b, until its cutover', () => {
     expect(lines('payee_windows.cut_over')).toEqual([expect.objectContaining({ opened: 1 })]);
     expect(await heldIn(w, { supplierId: null, payeeKey: 'payee-1', currency: 'AED' })).toBe('none');
     expect(await heldIn(w, { supplierId: null, payeeKey: 'payee-9', currency: 'AED' })).toBe('none');
+    // The key changed past the app is alarmed by the holdings check: its reservation's key isn't the one sealed.
+    expect(lines('holdings_check.passed').at(-1)).toMatchObject({ mismatched: 1 });
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({
+        subjectType: SPEND_REQUESTS.subject,
+        objectId: held.id.toLowerCase(),
+        reason: 'holding',
+      }),
+    );
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it("keeps a request decided before E1b (no payee sealed) in its supplier's window alone, its reservation's key never believed", async () => {
+    const { w, acting } = await ready({ madeBeforePayeeWindows: true });
+    const supplierId = supplierOf_(w);
+    await payeeKeyOf(w, supplierId, 'payee-1');
+    await cutOverByHand(w);
+    const held = await decided(acting, w, ORDER, supplierId);
+    await asBeforeGm1b(w, [held.id], 'delete windows', 'before E1b');
+
+    await visit(w);
+    expect(lines('payee_windows.cut_over')).toEqual([expect.objectContaining({ opened: 1 })]);
+    expect(await heldIn(w, supplierKey(supplierId))).toBe(ORDER);
+    expect(await heldIn(w, { supplierId: null, payeeKey: 'payee-1', currency: 'AED' })).toBe('none');
+  });
+
+  it("keeps one whose reservation names another supplier in its own supplier's window alone, though its key holds to the seal", async () => {
+    const { w, acting } = await ready({ madeBeforePayeeWindows: true });
+    const [first, second] = [supplierOf_(w), supplierOf_(w, 1)];
+    await payeeKeyOf(w, first, 'payee-1');
+    await cutOverByHand(w);
+    const held = await decided(acting, w, ORDER, first);
+    await asBeforeGm1b(w, [held.id]);
+    // Moved to the other supplier past the app: the seal binds the key alone, the request names its own supplier.
+    await asOwner(w, (owner) =>
+      owner.query('update limit_reservations.reservations set supplier_id = $1 where request_id = $2', [
+        second,
+        held.id,
+      ]),
+    );
+
+    await visit(w);
+    expect(await heldIn(w, supplierKey(first))).toBe(ORDER);
+    expect(await heldIn(w, { supplierId: null, payeeKey: 'payee-1', currency: 'AED' })).toBe('none');
   });
 
   it('opens from the signed requests even where the owner cut the reservations, the mismatch alarmed', async () => {
