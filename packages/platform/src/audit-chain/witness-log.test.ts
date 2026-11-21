@@ -1,5 +1,5 @@
 import { createFakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
@@ -288,16 +288,25 @@ describe('the witness log: reading', () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
     const at = START.getTime();
-    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 1n, 1)], { at: at - 3 * HOUR });
-    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 2n, 1)], { at: at - HOUR });
+    // Each line dated when its file was named, as every writer dates them.
+    const plant = (into: Map<string, Buffer>, folder: string, kind: FileKind, seq: bigint, fileAt: number) =>
+      planted(into, folder, kind, [line(`organisation:${ORG}`, seq, 1, new Date(fileAt))], { at: fileAt });
+    await plant(snapshots.files, 'snapshots', SNAPSHOT, 1n, at - 3 * HOUR);
+    await plant(snapshots.files, 'snapshots', SNAPSHOT, 2n, at - HOUR);
     // A spoiled newer one is passed over, said.
-    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 3n, 1)], {
-      at: at - 30 * MINUTE,
-      signing: otherKeys,
-    });
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 10n, 1)], { at: at - HOUR - 10 * MINUTE });
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 11n, 1)], { at: at - HOUR - 2 * MINUTE });
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 12n, 1)], { at: at - MINUTE });
+    await planted(
+      snapshots.files,
+      'snapshots',
+      SNAPSHOT,
+      [line(`organisation:${ORG}`, 3n, 1, new Date(at - 30 * MINUTE))],
+      {
+        at: at - 30 * MINUTE,
+        signing: otherKeys,
+      },
+    );
+    await plant(store.files, 'heads', HEADS, 10n, at - HOUR - 10 * MINUTE);
+    await plant(store.files, 'heads', HEADS, 11n, at - HOUR - 2 * MINUTE);
+    await plant(store.files, 'heads', HEADS, 12n, at - MINUTE);
     const { log, capture } = witnessOn(store, { snapshots });
     expect(log.state()).toBe('unread');
     await log.refresh();
@@ -305,7 +314,7 @@ describe('the witness log: reading', () => {
     expect(seqs(log.pending(CHAIN))).toEqual([12n, 11n, 2n]);
     expect(integrity(capture)).toHaveLength(1);
     // A later refresh lists only what is newer than it read, less the lag: a file landing late within it is read.
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 13n, 1)], { at: at - 2 * MINUTE });
+    await plant(store.files, 'heads', HEADS, 13n, at - 2 * MINUTE);
     await log.refresh();
     expect(seqs(log.pending(CHAIN))).toEqual([13n, 12n, 11n, 2n]);
   });
@@ -313,8 +322,14 @@ describe('the witness log: reading', () => {
   it('with no sound snapshot, a start reads a day of heads files back', async () => {
     const store = createFakeWriteOnceStore();
     const at = START.getTime();
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 1n, 1)], { at: at - 25 * HOUR });
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 2n, 1)], { at: at - 23 * HOUR });
+    for (const [seq, fileAt] of [
+      [1n, at - 25 * HOUR],
+      [2n, at - 23 * HOUR],
+    ] as const) {
+      await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, seq, 1, new Date(fileAt))], {
+        at: fileAt,
+      });
+    }
     const { log } = witnessOn(store, { withSnapshots: false });
     await log.refresh();
     expect(seqs(log.pending(CHAIN))).toEqual([2n]);
@@ -608,5 +623,131 @@ describe('the witness log: memory and snapshots', () => {
     await fresh.log.refresh();
     expect(seqs(fresh.log.pending(CHAIN))).toEqual([5n]);
     expect(seqs(fresh.log.pending(OTHER))).toEqual([2n]);
+  });
+});
+
+describe('TR-3 the witness log: dates, memory, Puts and replays', () => {
+  it('a line dated past its file’s name beyond the clocks’ spread spoils the file; one within it counts, dated at the name, so a rebase after sets it aside', async () => {
+    const store = createFakeWriteOnceStore();
+    const fileAt = START.getTime() - MINUTE;
+    const far = new Date('2099-01-01T00:00:00Z');
+    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 7n, 1, far)], { at: fileAt });
+    // Control: past its name by less than the spread.
+    const near = new Date(fileAt + 4 * MINUTE);
+    await planted(store.files, 'heads', HEADS, [line(`organisation:${OTHER_ORG}`, 7n, 1, near)], { at: fileAt - 1 });
+    const { log, capture } = witnessOn(store);
+    await log.refresh();
+    expect(log.pending(CHAIN)).toEqual([]);
+    expect(integrity(capture).map(({ reason }) => reason)).toEqual(['spoiled']);
+    expect(log.pending(OTHER).map(({ seq, at }) => [seq, at])).toEqual([[7n, fileAt - 1]]);
+    log.useAnchors(anchorsWith(new Map([[OTHER_ORG, new Date(fileAt)]])));
+    expect(log.pending(OTHER)).toEqual([]);
+  });
+
+  it('gives way from the organisation chain holding most, never the platform’s while one is held, its lowest above the anchor first', () => {
+    const { log } = witnessOn(undefined, { mostBytes: 4 * WITNESS_HEAD_BYTES });
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    for (const seq of [1n, 2n, 3n]) log.soon(PLATFORM, head(seq, 1));
+    log.soon(CHAIN, head(1n, 1));
+    log.soon(CHAIN, head(3n, 1));
+    expect(seqs(log.pending(PLATFORM))).toEqual([3n, 2n, 1n]);
+    expect(seqs(log.pending(CHAIN))).toEqual([1n]);
+    expect(log.beyondMemory(CHAIN)).toBe(true);
+    expect(log.beyondMemory(PLATFORM)).toBe(false);
+    // Only the platform's held: it gives way then.
+    const alone = witnessOn(undefined, { mostBytes: 2 * WITNESS_HEAD_BYTES });
+    for (const seq of [1n, 2n, 3n]) alone.log.soon(PLATFORM, head(seq, 1));
+    expect(alone.log.beyondMemory(PLATFORM)).toBe(true);
+  });
+
+  it('a walk from below the lowest head let go to at or past the highest sets the mark aside; one short of either leaves it', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const { log } = witnessOn(undefined, { mostBytes: 3 * WITNESS_HEAD_BYTES, snapshots, leads: true, time });
+    for (const seq of [5n, 6n, 7n, 8n, 9n]) log.soon(CHAIN, head(seq, 1));
+    expect(seqs(log.pending(CHAIN))).toEqual([9n, 8n, 7n]);
+    expect(log.walkedPast(CHAIN, 5n, 9n)).toBe(true);
+    expect(log.walkedPast(CHAIN, 4n, 5n)).toBe(true);
+    // The leader's snapshot keeps the lowest too: a start from it is set aside the same way.
+    await log.refresh();
+    await log.flush();
+    const restarted = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
+    await restarted.log.refresh();
+    expect(restarted.log.beyondMemory(CHAIN)).toBe(true);
+    expect(restarted.log.walkedPast(CHAIN, 4n, 6n)).toBe(false);
+    expect(log.walkedPast(CHAIN, 4n, 6n)).toBe(false);
+    expect(log.beyondMemory(CHAIN)).toBe(false);
+  });
+
+  it('a snapshot’s mark with no lowest is set aside by a rebase alone; one whose lowest is past its highest spoils it', async () => {
+    const at = START.getTime() - MINUTE;
+    const lost = (more: Record<string, string>) =>
+      JSON.stringify({ c: `organisation:${ORG}`, l: '9', ...more, t: new Date(at).toISOString() });
+    const snapshots = createFakeWriteOnceStore();
+    await planted(snapshots.files, 'snapshots', SNAPSHOT, [lost({})], { at });
+    const { log } = witnessOn(createFakeWriteOnceStore(), { snapshots });
+    await log.refresh();
+    expect(log.walkedPast(CHAIN, 0n, 100n)).toBe(true);
+    const bad = createFakeWriteOnceStore();
+    await planted(bad.files, 'snapshots', SNAPSHOT, [lost({ f: '10' })], { at });
+    const spoiled = witnessOn(createFakeWriteOnceStore(), { snapshots: bad });
+    await spoiled.log.refresh();
+    expect(spoiled.log.beyondMemory(CHAIN)).toBe(false);
+    expect(integrity(spoiled.capture).map(({ reason }) => reason)).toEqual(['spoiled']);
+  });
+
+  it('crowded: the organisation chains holding more than one head, the most first, never the platform’s', () => {
+    const { log } = witnessOn();
+    for (const seq of [1n, 2n, 3n]) log.soon(PLATFORM, head(seq, 1));
+    for (const seq of [1n, 2n]) log.soon(CHAIN, head(seq, 1));
+    for (const seq of [1n, 2n, 3n]) log.soon(OTHER, head(seq, 1));
+    log.soon({ kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000003' }, head(1n, 1));
+    expect(log.crowded(5)).toEqual([OTHER, CHAIN]);
+    expect(log.crowded(1)).toEqual([OTHER]);
+  });
+
+  it('a Put not answered within a minute failed: its heads go again in a file named afresh', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { log, heads, capture } = witnessOn(undefined, { waitMs: 10 * MINUTE });
+      let hung = true;
+      let putStarted: () => void = () => undefined;
+      const started = new Promise<void>((resolve) => {
+        putStarted = resolve;
+      });
+      heads.instead.put = (name, bytes) => {
+        putStarted();
+        return hung ? new Promise<void>(() => undefined) : heads.real.put(name, bytes);
+      };
+      const waiting = log.now(CHAIN, head(5n, 1));
+      await started;
+      await vi.advanceTimersByTimeAsync(MINUTE - 1);
+      expect(capture.lines().map(({ event }) => event)).not.toContain('audit.witness_write_failed');
+      hung = false;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(capture.lines().map(({ event }) => event)).toContain('audit.witness_write_failed');
+      await vi.advanceTimersByTimeAsync(1_000);
+      await waiting;
+      expect(namesUnder(heads.files, 'heads')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a head this process wrote already is not queued again (a replay’s); one not yet written is', async () => {
+    const { log, heads } = witnessOn();
+    await log.now(CHAIN, head(5n, 1));
+    expect(heads.calls.puts).toBe(1);
+    await log.now(CHAIN, head(5n, 1));
+    log.soon(CHAIN, head(5n, 1));
+    await log.flush();
+    expect(heads.calls.puts).toBe(1);
+    // Control: another head goes out; one noted twice before its Put goes in it.
+    log.soon(CHAIN, head(6n, 2));
+    log.soon(CHAIN, head(6n, 2));
+    await log.flush();
+    expect(heads.calls.puts).toBe(2);
+    await log.now(CHAIN, head(6n, 2));
+    expect(heads.calls.puts).toBe(2);
   });
 });

@@ -16,14 +16,19 @@
 // A file is taken only under the key its folder allows: a web copy holds the anchors' key, so a snapshot it could sign
 // would let it leave out a real head; snapshots are read from their own container alone, which no web copy can add to,
 // and a heads file can say only what was written, never what wasn't. A spoiled file is the alarm, and counts nothing.
-// A name dated past the clock is the alarm and passed over.
+// A name dated past the clock is the alarm and passed over. A line dated past its own file's name (past the clocks'
+// spread) spoils the file, as no honest copy writes one: each names its file after its lines were noted. So a head is
+// never dated past a few minutes from when its file landed, and a rebase after that sets it aside (TR-3: a web copy's
+// key could otherwise date heads in 2099, which no rebase would ever set aside).
 //
 // Writing (group commit): a `now` head (a stop, an approval, every class but the decision path's: witness-class.ts) is
 // written at once, at most one Put in flight a process, each taking every head waiting; `now` resolves once a Put holding
 // it succeeded. A `soon` head (an agent's decision) waits for the next flush, every few seconds while any waits, and at
 // a stop. A Put that fails is tried again, backing off; a `now` waiter gives up after `waitMs` (`WitnessUnconfirmed`,
 // the request answered 503), but its head stays queued, and every later wait for that chain on this process waits for
-// it too: nothing that chain does here is told it succeeded before the head is outside the database.
+// it too: nothing that chain does here is told it succeeded before the head is outside the database. A Put not answered
+// within PUT_WITHIN_MS failed (its heads go again in a file named afresh), well inside the readers' look back, so a file
+// can't land past it. A head this process wrote already (a replay noting its kept head again) is not queued again.
 //
 // Reading: a coalesced `refresh` (a caller waits for the next that starts after its call) lists each heads folder
 // newest-first to what it read already, less five minutes for the clocks and late writes; a start reads the newest sound
@@ -38,9 +43,11 @@
 // lets go those at or below the chain's anchor instead, which the jobs copy made only after confirming every head it
 // had read. So a head landing late at or below an anchor stays held on the jobs copy until its probe judges it: never
 // dropped unseen, and a fork there is the alarm. Two heads at one place with different hashes prove a fork without a
-// read: the alarm at once. Bounded: past what may be held, a chain's lowest heads go first, loudly, and that chain reads
-// as `beyondMemory` (its hand-offs wait, the anchor check anchors it no more) until a rebase: kept in the snapshot, so a
-// restart holds it too.
+// read: the alarm at once. Bounded: past what may be held, the organisation chain holding most lets its lowest heads go
+// first, loudly (the platform's only where no organisation's is held), and that chain reads as `beyondMemory` (its
+// hand-offs wait, the anchor check holds its anchor) until a walk held to every head still held runs from below the
+// lowest let go to at or past the highest (`walkedPast`: TR-3, a spike may slow the chain, never stop it for good), or a
+// rebase: kept in the snapshot, so a restart holds it too.
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import type { WriteOnceStore } from '../storage/write-once.ts';
@@ -116,8 +123,18 @@ export interface WitnessLog extends ChainWitness {
   freshAt(): Date | undefined;
   /** Those heads let go: each confirmed on the chain (the anchor check's walk passed through it, or its probe read it). */
   prune(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void;
-  /** Whether a head of the chain was let go for memory: its hand-offs wait, and it is anchored no more, until a rebase. */
+  /**
+   * Whether a head of the chain was let go for memory: its hand-offs wait, and it is anchored no more, until a walk held
+   * to every head still held passes the heads let go (walkedPast) or a rebase.
+   */
   beyondMemory(chain: Chain): boolean;
+  /**
+   * A walk held to every head of the chain still held, from `from` (exclusive) to `to`, told (TR-3): where it began below
+   * the lowest head let go for memory and reached the highest, the chain is beyond memory no more. Whether it still is.
+   */
+  walkedPast(chain: Chain, from: bigint, to: bigint): boolean;
+  /** The organisation chains holding more than one head, the most first, at most `most`: probed between anchor runs. */
+  crowded(most: number): readonly Chain[];
   /** The anchors' log this one goes by, once it is made: none until then, and no head is set aside or let go by it. */
   useAnchors(anchors: WitnessAnchors): void;
   state(): 'unread' | 'read';
@@ -160,6 +177,15 @@ const PRUNED_FOR_A_SNAPSHOT = 1_000;
  */
 const SNAPSHOT_AT_MOST_MS = 15 * 60_000;
 
+/**
+ * How long a Put may take before it failed, its heads going again in a file named afresh: well inside LAG_MS, so a
+ * file never lands past what a later read looks back over (one landing late anyway only repeats heads sent again).
+ */
+const PUT_WITHIN_MS = 60_000;
+
+/** How many heads this process wrote it remembers, so a replay's head isn't queued again. */
+const MOST_WRITTEN_REMEMBERED = 10_000;
+
 /** The most lines one heads file carries: more wait for the next Put. */
 const MOST_LINES_A_FILE = 10_000;
 
@@ -180,31 +206,63 @@ const CHAIN = /^(?:platform|organisation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const SEQ = /^[1-9]\d{0,18}$/;
 const HASH = /^[0-9a-f]{64}$/;
 
-/** A line of a heads file or snapshot: one chain's head, or (a snapshot's) the highest head it let go for memory. */
-type HeadLine =
-  | { readonly chain: string; readonly head: WitnessedHead }
-  | { readonly chain: string; readonly lost: { readonly seq: bigint; readonly at: number } };
+/** What a chain let go for memory: the highest and lowest heads, and when the last went (a rebase after sets it aside). */
+interface LostMark {
+  readonly seq: bigint;
+  readonly low: bigint;
+  readonly at: number;
+}
 
-function lineFrom(fields: unknown): HeadLine | undefined {
+/** A line of a heads file or snapshot: one chain's head, or (a snapshot's) the heads it let go for memory. */
+type HeadLine =
+  { readonly chain: string; readonly head: WitnessedHead } | { readonly chain: string; readonly lost: LostMark };
+
+/**
+ * A line as its file of `fileAt` gives it: none where it isn't one, or is dated past the file's name beyond the clocks'
+ * spread (no honest copy writes one: the header). Its time never past the name's, so a rebase after the file sets it aside.
+ */
+function lineFrom(fields: unknown, fileAt: number): HeadLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
-  const { c, s, h, t, l, ...rest } = fields as Record<string, unknown>;
-  const at = timeIn(t);
-  if (Object.keys(rest).length > 0 || typeof c !== 'string' || !CHAIN.test(c) || at === undefined) return undefined;
+  const { c, s, h, t, l, f, ...rest } = fields as Record<string, unknown>;
+  const dated = timeIn(t)?.getTime();
+  if (Object.keys(rest).length > 0 || typeof c !== 'string' || !CHAIN.test(c) || dated === undefined) return undefined;
+  if (dated > fileAt + MOST_AHEAD_MS) return undefined;
+  const at = Math.min(dated, fileAt);
   if (s === undefined && h === undefined && typeof l === 'string' && SEQ.test(l)) {
-    return { chain: c, lost: { seq: BigInt(l), at: at.getTime() } };
+    // The lowest let go, where the snapshot says it: else none known, and only a rebase sets the mark aside.
+    const low = typeof f === 'string' && SEQ.test(f) && BigInt(f) <= BigInt(l) ? BigInt(f) : 0n;
+    return f !== undefined && low === 0n ? undefined : { chain: c, lost: { seq: BigInt(l), low, at } };
   }
-  if (l !== undefined || typeof s !== 'string' || !SEQ.test(s) || typeof h !== 'string' || !HASH.test(h)) {
+  if (l !== undefined || f !== undefined || typeof s !== 'string' || !SEQ.test(s) || typeof h !== 'string') {
     return undefined;
   }
-  return { chain: c, head: { seq: BigInt(s), hash: Buffer.from(h, 'hex'), at: at.getTime() } };
+  if (!HASH.test(h)) return undefined;
+  return { chain: c, head: { seq: BigInt(s), hash: Buffer.from(h, 'hex'), at } };
 }
 
 /** A snapshot's line for a chain's heads let go for memory. */
-const lostText = (chain: string, { seq, at }: { readonly seq: bigint; readonly at: number }): string =>
-  JSON.stringify({ c: chain, l: seq.toString(), t: new Date(at).toISOString() });
+const lostText = (chain: string, { seq, low, at }: LostMark): string =>
+  JSON.stringify({
+    c: chain,
+    l: seq.toString(),
+    ...(low > 0n ? { f: low.toString() } : {}),
+    t: new Date(at).toISOString(),
+  });
 
 const lineText = (chain: string, { seq, hash, at }: WitnessedHead): string =>
   JSON.stringify({ c: chain, s: seq.toString(), h: hash.toString('hex'), t: new Date(at).toISOString() });
+
+/** The first place in a list held highest first whose head is below `seq`: its length where none is. */
+function firstBelow(list: readonly WitnessedHead[], seq: bigint): number {
+  let low = 0;
+  let high = list.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if ((list[middle]?.seq ?? 0n) < seq) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+}
 
 /** The chain's object, from its name. */
 const chainOfName = (name: string): Chain =>
@@ -276,8 +334,8 @@ export function createWitnessLog({
   // Every head held, by chain, and how many in all.
   const held = new Map<string, WitnessedHead[]>();
   let heldCount = 0;
-  // A chain's highest head let go for memory, with when (a rebase after sets it aside), and when that was last said.
-  const lost = new Map<string, { seq: bigint; at: number }>();
+  // What a chain let go for memory (a rebase after, or a walk past it, sets it aside), and when that was last said.
+  const lost = new Map<string, LostMark>();
   let lostSaidAt: number | undefined;
 
   // Heads waiting for their Put, and each chain's `now` heads not yet written.
@@ -290,6 +348,8 @@ export function createWitnessLog({
   let writeFailingSince: number | undefined;
   // A heads Put failed and none has gone since (a snapshot's failure is not one: it holds no head back).
   let headsPutFailing = false;
+  // The heads this process wrote, latest last, at most MOST_WRITTEN_REMEMBERED: a replay's isn't queued again.
+  const writtenHere = new Set<string>();
 
   let state: 'unread' | 'read' = 'unread';
   let freshAt: Date | undefined;
@@ -346,19 +406,31 @@ export function createWitnessLog({
     });
   };
 
-  /** Past what may be held, the chain holding most lets its lowest head go: said, and the chain marked. */
+  /** The chain to give way: the organisation's holding most; the platform's only where no organisation's is held. */
+  const largestHeld = (): [string, WitnessedHead[]] | undefined => {
+    let largest: [string, WitnessedHead[]] | undefined;
+    for (const entry of held) {
+      if (entry[0] !== 'platform' && (largest === undefined || entry[1].length > largest[1].length)) largest = entry;
+    }
+    const platform = held.get('platform');
+    return largest ?? (platform === undefined ? undefined : ['platform', platform]);
+  };
+
+  /** Past what may be held, the chain chosen (largestHeld) lets its lowest head go: said, and the chain marked. */
   const giveWay = (): void => {
     while (heldCount > mostHeads) {
-      let largest: [string, WitnessedHead[]] | undefined;
-      for (const entry of held) if (largest === undefined || entry[1].length > largest[1].length) largest = entry;
+      const largest = largestHeld();
       if (largest === undefined) return;
       const [name, list] = largest;
-      const lowest = list.pop();
+      // Its lowest above its anchor, which the next walk from the anchor passes (walkedPast); one at or below it (a
+      // late head, waiting to be confirmed) only where none is above.
+      const anchored = anchoredAt(name);
+      const above = anchored === undefined ? -1 : list.findLastIndex(({ seq }) => seq > anchored);
+      const [lowest] = list.splice(above < 0 ? list.length - 1 : above, 1);
       heldCount -= 1;
       if (list.length === 0) held.delete(name);
-      const before = lost.get(name)?.seq ?? 0n;
-      if (lowest !== undefined && lowest.seq > before) lost.set(name, { seq: lowest.seq, at: now().getTime() });
       const at = now().getTime();
+      if (lowest !== undefined) lostOne(name, lowest.seq, at);
       if (lostSaidAt === undefined || at - lostSaidAt >= SAY_EVERY_MS) {
         lostSaidAt = at;
         logger.error('audit.witness_beyond_memory', { heads: heldCount, mostHeads, chain: name });
@@ -366,14 +438,26 @@ export function createWitnessLog({
     }
   };
 
+  /** A head let go for memory, into the chain's mark: its highest and lowest, and now. */
+  const lostOne = (name: string, seq: bigint, at: number): void => {
+    const mark = lost.get(name);
+    lost.set(name, {
+      seq: mark === undefined || seq > mark.seq ? seq : mark.seq,
+      low: mark === undefined || seq < mark.low ? seq : mark.low,
+      at,
+    });
+  };
+
   /** A head into the chain's list, the highest first, once each: whether it was new. */
   const keep = (name: string, head: WitnessedHead): boolean => {
     if (!stands(name, head)) return false;
     const list = held.get(name) ?? [];
-    if (list.some(({ seq, hash }) => seq === head.seq && hash.equals(head.hash))) return false;
-    if (list.some((one) => one.seq === head.seq && stands(name, one))) forked(name, head.seq);
-    const place = list.findIndex(({ seq }) => seq < head.seq);
-    list.splice(place < 0 ? list.length : place, 0, head);
+    // Those at its place, found by halving (a busy chain holds many heads, highest first): the same, or a fork.
+    const place = firstBelow(list, head.seq);
+    const there = list.slice(firstBelow(list, head.seq + 1n), place);
+    if (there.some(({ hash }) => hash.equals(head.hash))) return false;
+    if (there.some((one) => stands(name, one))) forked(name, head.seq);
+    list.splice(place, 0, head);
     held.set(name, list);
     heldCount += 1;
     changedSinceSnapshot = true;
@@ -424,6 +508,37 @@ export function createWitnessLog({
 
   // ---- writing ----
 
+  /** The key a head this process wrote is remembered by. */
+  const writtenKey = (name: string, { seq, hash }: { readonly seq: bigint; readonly hash: Buffer }): string =>
+    `${name}|${seq.toString()}|${hash.toString('hex')}`;
+
+  /** A head written, remembered, the oldest forgotten past MOST_WRITTEN_REMEMBERED. */
+  const remember = (name: string, head: WitnessedHead): void => {
+    const key = writtenKey(name, head);
+    writtenHere.delete(key);
+    writtenHere.add(key);
+    for (const oldest of writtenHere) {
+      if (writtenHere.size <= MOST_WRITTEN_REMEMBERED) break;
+      writtenHere.delete(oldest);
+    }
+  };
+
+  /** A Put, failed where it isn't answered within PUT_WITHIN_MS (the header). */
+  const putWithin = async (name: string, bytes: Buffer): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`the witness store didn't answer a Put within ${String(PUT_WITHIN_MS)} ms`));
+      }, PUT_WITHIN_MS);
+      timer.unref();
+    });
+    try {
+      await Promise.race([store.put(name, bytes), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   /** The queue's first file's worth written: whether it was. Taken back into the queue where it wasn't. */
   const writeOnce = async (): Promise<boolean> => {
     const taking = queue.slice(0, MOST_LINES_A_FILE);
@@ -438,9 +553,10 @@ export function createWitnessLog({
         epoch,
         taking.map(({ chain, head }) => lineText(chain, head)),
       );
-      await store.put(name, bytes);
+      await putWithin(name, bytes);
       namesRead.add(name);
       for (const queued of taking) {
+        remember(queued.chain, queued.head);
         unconfirmed.get(queued.chain)?.delete(queued);
         if (unconfirmed.get(queued.chain)?.size === 0) unconfirmed.delete(queued.chain);
         queued.done();
@@ -504,6 +620,8 @@ export function createWitnessLog({
   const note = (chain: Chain, { seq, hash }: { readonly seq: bigint; readonly hash: Buffer }, klass: WitnessClass) => {
     if (seq < 1n) return;
     const name = nameOf(chain);
+    // Written by this process already (a replay's kept head): outside the database, nothing to wait for.
+    if (writtenHere.has(writtenKey(name, { seq, hash }))) return;
     const head: WitnessedHead = { seq, hash: Buffer.from(hash), at: now().getTime() };
     keep(name, head);
     let done = (): void => undefined;
@@ -546,7 +664,7 @@ export function createWitnessLog({
   /** A heads file or snapshot taken in if it is sound under its kind's key: the chains it gave a new head, or false. */
   const takeFile = async (
     from: WriteOnceStore,
-    name: string,
+    { name, at }: { readonly name: string; readonly at: number },
     kind: FileKind,
     gained: Set<string>,
   ): Promise<boolean> => {
@@ -554,12 +672,12 @@ export function createWitnessLog({
     if (got === 'missing') throw new Error('a witness file listed and then not there');
     if (
       typeof got === 'string' ||
-      !(await isSoundFile(keys, kind, got, name, epoch, (f) => lineFrom(f) !== undefined))
+      !(await isSoundFile(keys, kind, got, name, epoch, (f) => lineFrom(f, at) !== undefined))
     ) {
       return false;
     }
     for await (const fields of bodyLines(got)) {
-      const line = lineFrom(fields);
+      const line = lineFrom(fields, at);
       if (line === undefined) continue;
       // A heads file says only what was written: a mark of heads let go comes from a snapshot alone.
       if ('lost' in line) {
@@ -586,8 +704,9 @@ export function createWitnessLog({
   const readSnapshot = async (gained: Set<string>): Promise<number | undefined> => {
     if (snapshots === undefined) return undefined;
     let spoiled = 0;
-    for await (const { name, at } of namesOf(snapshots, folder('snapshots'))) {
-      if (await takeFile(snapshots, name, SNAPSHOT_FILE, gained)) return at;
+    for await (const file of namesOf(snapshots, folder('snapshots'))) {
+      const { at } = file;
+      if (await takeFile(snapshots, file, SNAPSHOT_FILE, gained)) return at;
       spoiled += 1;
       alarm('spoiled', { folder: 'snapshots', fileAt: new Date(at).toISOString() });
       if (spoiled >= MOST_SPOILED_SNAPSHOTS) return undefined;
@@ -596,8 +715,18 @@ export function createWitnessLog({
   };
 
   /** A snapshot's mark of heads let go for memory, kept as the higher of what is held and what it says. */
-  const lostRead = (name: string, mark: { readonly seq: bigint; readonly at: number }): void => {
-    if ((lost.get(name)?.seq ?? 0n) < mark.seq) lost.set(name, mark);
+  const lostRead = (name: string, mark: LostMark): void => {
+    const held = lost.get(name);
+    if (held === undefined) {
+      lost.set(name, mark);
+      return;
+    }
+    // The wider of the two, so a walk past it covers both.
+    lost.set(name, {
+      seq: held.seq > mark.seq ? held.seq : mark.seq,
+      low: held.low < mark.low ? held.low : mark.low,
+      at: Math.max(held.at, mark.at),
+    });
   };
 
   /**
@@ -613,7 +742,7 @@ export function createWitnessLog({
       for await (const file of namesOf(store, at)) {
         if (file.at < since) break;
         if (namesRead.has(file.name)) continue;
-        if (!(await takeFile(store, file.name, kind, gained))) {
+        if (!(await takeFile(store, file, kind, gained))) {
           alarm('spoiled', { folder: at, fileAt: new Date(file.at).toISOString() });
         }
         namesRead.add(file.name);
@@ -751,13 +880,33 @@ export function createWitnessLog({
       const name = nameOf(chain);
       const list = held.get(name);
       if (list === undefined || heads.length === 0) return;
-      const kept = list.filter((one) => !heads.some(({ seq, hash }) => seq === one.seq && hash.equals(one.hash)));
+      // By key, so a probe letting most of a busy chain's heads go stays one pass over each list.
+      const going = new Set(heads.map((one) => writtenKey(name, one)));
+      const kept = list.filter((one) => !going.has(writtenKey(name, one)));
       // Counted towards the next snapshot, so a restart doesn't confirm them all over again.
       prunedSinceSnapshot += list.length - kept.length;
       if (kept.length !== list.length) changedSinceSnapshot = true;
       setList(name, kept);
     },
     beyondMemory: (chain: Chain): boolean => beyond(nameOf(chain)),
+    walkedPast(chain: Chain, from: bigint, to: bigint): boolean {
+      const name = nameOf(chain);
+      const mark = lost.get(name);
+      // From below the lowest let go to at or past the highest: every place it held was walked. None known (a mark's
+      // lowest 0, from an older snapshot) is below every walk's start: never.
+      if (mark !== undefined && from < mark.low && to >= mark.seq) {
+        lost.delete(name);
+        changedSinceSnapshot = true;
+      }
+      return beyond(name);
+    },
+    crowded(most: number): readonly Chain[] {
+      return [...held]
+        .filter(([name, list]) => name !== 'platform' && list.length > 1)
+        .toSorted((one, other) => other[1].length - one[1].length)
+        .slice(0, most)
+        .map(([name]) => chainOfName(name));
+    },
     useAnchors(given: WitnessAnchors): void {
       anchors = given;
     },
