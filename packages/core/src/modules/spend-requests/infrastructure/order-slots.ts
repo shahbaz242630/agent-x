@@ -58,6 +58,7 @@ import {
   SLOT_KINDS,
   type SlotKind,
 } from '../domain/order-slots.ts';
+import { decisionsRead } from './holdings-check.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 type SlotsTransaction = Transaction<SpendRequestsTables & AuditTables>;
@@ -208,12 +209,7 @@ export async function orderSlotsOf(
   return read;
 }
 
-/**
- * The order slots' cutover naming the slots a request decided before TR-2 holds (those the cutover opened it in):
- * about the request, by its ID, under a subject of its own (its own signed state's events are its state changes alone).
- */
-export const SLOTS_NAMED_SUBJECT = 'spend_request_slots';
-export const SLOTS_NAMED_ACTION = 'spend_request.slots_named';
+export { SLOTS_NAMED_ACTION, SLOTS_NAMED_SUBJECT } from '../domain/order-slots.ts';
 
 /** The order slots' cutover event: about the organisation, by its ID, under a subject of its own. */
 export const SLOTS_CUTOVER_SUBJECT = 'order_slots';
@@ -428,14 +424,25 @@ export async function slotsHeldByClaims(
   return slotsOfClaims(orgId, await openClaims(tx, { since: new Date(0) }));
 }
 
-/** Whether a slot's holders are those the claims say: the same, or, for a bank slot full, all listed among them. */
-export function slotAsClaimed(holders: Holders, claimed: ReadonlySet<string>): boolean {
+/**
+ * Whether a slot's holders are those the claims say: each one listed claimed, or a request whose signed ending kept its
+ * capacity (`kept`, AT13d: one ended before TR-2 released its claim, its order kept by its slot since); and each claimed
+ * one listed, unless a bank slot is full (a lookalike past its list).
+ */
+export function slotAsClaimed(
+  holders: Holders,
+  claimed: ReadonlySet<string>,
+  kept: ReadonlySet<string> = new Set(),
+): boolean {
   const listed =
     holders.kind === 'order'
-      ? holderIds(holders)
-      : holders.entries.map(({ orderHash, requestId }) => `${orderHash}:${requestId}`);
-  if (!listed.every((entry) => claimed.has(entry))) return false;
-  return listed.length === claimed.size || (holders.kind === 'bank' && listed.length >= MOST_BANK_ENTRIES);
+      ? holderIds(holders).map((requestId) => ({ entry: requestId, requestId }))
+      : holders.entries.map(({ orderHash, requestId }) => ({ entry: `${orderHash}:${requestId}`, requestId }));
+  if (!listed.every(({ entry, requestId }) => claimed.has(entry) || kept.has(requestId))) return false;
+  const named = new Set(listed.map(({ entry }) => entry));
+  return (
+    (holders.kind === 'bank' && listed.length >= MOST_BANK_ENTRIES) || [...claimed].every((entry) => named.has(entry))
+  );
 }
 
 /** The most slots one page of the holdings check reads: each a verified read, locked until its page ends. */
@@ -490,14 +497,37 @@ export async function checkOrderSlots(
             payeeKeys: named(({ payeeKey }) => payeeKey),
           }),
         );
+  const kept = await keptOf(tx, states, orgId, verified, claimed);
   let mismatched = 0;
   for (const { id, holders } of verified) {
-    if (!slotAsClaimed(holders, claimed.get(id) ?? new Set())) {
+    if (!slotAsClaimed(holders, claimed.get(id) ?? new Set(), kept)) {
       states.mismatch(ORDER_SLOTS.subject, { orgId, id });
       mismatched += 1;
     }
   }
   return { slots: ids.length, mismatched, tampered, next };
+}
+
+/**
+ * Of the page's holders no open claim names, those whose signed ending kept their capacity (AT13d): their decisions read
+ * in one statement (decisionsRead), none where none is unclaimed; none believed from a log that can't be (its alarm
+ * raised), so each such holder is then a mismatch.
+ */
+async function keptOf(
+  tx: SlotsTransaction,
+  states: SignedStates,
+  orgId: string,
+  verified: readonly { readonly id: string; readonly holders: Holders }[],
+  claimed: ReadonlyMap<string, ReadonlySet<string>>,
+): Promise<ReadonlySet<string>> {
+  const claimedIds = new Set([...claimed.values()].flatMap((entries) => [...entries].map((entry) => entry.slice(-36))));
+  const unclaimed = [...new Set(verified.flatMap(({ holders }) => holderIds(holders)))].filter(
+    (id) => !claimedIds.has(id),
+  );
+  if (unclaimed.length === 0) return new Set();
+  const decided = await decisionsRead(tx, states, orgId, unclaimed);
+  if (decided === 'tampered') return new Set();
+  return new Set(unclaimed.filter((id) => decided.get(id)?.capacityKept === true));
 }
 
 /**

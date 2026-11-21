@@ -61,7 +61,7 @@ import {
 } from '../domain/holdings.ts';
 import { requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
-import { SLOTS_NAMED_ACTION, SLOTS_NAMED_SUBJECT } from './order-slots.ts';
+import { SLOTS_NAMED_ACTION, SLOTS_NAMED_SUBJECT } from '../domain/order-slots.ts';
 import { payeeAsSealed } from './payee-seal.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';

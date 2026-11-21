@@ -1151,6 +1151,42 @@ describe('an organisation made before TR-2, until its cutover', () => {
     alarmedOn('holding');
   });
 
+  it('keeps the order of a request whose ending kept its capacity before TR-2, its claim released then: no alarm at the cutover or after; a released claim of one still holding is', async () => {
+    const { w, acting } = await ready({ madeBeforeOrderSlots: true });
+    await cutOverByHand(w);
+    const kept = await decided(acting, w, 'INV-7');
+    const holding = await decided(acting, w, 'INV-8');
+    await asBeforeTr2(w, [kept.id, holding.id]);
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: kept.id },
+        { kind: 'user', userId: PERSON },
+        new Date(clock.now().getTime() + 60 * 24 * 3_600_000),
+      ),
+    );
+    // Ended so before TR-2: its claim released, as the ending then did. And, the control, the claim of one still
+    // holding released past the app.
+    await claimReleased(w, kept.id);
+    await claimReleased(w, holding.id);
+
+    await visit(w);
+    expect(await holdersIn(w, await orderSlot(w, 'INV-7'))).toBe(kept.id);
+    const keptSlots = new Set((await slotKeys(w, 'INV-7', supplierOf_(w))).map((key) => orderSlotId(w.org, key)));
+    const heldSlots = new Set((await slotKeys(w, 'INV-8', supplierOf_(w))).map((key) => orderSlotId(w.org, key)));
+    const slotAlarms = () => lines('audit.integrity_failed').filter((line) => line.subjectType === ORDER_SLOTS.subject);
+    // The cutover and its holdings check pass alike: the kept one never alarmed, the control's slots each time.
+    expect(slotAlarms().some((line) => keptSlots.has(String(line.objectId)))).toBe(false);
+    expect(slotAlarms().filter((line) => heldSlots.has(String(line.objectId))).length).toBeGreaterThan(0);
+    capture = new LogCapture();
+    await visit(w);
+    expect(slotAlarms().some((line) => keptSlots.has(String(line.objectId)))).toBe(false);
+    expect(slotAlarms().filter((line) => heldSlots.has(String(line.objectId))).length).toBeGreaterThan(0);
+    expect(lines('holdings_check.passed').at(-1)).toMatchObject({ slotsMismatched: 2 });
+  });
+
   it('opens the order of a request whose ending kept its capacity before the cutover, as its claim keeps it', async () => {
     const { w, acting } = await ready({ madeBeforeOrderSlots: true });
     await cutOverByHand(w);

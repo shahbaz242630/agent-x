@@ -137,6 +137,15 @@ describe('a slot held to its open claims', () => {
     expect(slotAsClaimed(bankOf([entry(1)]), new Set([entry(1), entry(2)]))).toBe(false);
   });
 
+  it('holds as claimed a holder whose signed ending kept its capacity, its claim released; never another unclaimed', () => {
+    const kept = new Set([REQUEST]);
+    expect(slotAsClaimed({ kind: 'order', holder: REQUEST }, new Set(), kept)).toBe(true);
+    expect(slotAsClaimed(bankOf([entry(1)]), new Set(), new Set([entry(1).slice(-36)]))).toBe(true);
+    expect(slotAsClaimed(bankOf([entry(1), entry(2)]), new Set(), new Set([entry(1).slice(-36)]))).toBe(false);
+    // A claim the slot doesn't list is still apart, kept or not.
+    expect(slotAsClaimed({ kind: 'order', holder: null }, new Set([REQUEST]), kept)).toBe(false);
+  });
+
   it('holds a full bank slot as claimed where every one listed is claimed, more claimed past its list', () => {
     const listed = Array.from({ length: MOST_BANK_ENTRIES }, (_, n) => entry(n));
     expect(slotAsClaimed(bankOf(listed), new Set([...listed, entry(MOST_BANK_ENTRIES)]))).toBe(true);

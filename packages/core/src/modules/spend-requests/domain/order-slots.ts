@@ -10,6 +10,14 @@
 // approves it). A paid request keeps its slots for good; only an ending
 // without a payment, or a payment's verified failure, lets them go.
 
+/**
+ * The order slots' cutover naming the slots a request decided before TR-2 holds (those the cutover opened it in):
+ * about the request, by its ID, under a subject of its own (its own signed state's events are its state changes alone).
+ * Here, with the rules, so the holdings check's decisions read can name it without reading the slots.
+ */
+export const SLOTS_NAMED_SUBJECT = 'spend_request_slots';
+export const SLOTS_NAMED_ACTION = 'spend_request.slots_named';
+
 /** The four kinds of slot, as 0114's check names them. */
 export const SLOT_KINDS = ['supplier_order', 'payee_order', 'supplier_bank', 'payee_bank'] as const;
 export type SlotKind = (typeof SLOT_KINDS)[number];

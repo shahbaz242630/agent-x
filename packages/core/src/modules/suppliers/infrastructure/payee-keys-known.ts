@@ -62,8 +62,9 @@ export async function payeeKeysKnown(
   orgId: string,
 ): Promise<PayeeKeysKnown | 'tampered'> {
   const now = await everyField(tx, states, orgId, SUPPLIERS, 'payee_key');
-  const registrationOf = await everyField(tx, states, orgId, SUPPLIER_VERSIONS, 'registration_id');
+  // In the registry's order (authority-tables.ts): suppliers, their registrations, then their versions.
   const registered = await everyField(tx, states, orgId, BENEFICIARY_REGISTRATIONS, 'payee_key');
+  const registrationOf = await everyField(tx, states, orgId, SUPPLIER_VERSIONS, 'registration_id');
   if (now === 'tampered' || registrationOf === 'tampered' || registered === 'tampered') return 'tampered';
   const byVersion = new Map<string, string | null>();
   for (const [versionId, registrationId] of registrationOf) {

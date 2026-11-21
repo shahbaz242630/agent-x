@@ -38,7 +38,7 @@ import type { AuditEvent, AuditTables, SignedStates } from '../../audit/index.ts
 import type { LimitReservationsTables } from '../../limit-reservations/index.ts';
 import { payeeWindowsCutOver, reservationsFor } from '../../limit-reservations/index.ts';
 import { bankKeyOf } from '../domain/asked.ts';
-import { heldBy, holdersText, type Holders, noHolders } from '../domain/order-slots.ts';
+import { heldBy, type Holders, noHolders } from '../domain/order-slots.ts';
 import type { SpendRequestRecord } from './decisions.ts';
 import { claimsFor, type Decided, orderKeysOf, type PaymentsOf } from './holdings-check.ts';
 import { eachSignedHolder } from './month-totals-cutover.ts';
@@ -57,6 +57,7 @@ import {
   SLOTS_CUTOVER_SUBJECT,
   SLOTS_NAMED_ACTION,
   SLOTS_NAMED_SUBJECT,
+  slotAsClaimed,
   slotsHeldByClaims,
 } from './order-slots.ts';
 import { payeeAsSealed } from './payee-seal.ts';
@@ -137,9 +138,12 @@ export async function cutOverOrderSlots<Tx extends CutoverTransaction>(
     if ((await orderSlotOf(tx, states, orgId, id, 'change')).outcome !== 'none') return TAMPERED;
   }
   // Where the claims hold other than the requests do: opened from the requests all the same, the mismatch alarmed.
+  // A holder whose signed ending kept its capacity counts as claimed though its claim was released (ended so before
+  // TR-2): its order is kept by its slot, as an ending keeps it since.
   const claimed = await slotsHeldByClaims(tx, orgId);
+  const kept = new Set(holding.filter(({ decided }) => decided.capacityKept).map(({ request }) => request.id));
   const apart = [...new Set([...opening.keys(), ...claimed.keys()])].filter(
-    (id) => !sameHolders(opening.get(id)?.holders, claimed.get(id)),
+    (id) => !slotAsClaimed(opening.get(id)?.holders ?? NO_ONE, claimed.get(id) ?? new Set(), kept),
   );
   for (const id of apart) states.mismatch(ORDER_SLOTS.subject, { orgId, id });
   // Each request's slots named, so its ending lets go of them and an approval locks them: the sealed facts its slots
@@ -249,17 +253,8 @@ export function slotsFilled(
   return { opening, named };
 }
 
-/** Whether the requests' holders of a slot are those its claims name (slotsHeldByClaims' entries). */
-function sameHolders(holders: Holders | undefined, claimed: ReadonlySet<string> | undefined): boolean {
-  const listed =
-    holders === undefined
-      ? []
-      : holdersText(holders)
-          .split(',')
-          .filter((entry) => entry !== '');
-  const others = claimed ?? new Set<string>();
-  return listed.length === others.size && listed.every((entry) => others.has(entry));
-}
+/** A slot the requests open none of: every claim on it is then one no signed request holds. */
+const NO_ONE: Holders = { kind: 'order', holder: null };
 
 /**
  * Each holding request's order as its signed facts name it (the header): a page of claims, reservations and canonical
