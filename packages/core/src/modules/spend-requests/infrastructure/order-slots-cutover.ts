@@ -220,7 +220,7 @@ async function holdingNow<Tx extends CutoverTransaction>(
  * one order (0039's keys allow it never: something past the app, alarmed). A bank slot full lists no more, and names
  * none of those past it.
  */
-function slotsFilled(
+export function slotsFilled(
   states: SignedStates,
   orgId: string,
   orders: readonly { readonly request: SpendRequestRecord; readonly order: OrderToSlot }[],

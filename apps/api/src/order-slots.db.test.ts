@@ -1115,6 +1115,24 @@ describe('an organisation made before TR-2, until its cutover', () => {
     expect(await ask(acting, w, 'INV-7')).toMatchObject({ outcome: 'decided', request: DUPLICATE });
   });
 
+  it('opens nothing for an ended request whose claim was opened again past the app, the mismatch alarmed', async () => {
+    const { w, acting } = await ready({ madeBeforeOrderSlots: true });
+    await cutOverByHand(w);
+    const ended = await decided(acting, w, 'INV-7');
+    await asBeforeTr2(w, [ended.id]);
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      cancelRequest(tx, states, keys, { orgId: w.org, id: ended.id }, { kind: 'user', userId: PERSON }, clock.now()),
+    );
+    await asOwner(w, (owner) =>
+      owner.query('update spend_requests.order_claims set released_at = null where request_id = $1', [ended.id]),
+    );
+
+    await visit(w);
+    expect(lines('order_slots.cut_over')).toEqual([expect.objectContaining({ opened: 0, mismatched: 2 })]);
+    expect(await holdersIn(w, await orderSlot(w, 'INV-7'))).toBe('none');
+    alarmedOn('holding');
+  });
+
   it('opens the order of a request whose ending kept its capacity before the cutover, as its claim keeps it', async () => {
     const { w, acting } = await ready({ madeBeforeOrderSlots: true });
     await cutOverByHand(w);
