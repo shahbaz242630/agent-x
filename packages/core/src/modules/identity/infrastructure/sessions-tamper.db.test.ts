@@ -26,10 +26,16 @@ import {
 import { createDigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
-import type { Kysely } from 'kysely';
+import { type Kysely, sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AuditTables, ChainBroken, createAuditTrail, type StateDigest } from '../../audit/index.ts';
+import {
+  type AuditTables,
+  ChainBroken,
+  checkStatesWith,
+  createAuditTrail,
+  type StateDigest,
+} from '../../audit/index.ts';
 import {
   createPlatformChain,
   type PlatformControlsTables,
@@ -152,6 +158,14 @@ const allEnded = (userId: string, at: Date) =>
       tx as unknown as PlatformTransaction,
       sessionsEndedEvent(userId, at),
     );
+  });
+
+/** The session this cookie holds signed out, as the console does: its row deleted and its end signed on `chain`. */
+const signedOutOn = (chain: ReturnType<typeof createPlatformChain>, cookie: string) =>
+  app.transaction().execute(async (tx) => {
+    const ended = await sessions().end(tx as unknown as Kysely<IdentityTables>, cookie);
+    if (ended === undefined) throw new Error('the session did not end');
+    await chain.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
   });
 
 /** The owner swaps the session's row for the one it kept, MACs and all. */
@@ -1178,12 +1192,7 @@ describe(`AT13c R-15 a signed end deleted below the platform chain's anchor, its
 
   const putBack = swapRow;
 
-  const signOut = (cookie: string) =>
-    app.transaction().execute(async (tx) => {
-      const ended = await sessions().end(tx as unknown as Kysely<IdentityTables>, cookie);
-      if (ended === undefined) throw new Error('the session did not end');
-      await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
-    });
+  const signOut = (cookie: string) => signedOutOn(platform, cookie);
 
   /** Each of the three reads refused, each with the alarm for the session as `reason` says. */
   async function refusedWithTheAlarm(
@@ -1382,8 +1391,308 @@ describe(`AT13c R-15 a signed end deleted below the platform chain's anchor, its
 
       // The positive control: the same row is a session of the app's to a clock still within its end, so its end is
       // all that stops it once the digest has forgotten (the reason the horizon is the longest session there can be).
+      // Held to the digest's places alone: its heads (AT13h) would refuse the chain, whose newest event is gone.
       const within = new FixedClock(new Date(clock.now().getTime() + 60_000));
-      expect(await at(within).holder(app, cookie)).toBe(userId);
+      const placesOnly = createSessions({
+        ids,
+        clock: within,
+        timeouts: longest,
+        keys,
+        logger: testLogger(capture),
+        digest: () => ({ latest: (...asked) => digest.latest(...asked) }),
+      });
+      expect(await placesOnly.holder(app, cookie)).toBe(userId);
+    } finally {
+      await restore();
+    }
+  });
+});
+
+/** The signed states' digest, and what it learns of rebases from, as createDigestLog makes and takes them. */
+type DigestLog = ReturnType<typeof createDigestLog>;
+type DigestAnchors = NonNullable<Parameters<typeof createDigestLog>[0]['anchors']>;
+
+describe(`AT13h R-15 the platform chain cut back below the head this process saw, a session put back (Postgres ${server.version})`, () => {
+  const platform = createPlatformChain({ keys, ids });
+  const PLATFORM = { kind: 'platform' } as const;
+
+  /** The signed states' digest as a process keeps one, its heads in memory, read whole first. */
+  async function newDigest(anchors?: DigestAnchors): Promise<DigestLog> {
+    const made = createDigestLog({
+      anchors,
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 64 * 1024 * 1024,
+    });
+    await made.read();
+    return made;
+  }
+
+  const heldTo = (digest: Pick<StateDigest, 'latest'> & Partial<Pick<StateDigest, 'heads'>>) =>
+    createSessions({ ids, clock, timeouts: TIMEOUTS, keys, logger: testLogger(capture), digest: () => digest });
+
+  const seenOf = (digest: DigestLog) => digest.heads(PLATFORM)?.seen?.seq;
+
+  /** The platform chain's head as the owner reads it: the row, to put back. */
+  const headRow = async (): Promise<{ seq: string; kept: unknown }> => {
+    const [row] = await asOwner(
+      'select h.seq::text as seq, pg_catalog.row_to_json(h) as kept from platform_controls.audit_head h',
+      [],
+    );
+    return { seq: String(row?.seq), kept: row?.kept };
+  };
+
+  /** The owner puts back the head row it kept, MAC and all. */
+  const headBack = (kept: unknown) =>
+    asOwner(
+      `update platform_controls.audit_head h set (seq, hash, mac, mac_key_version) =
+         (select r.seq, r.hash, r.mac, r.mac_key_version
+          from pg_catalog.json_populate_record(null::platform_controls.audit_head, $1::json) r)`,
+      [JSON.stringify(kept)],
+    );
+
+  /**
+   * The owner cuts the platform chain's end off past `to` (a head row it kept), and puts that head back: every seal left
+   * true, no gap for the next walk. Gives back how to put the end back as it was.
+   */
+  async function cutBackTo(to: { seq: string; kept: unknown }): Promise<() => Promise<void>> {
+    const now = await headRow();
+    const gone = await asOwner(
+      'select pg_catalog.row_to_json(e) as kept from platform_controls.audit_events e where e.seq > $1::bigint order by e.seq',
+      [to.seq],
+    );
+    await asOwner('delete from platform_controls.audit_events where seq > $1::bigint', [to.seq]);
+    await headBack(to.kept);
+    return async () => {
+      for (const { kept } of gone) {
+        await asOwner(
+          `insert into platform_controls.audit_events
+             select * from pg_catalog.json_populate_record(null::platform_controls.audit_events, $1::json)`,
+          [JSON.stringify(kept)],
+        );
+      }
+      await headBack(now.kept);
+    };
+  }
+
+  const signOut = (cookie: string) => signedOutOn(platform, cookie);
+
+  /**
+   * A session read (the head seen there), then another signed out, its row kept; the owner cuts the sign-out off with
+   * the chain's end, puts back the head from before it and the session's row. `between` runs after the sign-out.
+   */
+  async function signedOutThenCut(
+    digest: DigestLog,
+    between: () => Promise<unknown> = () => Promise.resolve(undefined),
+  ) {
+    const signed = await signedIn();
+    const bystander = await signedIn();
+    expect(await heldTo(digest).use(app, bystander.cookie)).toMatchObject({ sessionId: bystander.sessionId });
+    const before = await headRow();
+    const kept = await keep(signed.sessionId);
+    await signOut(signed.cookie);
+    await between();
+    const written = (await headRow()).seq;
+    const restore = await cutBackTo(before);
+    await swapRow(signed.sessionId, kept);
+    return { signed, bystander, before: BigInt(before.seq), written: BigInt(written), restore };
+  }
+
+  const cutAt = (seq: bigint, sessionId: string): unknown =>
+    expect.objectContaining({
+      level: 'error',
+      event: 'audit.integrity_failed',
+      check: 'platform_chain',
+      reason: 'cut_back',
+      seq: String(seq),
+      rowId: sessionId,
+    });
+
+  /** A fresh session read through `digest`: a read after the sign-out, raising the head seen there. */
+  const readAfter = (digest: DigestLog) => async () => {
+    const { cookie } = await signedIn();
+    return heldTo(digest).use(app, cookie);
+  };
+
+  it('the positive control: held to places alone, or read only before the sign-out, the session put back signs in again', async () => {
+    const digest = await newDigest();
+    const { signed, before, restore } = await signedOutThenCut(digest);
+    try {
+      // No walk read the sign-out (above the anchor), and the read before it saw only the head before it.
+      expect(await heldTo({ latest: () => undefined }).use(app, signed.cookie)).toMatchObject({
+        sessionId: signed.sessionId,
+      });
+      expect(seenOf(digest)).toBe(before);
+      expect(await heldTo(digest).holder(app, signed.cookie)).toBe(signed.userId);
+      expect(alarms()).toEqual([]);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('a read after the sign-out raised the head seen: cut back below it, each read refuses the session, with the alarm', async () => {
+    const digest = await newDigest();
+    const { signed, bystander, written, restore } = await signedOutThenCut(digest, readAfter(digest));
+    try {
+      expect(seenOf(digest)).toBe(written);
+      const at = heldTo(digest);
+      expect(await at.use(app, signed.cookie)).toBeUndefined();
+      expect(await at.holder(app, signed.cookie)).toBeUndefined();
+      expect(await at.rotate(app, signed.sessionId)).toBeUndefined();
+      // The chain is cut: no session it judges is believed, the bystander's too, each with the alarm.
+      expect(await at.use(app, bystander.cookie)).toBeUndefined();
+      expect(alarms()).toEqual([
+        cutAt(written, signed.sessionId),
+        cutAt(written, signed.sessionId),
+        cutAt(written, signed.sessionId),
+        cutAt(written, bystander.sessionId),
+      ]);
+      // Never lowered by what it read cut back.
+      expect(seenOf(digest)).toBe(written);
+    } finally {
+      await restore();
+    }
+    // The end put back: believed again, the signed-out session no one's, and no further alarm.
+    expect(await heldTo(digest).use(app, bystander.cookie)).toMatchObject({ sessionId: bystander.sessionId });
+    expect(await heldTo(digest).use(app, signed.cookie)).toBeUndefined();
+    expect(alarms()).toHaveLength(5);
+  });
+
+  it('the sign-out itself raised the head seen once it committed, before any read: cut back below it, refused', async () => {
+    const digest = await newDigest();
+    checkStatesWith(digest);
+    try {
+      const { signed, written, restore } = await signedOutThenCut(digest);
+      try {
+        expect(seenOf(digest)).toBe(written);
+        expect(await heldTo(digest).use(app, signed.cookie)).toBeUndefined();
+        expect(alarms()).toEqual([cutAt(written, signed.sessionId)]);
+      } finally {
+        await restore();
+      }
+    } finally {
+      checkStatesWith(undefined);
+    }
+  });
+
+  it('forced order: a record rolled back to a savepoint after it, its transaction committed, is never raised', async () => {
+    const digest = await newDigest();
+    const { cookie, sessionId, userId } = await signedIn();
+    expect(await heldTo(digest).use(app, cookie)).toMatchObject({ sessionId });
+    const seen = seenOf(digest);
+    checkStatesWith(digest);
+    try {
+      await app.transaction().execute(async (tx) => {
+        await sql`savepoint probe_record`.execute(tx);
+        await platform.record(tx as unknown as PlatformTransaction, sessionsEndedEvent(userId, clock.now()));
+        await sql`rollback to savepoint probe_record`.execute(tx);
+      });
+    } finally {
+      checkStatesWith(undefined);
+    }
+    expect(seenOf(digest)).toBe(seen);
+    expect(await heldTo(digest).use(app, cookie)).toMatchObject({ sessionId });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a transaction that has recorded on the chain never raises the head seen from its own reads', async () => {
+    const digest = await newDigest();
+    const signed = await signedIn();
+    const other = await signedIn();
+    expect(await heldTo(digest).use(app, other.cookie)).toMatchObject({ sessionId: other.sessionId });
+    const seen = seenOf(digest);
+    await expect(
+      app.transaction().execute(async (tx) => {
+        const ended = await sessions().end(tx as unknown as Kysely<IdentityTables>, signed.cookie);
+        if (ended === undefined) throw new Error('the session did not end');
+        await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
+        // Its own read sees the end it recorded, never committed.
+        expect(await heldTo(digest).holder(tx as unknown as Kysely<IdentityTables>, other.cookie)).toBe(other.userId);
+        throw new Error('rolled back');
+      }),
+    ).rejects.toThrow('rolled back');
+    expect(seenOf(digest)).toBe(seen);
+    expect(await heldTo(digest).use(app, signed.cookie)).toMatchObject({ sessionId: signed.sessionId });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('control: the chain grown honestly, reads and records raise the head seen with no alarm', async () => {
+    const digest = await newDigest();
+    checkStatesWith(digest);
+    try {
+      const one = await signedIn();
+      const two = await signedIn();
+      expect(await heldTo(digest).use(app, one.cookie)).toBeDefined();
+      const first = seenOf(digest) ?? 0n;
+      await signOut(two.cookie);
+      expect(seenOf(digest)).toBe(first + 1n);
+      expect(await heldTo(digest).use(app, one.cookie)).toBeDefined();
+      expect(await heldTo(digest).holder(app, one.cookie)).toBe(one.userId);
+      expect(await heldTo(digest).rotate(app, one.sessionId)).toBeDefined();
+      expect(alarms()).toEqual([]);
+    } finally {
+      checkStatesWith(undefined);
+    }
+  });
+
+  it('a head whose MAC the app did not write is no head to hold to: refused, and never raised from', async () => {
+    const digest = await newDigest();
+    const { cookie, sessionId } = await signedIn();
+    expect(await heldTo(digest).use(app, cookie)).toMatchObject({ sessionId });
+    const seen = seenOf(digest) ?? 0n;
+    const head = await headRow();
+    await asOwner('update platform_controls.audit_head set mac = pg_catalog.decode(pg_catalog.repeat($1, 32), $2)', [
+      '00',
+      'hex',
+    ]);
+    try {
+      expect(await heldTo(digest).use(app, cookie)).toBeUndefined();
+      expect(alarms()).toEqual([cutAt(seen, sessionId)]);
+      // A digest that has seen nothing has nothing to hold to, and raises nothing from a head not sealed.
+      const fresh = await newDigest();
+      expect(await heldTo(fresh).holder(app, cookie)).toBeDefined();
+      expect(seenOf(fresh)).toBeUndefined();
+    } finally {
+      await headBack(head.kept);
+    }
+  });
+
+  it('a second head row beside the first, the key dropped: no head to hold to, refused', async () => {
+    const digest = await newDigest();
+    const { cookie, sessionId } = await signedIn();
+    expect(await heldTo(digest).use(app, cookie)).toMatchObject({ sessionId });
+    const seen = seenOf(digest) ?? 0n;
+    await asOwner('alter table platform_controls.audit_head drop constraint audit_head_pkey', []);
+    // The same row twice: whichever a read takes is sealed, so only the count tells.
+    await asOwner('insert into platform_controls.audit_head select * from platform_controls.audit_head', []);
+    try {
+      expect(await heldTo(digest).holder(app, cookie)).toBeUndefined();
+      expect(alarms()).toEqual([cutAt(seen, sessionId)]);
+    } finally {
+      await asOwner(
+        'delete from platform_controls.audit_head h where h.ctid <> (select pg_catalog.min(o.ctid) from platform_controls.audit_head o)',
+        [],
+      );
+      await asOwner(
+        'alter table platform_controls.audit_head add constraint audit_head_pkey primary key (only_row)',
+        [],
+      );
+    }
+  });
+
+  it('a rebase of the platform chain after the head was seen sets it aside: the chain as rebased reads as before', async () => {
+    let rebasedAt = new Date(0);
+    const digest = await newDigest({ rebasedAfter: (_, at) => rebasedAt > at, holds: () => true });
+    const { signed, restore } = await signedOutThenCut(digest, readAfter(digest));
+    try {
+      // The operator rebases the platform chain where it now stands (E11): the head seen before no longer holds.
+      rebasedAt = new Date(clock.now().getTime() + 1000);
+      expect(seenOf(digest)).toBeUndefined();
+      expect(await heldTo(digest).holder(app, signed.cookie)).toBe(signed.userId);
+      expect(alarms()).toEqual([]);
     } finally {
       await restore();
     }

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import type { Chain } from './chain.ts';
-import { createDigestLog, type DigestAnchors } from './digest-log.ts';
+import { createDigestLog, type DigestAnchors, headHeldTo } from './digest-log.ts';
 import { bodyHash } from './shards.ts';
 import { subjectKey } from './state-digest.ts';
 
@@ -1443,6 +1443,30 @@ const oneEntry = (place: bigint): string => {
   entry.writeBigUInt64BE(place, 8);
   return entry.toString('base64');
 };
+
+describe('a head read held to the head seen (AT13f, AT13h: headHeldTo)', () => {
+  const at = (seq: bigint, byte: number) => ({ seq, hash: Buffer.alloc(32, byte) });
+  const seen = at(5n, 5);
+
+  it('nothing seen holds anything, a head or none', () => {
+    expect(headHeldTo(undefined, undefined, null)).toBe(true);
+    expect(headHeldTo(undefined, at(1n, 1), null)).toBe(true);
+  });
+
+  it('a head at the seen place with its hash, or past it with the same event there, holds', () => {
+    expect(headHeldTo(seen, at(5n, 5), Buffer.alloc(32, 5))).toBe(true);
+    expect(headHeldTo(seen, at(9n, 9), Buffer.alloc(32, 5))).toBe(true);
+  });
+
+  it('none, below, another hash at the seen place, or another event there: cut back', () => {
+    expect(headHeldTo(seen, undefined, Buffer.alloc(32, 5))).toBe(false);
+    expect(headHeldTo(seen, at(4n, 4), Buffer.alloc(32, 5))).toBe(false);
+    expect(headHeldTo(seen, at(5n, 6), Buffer.alloc(32, 5))).toBe(false);
+    expect(headHeldTo(seen, at(9n, 9), Buffer.alloc(32, 6))).toBe(false);
+    expect(headHeldTo(seen, at(9n, 9), null)).toBe(false);
+    expect(headHeldTo(seen, at(9n, 9), 'not a hash')).toBe(false);
+  });
+});
 
 describe('the platform chain’s session ends forgotten past the longest session (AT13g)', () => {
   const DAY = 24 * HOUR;

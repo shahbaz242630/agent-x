@@ -37,6 +37,15 @@
 // statement's snapshot, then walked, is the session ending as it is read, refused
 // without the alarm; one still missing is put back past the app, the alarm.
 //
+// Nor is an end the chain's newest events took with them, cut off by the owner
+// with an earlier sealed head put back before any anchor passed them (AT13h): no
+// walk read it, and every seal still holds. So the same statement reads the
+// platform chain's head and the event at the highest head this process has seen
+// (platformHeadRead, the digest's `heads`): one below it, or another event at its
+// place, is the chain cut back, and the session is refused with the alarm. Only
+// the reads that let a session in (`use`, `holder`, `rotate`): a sign-out still
+// ends one, and a sign-in is held by its own check of the chain (signed-ends.ts).
+//
 // Its last use is the owner's to move too, and moved on, an idle session lived
 // again for a cookie stolen while it was live. So the last use has a MAC of
 // its own, with the cookie's hash (0111): `use` writes it with the new last use,
@@ -70,7 +79,10 @@ import {
   latestPlatformSeqRead,
   latestPlatformTimeOfRead,
   type PlatformControlsTables,
+  platformCutBack,
   platformEventWithRead,
+  type PlatformHeadOfRow,
+  platformHeadRead,
   type PlatformTransaction,
 } from '../../platform-controls/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
@@ -350,7 +362,7 @@ export const sessionRowMessage = (row: SessionRow) =>
  * session's few rotations, by the same index), and its person's latest all ended (0084's by-person index). Each a
  * subquery of the statement, on the row's own columns.
  */
-const signedEndsOfRow = (db: Kysely<IdentityTables>) => {
+const signedEndsOfRow = (db: Kysely<IdentityTables>, seenAt: bigint | undefined) => {
   const platform = db as unknown as Kysely<PlatformControlsTables>;
   const person = sql<string>`identity.sessions.user_id::text`;
   const record = sql<string>`identity.sessions.id::text`;
@@ -369,6 +381,8 @@ const signedEndsOfRow = (db: Kysely<IdentityTables>) => {
     >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: {}, factsFrom: { person } })})`.as(
       'all_ended_seq',
     ),
+    // The platform chain's head, held to the highest seen (AT13h, the header).
+    ...platformHeadRead(seenAt),
   ] as const;
 };
 
@@ -464,7 +478,7 @@ export function createSessions({
    * The signed states' digest this process keeps, asked at each read (AT13c, the header): given at boot, kept by the
    * jobs once they lead; none, or none yet, and the reads are as before it.
    */
-  readonly digest?: () => Pick<StateDigest, 'latest'> | undefined;
+  readonly digest?: () => (Pick<StateDigest, 'latest'> & Partial<Pick<StateDigest, 'heads'>>) | undefined;
 }): Sessions {
   const { idleSeconds, absoluteSeconds } = timeouts;
   if (!isWholeSeconds(idleSeconds) || !isWholeSeconds(absoluteSeconds)) {
@@ -504,6 +518,27 @@ export function createSessions({
     if (!row.rotated_away) return true;
     rowForged(logger, 'session', row, 'rotated');
     return false;
+  };
+
+  /** What a read holds the platform chain's head to (AT13h), asked before its statement: none without a digest. */
+  const platformWatch = () => digest?.()?.heads?.(PLATFORM);
+
+  /** Whether the platform chain was cut back below the head the read was held to (AT13h): the alarm, and no session. */
+  const platformCut = (
+    db: Kysely<IdentityTables>,
+    watch: ReturnType<typeof platformWatch>,
+    row: PlatformHeadOfRow & { readonly id: string; readonly user_id: string },
+  ): boolean => {
+    const cut = platformCutBack(keys, db, watch, row);
+    if (cut === undefined) return false;
+    logger.error('audit.integrity_failed', {
+      check: 'platform_chain',
+      reason: 'cut_back',
+      seq: cut.toString(),
+      rowId: row.id,
+      userId: row.user_id,
+    });
+    return true;
   };
 
   /** Whether the session's last use is the app's: one moved, or with no MAC, raises the alarm. */
@@ -572,6 +607,7 @@ export function createSessions({
       const now = clock.now();
       const cookieHash = hashOf(cookie);
       const sealed = macOf(keys, lastUseMessage(cookieHash, now));
+      const watch = platformWatch();
       // Never backwards: a request timed a moment earlier can't shorten the session, nor change its last use's MAC.
       const onward = sql<boolean>`identity.sessions.last_seen_at < ${now}`;
       const row = await db
@@ -597,10 +633,12 @@ export function createSessions({
           'was.last_seen_at as was_seen_at',
           'was.last_use_mac as was_mac',
           'was.last_use_mac_key_version as was_mac_key_version',
-          ...signedEndsOfRow(db),
+          ...signedEndsOfRow(db, watch?.seen?.seq),
         ])
         .executeTakeFirst();
-      if (row === undefined || !standing(row) || !(await heldToDigest(db, row))) return undefined;
+      if (row === undefined || platformCut(db, watch, row) || !standing(row) || !(await heldToDigest(db, row))) {
+        return undefined;
+      }
       if (!lastUseHolds(row, { at: row.was_seen_at, mac: row.was_mac, version: row.was_mac_key_version })) {
         // The last use just written would make it whole again: ended, in the caller's transaction, before anyone sees it.
         // (A row that isn't standing stays refused whatever its last use, as it was.)
@@ -624,28 +662,33 @@ export function createSessions({
     async holder(db, cookie) {
       if (!isCookie(cookie)) return undefined;
       const now = clock.now();
+      const watch = platformWatch();
       const row = await db
         .selectFrom('identity.sessions')
-        .select([...SESSION_READ, ...signedEndsOfRow(db)])
+        .select([...SESSION_READ, ...signedEndsOfRow(db, watch?.seen?.seq)])
         .where('cookie_hash', '=', hashOf(cookie))
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
         .executeTakeFirst();
-      return row !== undefined && (await believed(db, row, lastUseOf(row))) ? row.user_id : undefined;
+      if (row === undefined || platformCut(db, watch, row)) return undefined;
+      return (await believed(db, row, lastUseOf(row))) ? row.user_id : undefined;
     },
 
     async rotate(db, sessionId) {
       if (typeof sessionId !== 'string' || !UUID.test(sessionId)) return undefined;
       const now = clock.now();
+      const watch = platformWatch();
       const live = await db
         .selectFrom('identity.sessions')
-        .select([...SESSION_READ, ...signedEndsOfRow(db)])
+        .select([...SESSION_READ, ...signedEndsOfRow(db, watch?.seen?.seq)])
         .where('id', '=', sessionId)
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
         .executeTakeFirst();
       // Only a row whose MACs held, and never ended, gets new ones: rotating a forged or put-back row would make it genuine.
-      if (live === undefined || !(await believed(db, live, lastUseOf(live)))) return undefined;
+      if (live === undefined || platformCut(db, watch, live) || !(await believed(db, live, lastUseOf(live)))) {
+        return undefined;
+      }
       const cookie = newCookie();
       const cookieHash = hashOf(cookie);
       // Its last use goes with the new cookie's hash, never backwards (as `use`'s).

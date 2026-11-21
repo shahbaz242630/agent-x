@@ -105,6 +105,7 @@ export {
   writeSignedRow,
 } from './signed-rows.ts';
 export {
+  afterCommit,
   AGENT_BRAKE,
   type AnswersOf,
   assertTenant,

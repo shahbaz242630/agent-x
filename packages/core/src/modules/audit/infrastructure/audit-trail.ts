@@ -58,6 +58,14 @@
 // it: such a read sees only what is committed, so nothing it raises can be rolled
 // back. In memory, with no trip.
 //
+// A write raises it too (AT13h), to the head it moved the chain to, once its
+// transaction commits (afterCommit, in the commit's own handling: no trip), and
+// only where nothing that could undo part of the transaction (a savepoint's
+// rollback, the idempotency claim's among them) was sent after the write was
+// begun: so the newest events this process wrote are held from their commit,
+// not from its next read. Asked before the head is locked, so a rebase after it
+// sets the head aside, as a read's.
+//
 // What this read can't see: a later event about the object deleted, or moved
 // to another object or organisation, which the chain's check and anchor find;
 // an event sealed with a key the app still holds, though rotated out, which
@@ -94,6 +102,7 @@ import {
   edgesIn,
   entryIsSealed,
   headFields,
+  headHeldTo,
   headIsSealed,
   LAST_COUNTED,
   OPERATOR_ID,
@@ -112,6 +121,7 @@ import {
   walkLast,
 } from '@agentx/platform/audit-chain';
 import {
+  afterCommit,
   type AnswersOf,
   assertTenant,
   type GatheredRead,
@@ -1473,6 +1483,14 @@ export function createAuditTrail({
   ): Promise<readonly RecordedAuditEvent[]> => {
     const events = inputs.map((input) => checkedToWrite(hold, input));
     const chain = chainOf(orgId);
+    // AT13h, the header: given before the write, so anything that could undo it, sent from here on, keeps it unraised.
+    const moved: { head?: { readonly seq: bigint; readonly hash: Buffer } } = {};
+    const watch = watchOf(chain);
+    if (watch !== undefined) {
+      await afterCommit(tx, () => {
+        if (moved.head !== undefined) watch.saw(moved.head);
+      });
+    }
     const append = (reuse: boolean) =>
       appendEvents(
         keys,
@@ -1489,6 +1507,8 @@ export function createAuditTrail({
       headsMoved.get(tx)?.delete(chain.orgId);
       sealed = await append(false);
     }
+    const last = sealed.at(-1);
+    if (last !== undefined) moved.head = { seq: last.seq, hash: last.hash };
     return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));
   };
 
@@ -1553,16 +1573,7 @@ export function createAuditTrail({
     if (watch === undefined) return undefined;
     const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
     const { seen } = watch;
-    if (seen !== undefined) {
-      const there = first?.seen_hash;
-      const held =
-        head !== undefined &&
-        head.seq >= seen.seq &&
-        there instanceof Buffer &&
-        there.equals(seen.hash) &&
-        (head.seq !== seen.seq || head.hash.equals(seen.hash));
-      if (!held) return brokenAt(seen.seq);
-    }
+    if (seen !== undefined && !headHeldTo(seen, head, first?.seen_hash)) return brokenAt(seen.seq);
     if (head !== undefined && headsTaken.get(tx)?.has(chain.orgId) !== true)
       watch.saw({ seq: head.seq, hash: head.hash });
     return undefined;

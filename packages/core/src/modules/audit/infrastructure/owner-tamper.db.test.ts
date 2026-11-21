@@ -1043,6 +1043,146 @@ describe('AT13f: the chain cut back past the head this process saw, as the owner
   });
 });
 
+describe('AT13h: the chain cut back below a write this process committed, before any read of it', () => {
+  const chainOfOrg = () => ({ kind: 'organisation' as const, orgId: org });
+  const seenNow = (kept: DigestLog = digest) => kept.heads(chainOfOrg())?.seen;
+  /** The agent suspended through `through`'s trail, in a transaction of its own that commits. */
+  const suspended = (id: string, through: SignedStates = held) =>
+    withTenant(app, org, (tx) =>
+      through.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend')),
+    );
+  /** The head as the owner reads it, as the trail seals heads: its place and hash. */
+  const headNow = async () => {
+    const head = await owner.saveHead();
+    return { seq: BigInt(head.seq), hash: head.hash };
+  };
+
+  beforeEach(async () => {
+    digest = await newDigest();
+    held = heldTo(digest);
+  });
+
+  /**
+   * An agent read (the head seen there), then suspended through `writer`'s trail, a commit nobody reads after. The owner
+   * then cuts the suspension off with the chain's end, puts back the head read before it and the row as it stood.
+   */
+  async function writtenThenCut(writer: SignedStates = held) {
+    const id = await newAgent();
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    const before = await owner.saveHead();
+    const savedRow = await owner.saveRow(id);
+    await suspended(id, writer);
+    const written = await headNow();
+    await owner.windBack(before);
+    await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
+    return { id, before: BigInt(before.seq), written };
+  }
+
+  const tamperedAt = (id: string, seq: bigint): unknown =>
+    expect.objectContaining({ event: 'audit.integrity_failed', reason: 'log', objectId: id, seq: String(seq) });
+
+  it('the positive control: a write by a trail with no heads, never read after, is cut off and its object reads as before', async () => {
+    const { id, before } = await writtenThenCut(states);
+    expect(seenNow()?.seq).toBe(before);
+    // What AT13f left: held to the head the process last read, the suspension reads as never made.
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a write raises the head seen once it commits: cut back below it, refused at decision time, the alarm at the write', async () => {
+    const { id, written } = await writtenThenCut();
+    expect(seenNow()).toEqual(written);
+
+    expect(await heldCheck(id)).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toEqual([tamperedAt(id, written.seq)]);
+  });
+
+  it('forced order: raised only once it commits; a read meanwhile sees the head as committed, and none after alarms', async () => {
+    const id = await newAgent();
+    const other = await newAgent();
+    expect(await heldCheck(other)).toMatchObject({ outcome: 'verified', version: 1 });
+    const seen = seenNow();
+    const writing = heldOpen(async (tx, begun, gate) => {
+      await held.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      begun();
+      await gate;
+    });
+    await writing.begun;
+    // Written, not committed: nothing raised, and a read on its own connection reads the head as committed.
+    expect(seenNow()).toEqual(seen);
+    expect(await heldCheck(other)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(seenNow()).toEqual(seen);
+    writing.release();
+    await writing.done;
+
+    expect(seenNow()).toEqual(await headNow());
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 2 });
+    expect(await heldCheck(other)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('forced order: a write rolled back to a savepoint after it, the transaction committed, is never raised', async () => {
+    const id = await newAgent();
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    const seen = seenNow();
+    await withTenant(app, org, async (tx) => {
+      await sql`savepoint probe_write`.execute(tx);
+      await held.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      await sql`rollback to savepoint probe_write`.execute(tx);
+    });
+    expect(seenNow()).toEqual(seen);
+    // Nothing of it committed: read as ever, with no false alarm.
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('forced order: written again after the rollback, the second write is what commits, and is raised', async () => {
+    const id = await newAgent();
+    const other = await newAgent();
+    await withTenant(app, org, async (tx) => {
+      await sql`savepoint probe_write`.execute(tx);
+      await held.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      await sql`rollback to savepoint probe_write`.execute(tx);
+      // At the same place as the one rolled back, with another hash.
+      await held.changeStatus(tx, AGENTS, { orgId: org, id: other }, 'suspend', change('agent.suspend'));
+    });
+    const written = await headNow();
+    expect(seenNow()).toEqual(written);
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(await heldCheck(other)).toMatchObject({ outcome: 'verified', version: 2 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a write whose transaction rolls back is never raised', async () => {
+    const id = await newAgent();
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    const seen = seenNow();
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await held.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+        throw new Error('rolled back');
+      }),
+    ).rejects.toThrow('rolled back');
+    expect(seenNow()).toEqual(seen);
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a rebase dated after the write was begun sets its head aside: the chain as rebased reads as before', async () => {
+    const rebased = new Map<string, Date>();
+    const anchors: DigestAnchors = {
+      rebasedAfter: (_, at) => (rebased.get(org) ?? new Date(0)) > at,
+      holds: () => true,
+    };
+    const kept = await newDigest(undefined, anchors);
+    const { id } = await writtenThenCut(heldTo(kept));
+    rebased.set(org, new Date(AT13_AT.getTime() + 1000));
+    expect(seenNow(kept)).toBeUndefined();
+    expect(await heldCheck(id, 'share', heldTo(kept))).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+});
+
 describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authority table, each named by the guard', () => {
   it('a planted trigger raising the role as a status changes: the change fails with the alarm, and the guard names it', async () => {
     const id = await newAgent('reader');

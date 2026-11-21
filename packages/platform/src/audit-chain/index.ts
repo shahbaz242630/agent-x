@@ -16,6 +16,7 @@ export {
   type DigestAnchors,
   type DigestLog,
   FORGET_MARGIN_MS,
+  headHeldTo,
   type HeadWatch,
   type StateDigest,
 } from './digest-log.ts';

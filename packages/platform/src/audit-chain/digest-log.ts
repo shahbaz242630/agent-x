@@ -132,6 +132,22 @@ export interface HeadWatch {
   saw(head: HeadSeen): void;
 }
 
+/**
+ * Whether a chain's head, read in one statement with the hash of the event at the seen place (`seenHash`), holds to the
+ * head the read was held to (AT13f): sealed (`head`, none where it isn't), no lower, the same event at the seen place,
+ * and at that place only with its hash. Nothing seen, nothing to hold to. Else the chain was cut back past the app.
+ */
+export function headHeldTo(seen: HeadSeen | undefined, head: HeadSeen | undefined, seenHash: unknown): boolean {
+  if (seen === undefined) return true;
+  return (
+    head !== undefined &&
+    head.seq >= seen.seq &&
+    seenHash instanceof Buffer &&
+    seenHash.equals(seen.hash) &&
+    (head.seq !== seen.seq || head.hash.equals(seen.hash))
+  );
+}
+
 /** A head seen, with when the read that saw it was asked: a rebase after that sets it aside. */
 type HeadKept = HeadSeen & { readonly at: number };
 
