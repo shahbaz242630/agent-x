@@ -404,9 +404,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'sent_at',
         'given_up_at',
         'last_failure',
-        // S206 V4 (0104): the end's seal, and the queued seal once ever, for the notices from before seals.
-        'mac',
-        'mac_key_version',
+        // S206 V4 (0104): the end's seal. The queued seal is written once, as it is added (0113 took back its UPDATE).
         'end_mac',
         'end_key_version',
       ],
@@ -428,10 +426,9 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'before_macs',
       ],
       // Added, read, and deleted once past the retention the config names;
-      // never changed, so a count once written stands, but for a row from
-      // before 0105 given its MAC, once, at the first start on it (S206 V6).
+      // never changed, so a count once written stands (0113 took back the
+      // MAC's UPDATE once the S206 V6 pass was gone).
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['mac', 'mac_key_version'],
     },
     'security.partner_event_evidence': {
       reason:
@@ -448,10 +445,9 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'mac_key_version',
         'before_macs',
       ],
-      // Added (the first few an hour per address), read, and deleted once past the security events' retention; a row
-      // from before 0105 given its MAC, once, at the first start on it (S206 V6).
+      // Added (the first few an hour per address), read, and deleted once past the security events' retention; never
+      // changed (0113 took back the MAC's UPDATE once the S206 V6 pass was gone).
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['mac', 'mac_key_version'],
     },
     'provider_events.inbox': {
       reason:
