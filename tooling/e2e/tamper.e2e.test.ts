@@ -212,7 +212,10 @@ let people: Record<Role, string>;
 let bankAccountId: string;
 let foreignBefore: Awaited<ReturnType<typeof foreignChain>> | undefined;
 let canaries: readonly string[] = [];
+let foreignPurpose = '';
 let startedAt = 0;
+/** How long each setup step took (E2E-1, S208): the report shows which grew when the setup nears its limit. */
+const setupMs: Record<string, number> = {};
 let needsReseed = false;
 let ownReseeds = 0;
 let denialPairs = 0;
@@ -535,8 +538,6 @@ async function controls(foreignUserId: string): Promise<void> {
   const members = operations.find((op) => op.method === 'GET' && op.route === '/v1/members');
   if (members === undefined) throw new Error('positive-control operation missing');
   expect((await controlSend(members, cookieHeader(realCookie))).status).toBe(200);
-  const foreignPurpose = `private-tenant-${randomUUID()}`;
-  await seedRequest(foreign, foreignPurpose);
   const detail = operations.find((op) => op.method === 'GET' && op.route === '/v1/spend-requests/{id}');
   if (detail === undefined) throw new Error('positive-control detail operation missing');
   const full = await controlSend(
@@ -1255,49 +1256,79 @@ async function foreignReference(op: Operation, body: unknown, field: ReferenceFi
   referencePairs += 1;
 }
 
+/** Times one setup step into the report (E2E-1). */
+async function timed<T>(step: string, work: () => Promise<T>): Promise<T> {
+  const began = Date.now();
+  try {
+    return await work();
+  } finally {
+    setupMs[step] = Date.now() - began;
+  }
+}
+
+/**
+ * Every foreign notice ended, sent or given up, by the API's sender (it runs each minute): a group's (a spend request
+ * waiting, to its admins and approvers) turned into one to each, and each of those tried. Not the groups alone (S208,
+ * point 6): the notice check carries a notice still open in its record, so one checked mid-send, then ended by the
+ * same sender run, made the API's own later visit record where it stopped again, a change to the foreign chain no
+ * request made (20 Nov: the snapshot taken 108 ms into the sender's run).
+ */
+const foreignNoticesEnded = () =>
+  vi.waitFor(
+    async () => {
+      const open = await database
+        .selectFrom('notifications.outbox')
+        .select('id')
+        .where('org_id', '=', foreign.world.org)
+        .where('sent_at', 'is', null)
+        .where('given_up_at', 'is', null)
+        .execute();
+      expect(open).toEqual([]);
+    },
+    { timeout: 90_000, interval: 1_000 },
+  );
+
 beforeAll(async () => {
   startedAt = Date.now();
   expect(API_ORIGIN).toBe('http://localhost:8080');
   browser = await chromium.launch({ channel: 'chrome', headless: true });
-  const registeredAt = await registerAdminKey();
+  const registeredAt = await timed('adminKey', registerAdminKey);
   // Account/factor setup ends sessions; drain both users' events before their lasting sign-ins.
-  await sleep(Math.max(0, Math.max(users.tamper.provisionedAt, registeredAt) + 61_000 - Date.now()));
-  await restartInPlace('api');
-  await apiAnswers();
-  foreign = await seed();
-  const admin = await shared.signedInMember(foreign.world.org, 'admin');
-  foreignCookie = admin.cookie;
-  foreign.identity = await tamperIdentityFixtures(
-    database,
-    keys,
-    uuidV7Ids,
-    clock,
-    admin,
-    foreign.world.admin.membershipId,
-  );
-  await resetOwn();
-  payment = await seedPayment();
-  await controls(admin.userId);
-  // The setup's own background work on the foreign chain, settled before its snapshot (S206 V4): the sender turns each
-  // notice to a group (a spend request waiting, to its admins and approvers) into one to each, which records each on
-  // the chain; and the notice check records where it stopped the first time it walks past them, at the organisation's
-  // slot within the hour, here run first as that job would. With nothing new, neither writes again, so any change to
-  // the foreign chain after the snapshot is still a request's.
-  await vi.waitFor(
-    async () => {
-      const groups = await database
-        .selectFrom('notifications.outbox')
-        .select('id')
-        .where('org_id', '=', foreign.world.org)
-        .where('recipient_user_id', 'is', null)
-        .where('recipient_contact_id', 'is', null)
-        .where('sent_at', 'is', null)
-        .where('given_up_at', 'is', null)
-        .execute();
-      expect(groups).toEqual([]);
-    },
-    { timeout: 180_000, interval: 2_000 },
-  );
+  const drained = Math.max(users.tamper.provisionedAt, registeredAt) + 61_000;
+  // The foreign tenant is seeded, and its request asked, while the drain waits (E2E-1, S208): none of it is a login
+  // event or a sign-in, and its notices go out at the running API's sender tick within the wait, not a tick after
+  // the restart. Ended before the restart, so the restart never stops one mid-send.
+  const admin = await timed('foreignSeed', async () => {
+    foreign = await seed();
+    const member = await shared.signedInMember(foreign.world.org, 'admin');
+    foreignCookie = member.cookie;
+    foreign.identity = await tamperIdentityFixtures(
+      database,
+      keys,
+      uuidV7Ids,
+      clock,
+      member,
+      foreign.world.admin.membershipId,
+    );
+    foreignPurpose = `private-tenant-${randomUUID()}`;
+    await seedRequest(foreign, foreignPurpose);
+    return member;
+  });
+  await timed('drain', () => sleep(Math.max(0, drained - Date.now())));
+  await timed('foreignNotices', foreignNoticesEnded);
+  await timed('restart', async () => {
+    await restartInPlace('api');
+    await apiAnswers();
+  });
+  await timed('resetOwn', resetOwn);
+  payment = await timed('seedPayment', seedPayment);
+  await timed('controls', () => controls(admin.userId));
+  // The setup's own background work on the foreign chain, settled before its snapshot (S206 V4): the sender records
+  // each notice to one person on the chain, and the notice check records where it stopped the first time it walks
+  // past them, at the organisation's slot within the hour, here run first as that job would. With nothing new and
+  // nothing still open, neither writes again, so any change to the foreign chain after the snapshot is a request's.
+  // Ended already, unless a control asked for one.
+  await timed('foreignNoticesAgain', foreignNoticesEnded);
   await createNoticeCheck({
     list: () => Promise.resolve([foreign.world.org]),
     database,
@@ -1366,6 +1397,7 @@ afterAll(async () => {
         requests: requestCounts,
         requestsSent: requestCounts.attack + requestCounts.control,
         durationMs: Date.now() - startedAt,
+        setupMs,
         ownReseeds,
         denialPairs,
         referencePairs,
