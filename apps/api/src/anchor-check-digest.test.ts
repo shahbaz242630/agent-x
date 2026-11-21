@@ -92,7 +92,7 @@ function process(
 
 const digestFiles = (fake: FakeWriteOnceStore) => [...fake.files.keys()].filter((name) => name.includes('/digests/'));
 
-describe('the anchor check keeping the platform chain’s signed states in the digest (AT13c)', () => {
+describe('SEC-DB-16 the anchor check keeping the platform chain’s signed states in the digest (AT13c)', () => {
   const PLATFORM = { kind: 'platform' } as const;
   const PAUSE = subjectKey('platform.handoff_pause', 'pause');
   const ENDED = subjectKey('identity.session_ended', 'p/r');
@@ -142,7 +142,7 @@ describe('the anchor check keeping the platform chain’s signed states in the d
   });
 });
 
-describe('the anchor check keeping the signed states’ digest (AT13)', () => {
+describe('SEC-DB-11 the anchor check keeping the signed states’ digest (AT13)', () => {
   it('records what a walk read with its new anchor, writes it beside the anchors, and a restart reads it back', async () => {
     const fake = createFakeWriteOnceStore();
     const report = { current: walk(5n, new Map([[subjectKey('agent', AGENT), 4n]])) };

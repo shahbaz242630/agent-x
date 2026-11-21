@@ -217,7 +217,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-describe(`the owner can't sign in as a person (Postgres ${server.version})`, () => {
+describe(`SEC-DB-14 the owner can't sign in as a person (Postgres ${server.version})`, () => {
   it("control: the app's own session is found by its cookie, with no alarm", async () => {
     const { userId, sessionId, cookie } = await signedIn();
 
@@ -404,7 +404,7 @@ describe(`SEC-DB-14 R-15 the owner can't put back a session that was ended (S207
   });
 });
 
-describe(`the owner can't verify a person's step-up (Postgres ${server.version})`, () => {
+describe(`SEC-DB-14 the owner can't verify a person's step-up (Postgres ${server.version})`, () => {
   it("control: the app's own verified challenge is consumed for the change, with no alarm", async () => {
     const { sessionId } = await signedIn();
     const { binding, challengeId } = await opened(sessionId);
@@ -729,7 +729,7 @@ describe(`SEC-DB-15 the owner can't use a step-up twice by putting its challenge
   });
 });
 
-describe(`the owner can't move a person to its own login account (Postgres ${server.version})`, () => {
+describe(`SEC-DB-14 the owner can't move a person to its own login account (Postgres ${server.version})`, () => {
   it('control: a person is found by their own subject, and theirs by their ID, with no alarm', async () => {
     const admin = await personAs('admin-control');
 
@@ -795,7 +795,7 @@ describe(`the owner can't move a person to its own login account (Postgres ${ser
   });
 });
 
-describe(`the owner can't end someone else's login sessions, nor open a challenge on a forged session (Postgres ${server.version})`, () => {
+describe(`SEC-DB-14 the owner can't end someone else's login sessions, nor open a challenge on a forged session (Postgres ${server.version})`, () => {
   it("control: a sign-out of the app's own session names its person", async () => {
     const { userId, sessionId, cookie } = await signedIn();
 
@@ -1152,7 +1152,7 @@ describe(`SEC-DB-16 R-15 the owner can't bring back an idle session, nor one fro
   });
 });
 
-describe(`AT13c R-15 a signed end deleted below the platform chain's anchor, its session put back (Postgres ${server.version})`, () => {
+describe(`SEC-DB-16 AT13c R-15 a signed end deleted below the platform chain's anchor, its session put back (Postgres ${server.version})`, () => {
   const platform = createPlatformChain({ keys, ids });
   /** The anchor check's platform chain: its walks say where each signed end is. */
   const walking = createPlatformChain({ keys, ids, subjectOf: signedEndSubjectOf });
@@ -1412,7 +1412,7 @@ describe(`AT13c R-15 a signed end deleted below the platform chain's anchor, its
 type DigestLog = ReturnType<typeof createDigestLog>;
 type DigestAnchors = NonNullable<Parameters<typeof createDigestLog>[0]['anchors']>;
 
-describe(`AT13h R-15 the platform chain cut back below the head this process saw, a session put back (Postgres ${server.version})`, () => {
+describe(`SEC-DB-16 AT13h R-15 the platform chain cut back below the head this process saw, a session put back (Postgres ${server.version})`, () => {
   const platform = createPlatformChain({ keys, ids });
   const PLATFORM = { kind: 'platform' } as const;
 

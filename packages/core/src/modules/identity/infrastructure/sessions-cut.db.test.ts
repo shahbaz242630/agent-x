@@ -230,7 +230,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-describe(`AT13h, S208: a cut platform chain signs everyone out once, signed, instead of locking the console (Postgres ${server.version})`, () => {
+describe(`SEC-DB-16 AT13h, S208: a cut platform chain signs everyone out once, signed, instead of locking the console (Postgres ${server.version})`, () => {
   it('found: the alarm, every session ended with one signed record, the read refused; then a new sign-in works on the same copy', async () => {
     const digest = await newDigest();
     const at = copy(digest);
