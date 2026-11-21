@@ -28,7 +28,7 @@
 import { AGENT_KEYS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import type { SignedStates } from '@agentx/core/modules/audit';
-import { createStepUpChallenges } from '@agentx/core/modules/identity';
+import { createStepUpChallenges, MEMBERSHIPS } from '@agentx/core/modules/identity';
 import {
   acceptDraft,
   MANDATES,
@@ -92,6 +92,8 @@ const CORRELATION = '0199a0f0-0000-7000-8000-0000000000bb';
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 
 let clock: FixedClock;
+/** The use cases' log lines, where the integrity alarm (`audit.integrity_failed`, SEV-1) shows. */
+let capture: LogCapture;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 let approvals: SpendRequestApprovals;
@@ -212,7 +214,8 @@ afterAll(async () => {
 /** The use cases on a clock started at `start`. */
 function startedAt(start: Date) {
   clock = new FixedClock(start);
-  const logger = testLogger(new LogCapture());
+  capture = new LogCapture();
+  const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
@@ -545,18 +548,28 @@ describe('approving a spend request waiting for approval (B4b)', () => {
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 
-  it('refuses a role raised to approver past the app as INTEGRITY_FAILED (SEC-DB-06)', async () => {
+  it('SEC-DB-06 refuses a role raised to approver past the app by the owner: INTEGRITY_FAILED, the alarm, the hold', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);
     const viewer = await member(w.org, 'viewer');
-    await database
-      .as('admin')
-      .query(`update identity.memberships set role = 'approver' where org_id = $1 and id = $2`, [
-        w.org,
-        viewer.membershipId,
-      ]);
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).not.toMatchObject({ outcome: 'held' });
+    // The database's owner raises the role, with no signed role-grant event behind it.
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, w.org);
+    try {
+      await owner.setColumn(viewer.membershipId, 'role', 'approver');
+    } finally {
+      await owner.end();
+    }
 
     expect(await asking(viewer, waiting.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({
+        event: 'audit.integrity_failed',
+        subjectType: MEMBERSHIPS.subject,
+        objectId: viewer.membershipId.toLowerCase(),
+      }),
+    );
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 
