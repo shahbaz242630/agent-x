@@ -432,7 +432,7 @@ describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version}
       envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: witnessDir }),
     );
     expect(code).toBe(0);
-    expect(readdirSync(path.join(witnessDir, 'e1', 'operator'))).toHaveLength(1);
+    expect(readdirSync(path.join(witnessDir, 'e1', 'operator')).length).toBeGreaterThan(0);
     expect(existsSync(path.join(witnessDir, 'e1', 'heads'))).toBe(false);
     const created = line('operator.organization_created');
     // The API's witness log takes the operator's file under the operator's public key alone.
@@ -464,6 +464,36 @@ describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version}
       expect.objectContaining({ level: 'error', command: 'create-organization' }),
     ]);
     expect(await counts()).toEqual({ orgs: before.orgs + 1, platform: before.platform + 1 });
+  });
+
+  it('run again after its heads failed to go out, a request done before witnesses the platform chain’s head as it stands, then exits 0', async () => {
+    const id = uuidV7Ids.next();
+    const asked = path.join(folder(), `resume-${id}`);
+    writeFileSync(asked, handoffRequest('handoff-resume', 'INC-2026/0209', id));
+    const blocked = path.join(folder(), 'not-a-folder');
+    writeFileSync(blocked, 'x');
+    const first = await run(['--request', asked], envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: blocked }));
+    expect(first.code).toBe(1);
+    expect(first.lines('operator.not_witnessed')).toHaveLength(1);
+    // The same request again, the store back: its change in force, recorded nothing, and still its head goes out.
+    const witnessDir = folder();
+    const again = await run(['--request', asked], envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: witnessDir }));
+    expect(again.code).toBe(0);
+    expect(again.events).not.toContain('operator.handoff_resumed');
+    const [head] = await database
+      .as('owner')
+      .query<{ seq: string }>('select seq::text as seq from platform_controls.audit_head');
+    const reader = createWitnessLog({
+      store: folderWriteOnceStore(witnessDir),
+      keys: auditKeys,
+      logger: quiet(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    await reader.refresh();
+    expect(reader.pending({ kind: 'platform' }).map(({ seq }) => seq)).toContain(BigInt(String(head?.seq)));
   });
 
   it('in production, refuses a command that writes a chain without the witness store, before it connects', async () => {

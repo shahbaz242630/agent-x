@@ -20,7 +20,7 @@ import {
   type WitnessLog,
   WitnessUnconfirmed,
 } from '@agentx/platform/audit-chain';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, createIdempotentWrites, type Database } from '@agentx/platform/db';
 import {
   createFakeWriteOnceStore,
   createTestDatabase,
@@ -178,7 +178,7 @@ async function jobsCopy(
  * The attack, up to Tx A: J walked and anchored; the agent suspended on W, its head witnessed there before the answer;
  * the owner cuts the suspension off. What the owner kept, and the request waiting for its hand-off.
  */
-async function suspendedOnWThenCut(store: FakeWriteOnceStore, witnessOnJ: boolean) {
+async function suspendedOnWThenCut(store: FakeWriteOnceStore, witnessOnJ: boolean, jReadsFirst = true) {
   const { w, acting } = await ready();
   const request = await ask(acting, w, { amount: ALLOWED() });
   const jWitness = witnessOnJ ? witnessOver(store) : undefined;
@@ -206,8 +206,8 @@ async function suspendedOnWThenCut(store: FakeWriteOnceStore, witnessOnJ: boolea
     await owner.windBack(back);
     await owner.withoutStatusGuard(() => owner.restoreRow(saved));
   });
-  // J reads the store as its job does, then holds every signed state it reads to its digest.
-  await jWitness?.refresh();
+  // J reads the store as its job does (unless its job hasn't come round yet), then holds every read to its digest.
+  if (jReadsFirst) await jWitness?.refresh();
   checkStatesWith(j.digest);
   witnessWith(jWitness);
   return { w, acting, request, j, jWitness, head };
@@ -272,14 +272,7 @@ describe('TR-1 (7), (5): the anchor check held to the heads witnessed', () => {
         list: () => Promise.resolve([w.org]),
         recorded: () => Promise.resolve([w.org]),
         probe: (chains, signal, pages) => trail.probeHeads(app, chains, signal, pages),
-        verify: (orgId, anchor) =>
-          trail.checkFromAnchor(
-            app,
-            orgId,
-            anchor ?? CHAIN_START,
-            undefined,
-            witness?.pending({ kind: 'organisation', orgId }),
-          ),
+        verify: (orgId, anchor, heldTo) => trail.checkFromAnchor(app, orgId, anchor ?? CHAIN_START, undefined, heldTo),
         hold: (orgId, failure) => holdOrganisation(app, orgId, { keys, ids, logger: testLogger(capture) }, failure),
       },
       keys,
@@ -336,6 +329,89 @@ describe('TR-1 (7), (5): the anchor check held to the heads witnessed', () => {
     expect(lines('audit.integrity_failed')).toContainEqual(
       expect.objectContaining({ check: 'witness', reason: 'cut_back' }),
     );
+  });
+});
+
+describe('TR-1 review finding 1: the anchor check on a witness view older than the run', () => {
+  it('reads the store first: a stop J had not listed yet, cut and grown again on, is the alarm, never anchored past', async () => {
+    const { w, j, jWitness } = await suspendedOnWThenCut(createFakeWriteOnceStore(), true, false);
+    expect(jWitness?.pending({ kind: 'organisation', orgId: w.org })).toEqual([]);
+    checkStatesWith(undefined);
+    witnessWith(undefined);
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspended',
+        details: { reason: 'a stale copy' },
+      }),
+    );
+    const anchor = j.anchors.latest({ kind: 'organisation', orgId: w.org });
+    const trail = createAuditTrail({ keys, ids });
+    await createAnchorCheck({
+      chains: [],
+      organizations: {
+        list: () => Promise.resolve([w.org]),
+        recorded: () => Promise.resolve([w.org]),
+        probe: (chains, signal, pages) => trail.probeHeads(app, chains, signal, pages),
+        verify: (orgId, from, heldTo) => trail.checkFromAnchor(app, orgId, from ?? CHAIN_START, undefined, heldTo),
+        hold: (orgId, failure) => holdOrganisation(app, orgId, { keys, ids, logger: testLogger(capture) }, failure),
+      },
+      keys,
+      clock,
+      logger: testLogger(capture),
+      staleAfterMs: 900_000,
+      deadlineMs: 120_000,
+      anchors: j.anchors,
+      witness: jWitness,
+    }).run();
+    expect(j.anchors.latest({ kind: 'organisation', orgId: w.org })?.seq).toBe(anchor?.seq);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'witness', reason: 'cut_back' }),
+    );
+  });
+});
+
+describe('TR-1 review finding 2: a retry answered from the stored result', () => {
+  it('on another copy, witnesses the chain’s head as it stands before it answers, so no retry is told “done” unwitnessed', async () => {
+    const { w } = await ready();
+    const idempotency = createIdempotentWrites({ keys, logger: testLogger(capture) });
+    const request = {
+      orgId: w.org,
+      client: { kind: 'agent' as const, id: w.agent },
+      operation: 'agents.suspend',
+      key: 'tr1-replay-key',
+      payload: '{}',
+    };
+    const suspend = () =>
+      signed(w, (tx, states) =>
+        idempotency.run(tx, request, async () => {
+          await states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+            actor: OPERATOR,
+            action: 'agent.suspended',
+            details: { reason: 'test' },
+          });
+          return { status: 200, resourceId: w.agent };
+        }),
+      );
+    // The first answer: saved, the store down, a 503 for it.
+    const down = createFakeWriteOnceStore();
+    down.instead.put = () => Promise.reject(new Error('store down'));
+    witnessWith(witnessOver(down, 100));
+    await expect(suspend()).rejects.toBeInstanceOf(WitnessUnconfirmed);
+    // Sent again on another copy (or after a restart): answered from the stored result, the head witnessed first.
+    const up = createFakeWriteOnceStore();
+    witnessWith(witnessOver(up));
+    expect(await suspend()).toMatchObject({ result: { status: 200, resourceId: w.agent } });
+    witnessWith(undefined);
+    let head: SavedHead | undefined;
+    await asOwner(w, async (owner) => {
+      head = await owner.saveHead();
+    });
+    const reader = witnessOver(up);
+    await reader.refresh();
+    expect(reader.pending({ kind: 'organisation', orgId: w.org }).map(({ seq }) => seq)).toEqual([
+      BigInt(head?.seq ?? 'x'),
+    ]);
   });
 });
 

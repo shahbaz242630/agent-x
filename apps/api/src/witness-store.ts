@@ -85,6 +85,8 @@ export function witnessOf(
     now: () => clock.now(),
     epoch: config.audit.anchorEpoch,
     writes: leading,
+    // A web copy checks no chain: it lets a head go once the jobs copy, which confirms every head, anchored past it.
+    dropsAtAnchor: config.role === 'web',
     // As the anchor check's own stale limit: what the store may fail before that is the alert.
     alertAfterMs: config.audit.anchorSeconds * 3 * 1000,
     mostBytes: Math.floor(getHeapStatistics().heap_size_limit * HEAP_SHARE),

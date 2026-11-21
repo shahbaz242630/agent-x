@@ -384,9 +384,9 @@ export const PLAIN_WORDS = {
     next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_WITNESS_URL: playbook section H.',
   },
   'audit.witness_beyond_memory': {
-    happened: 'This copy holds more witnessed audit chain heads than its memory allows, and let the oldest go.',
-    broke: 'Payments of the organisation named wait until its chain is anchored past them. Others go on.',
-    next: 'Check the anchor check is keeping up (its own lines say); give the API more memory if it is.',
+    happened: 'This copy had more audit chain heads than its memory allows, and let the oldest go.',
+    broke: 'The chain named is anchored no more and its payments wait: a head let go cannot be checked.',
+    next: 'Give the API more memory, then rebase that chain: playbook section H.',
   },
   'audit.anchor_store_write_refused': {
     happened: 'An API copy that only reads the audit anchors tried to write a file to their store.',
@@ -1341,10 +1341,9 @@ export const PLAIN_WORDS = {
     next: 'Check the database, then re-run the same request file: it says if it was done. Check a new organisation was not made before typing it again.',
   },
   'operator.not_witnessed': {
-    happened: 'An operator job finished its change, but could not write its audit chain heads to the witness store.',
-    broke:
-      'The change is saved. Until its heads are written, other copies cannot tell if someone cuts it out of the log.',
-    next: 'Check the witness store on Azure, then re-run the same request file: it finds its change done and says so.',
+    happened: 'An operator job made its change but could not write its audit chain heads to the witness store.',
+    broke: 'The change is saved, but no other copy can yet tell if it is cut out of the log.',
+    next: 'Check the witness store on Azure, then run the same request file again.',
   },
   'operator.handoff_notice_failed': {
     happened: 'A pause or resume of payments to the bank was recorded, but one organisation was not told.',

@@ -74,6 +74,7 @@ import {
   EVIDENCE_REFERENCE,
   REBASE_REASONS,
   type RebaseReason,
+  type WitnessLog,
 } from '@agentx/platform/audit-chain';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
@@ -84,6 +85,7 @@ import {
   OPERATOR_ROLE,
   transactionsReadOnly,
   UnsafeDatabaseRole,
+  withTenant,
 } from '@agentx/platform/db';
 import { type KeyProvider, loadKeys, publicKeyChecker } from '@agentx/platform/keys';
 import {
@@ -712,6 +714,10 @@ const CHAIN_WRITERS: ReadonlySet<string> = new Set([
   'handoff-resume',
   FACTOR_RESET_NOTICE,
   CHAIN_REBASE,
+  // The exports record on the platform chain who exported what.
+  'audit-export',
+  'activity-export',
+  PERSON_ACTIVITY_EXPORT,
 ]);
 
 const NO_WITNESS_PROBLEM =
@@ -761,12 +767,48 @@ async function run(
   const code = await runRequest(config, keys, request, logger);
   if (witness === undefined) return code;
   try {
+    // A request done before (run again after its heads failed to go out) records nothing: the chains' heads as they
+    // stand go out instead, covering its events, before it says it is done.
+    if (code === 0 && writesChains) await noteHeadsAsTheyStand(config, logger, request, witness);
     await witness.drained();
     return code;
   } catch (error) {
     // Done in the database, its heads not yet outside it: never reported as done. Run the same request again.
     logger.error('operator.not_witnessed', { command: request.command, err: error });
     return 1;
+  }
+}
+
+/**
+ * The platform chain's head as it stands, and the organisation's the request names, if any, noted `now` (TR-1): a head
+ * at or above a command's own events covers them, as every read is held to it and a walk re-hashes through it.
+ */
+async function noteHeadsAsTheyStand(
+  config: OperatorConfig,
+  logger: Logger,
+  request: Request,
+  witness: Pick<WitnessLog, 'note'>,
+): Promise<void> {
+  const database = await connect(config, logger);
+  if (database === undefined) throw new Error("the chains' heads could not be read to witness them");
+  try {
+    const rows = await database.selectFrom('platform_controls.audit_head').select(['seq', 'hash']).execute();
+    const noted = (chain: Chain, row: { seq: unknown; hash: unknown } | undefined): void => {
+      if (row !== undefined && typeof row.seq === 'bigint' && row.hash instanceof Buffer) {
+        witness.note(chain, { seq: row.seq, hash: row.hash }, 'now');
+      }
+    };
+    // One head row, as ever: should the owner have added a second, none is believed or noted.
+    if (rows.length === 1) noted({ kind: 'platform' }, rows[0]);
+    const orgId = 'orgId' in request && typeof request.orgId === 'string' ? request.orgId : undefined;
+    if (orgId !== undefined) {
+      const org = await withTenant(database, orgId, (tx) =>
+        tx.selectFrom('audit.heads').select(['seq', 'hash']).where('org_id', '=', orgId).executeTakeFirst(),
+      );
+      noted({ kind: 'organisation', orgId }, org);
+    }
+  } finally {
+    await database.destroy();
   }
 }
 

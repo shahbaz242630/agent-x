@@ -103,6 +103,12 @@ export const rotatedChecksOf = (
 const PLATFORM_WHOLE_EVERY_MS = DAY_MS;
 
 /** A platform chain check's report: for one that holds, the signed objects it read (AT13c), when, and from where. */
+/** A witnessed head as a walk is held to it (TR-1). */
+interface Witnessed {
+  readonly seq: bigint;
+  readonly hash: Buffer;
+}
+
 type PlatformReport = ChainReport & {
   readonly signed?: SignedSeen;
   readonly began?: Date;
@@ -123,19 +129,22 @@ export function platformChainCheck({
   clock,
   owed,
 }: {
-  readonly fromAnchor: (from: CheckedPoint) => Promise<PlatformReport>;
-  readonly whole: (anchor: CheckedPoint | undefined) => Promise<PlatformReport>;
+  /** Each held to the heads copies witnessed where given (TR-1). */
+  readonly fromAnchor: (from: CheckedPoint, heldTo?: readonly Witnessed[]) => Promise<PlatformReport>;
+  readonly whole: (anchor: CheckedPoint | undefined, heldTo?: readonly Witnessed[]) => Promise<PlatformReport>;
   readonly clock: Clock;
   /** Whether the digest owes the chain, anchored there, a walk from its first event: none, never. */
   readonly owed?: (anchor: CheckedPoint) => boolean;
-}): (anchor: CheckedPoint | undefined) => Promise<PlatformReport> {
+}): (anchor: CheckedPoint | undefined, heldTo?: readonly Witnessed[]) => Promise<PlatformReport> {
   let wholeAt: number | undefined;
-  return async (anchor) => {
+  return async (anchor, heldTo) => {
     const began = clock.now();
     const now = began.getTime();
     const fresh = wholeAt !== undefined && now - wholeAt < PLATFORM_WHOLE_EVERY_MS;
-    if (anchor !== undefined && fresh && owed?.(anchor) !== true) return { ...(await fromAnchor(anchor)), began };
-    const report = await whole(anchor);
+    if (anchor !== undefined && fresh && owed?.(anchor) !== true) {
+      return { ...(await fromAnchor(anchor, heldTo)), began };
+    }
+    const report = await whole(anchor, heldTo);
     if (!report.ok) return report;
     wholeAt = now;
     return { ...report, began, walkedFrom: 0n };

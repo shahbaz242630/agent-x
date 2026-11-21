@@ -245,6 +245,16 @@ interface KeyRow {
 const claimedIn = new WeakSet<object>();
 
 /**
+ * The transactions whose write was answered from an earlier one's stored result (a replay), writing nothing (TR-1):
+ * the earlier write's chain head may never have been witnessed (its answer was a 503 for that), so the caller witnesses
+ * the chain's head as it stands before this answer goes out.
+ */
+const replayedIn = new WeakSet<object>();
+
+/** Whether the transaction's idempotent write was answered from an earlier one's result, writing nothing (TR-1). */
+export const answeredFromEarlier = (tx: object): boolean => replayedIn.has(tx);
+
+/**
  * The claim's savepoint, a name no other step may use: a rollback goes to the
  * newest savepoint of its name, so a write's own savepoint of the same name
  * would stand in for the claim's, and a refused claim could then be committed.
@@ -343,7 +353,7 @@ export function createIdempotentWrites({
 
         if (claimed.rows.length === 1) return await done();
         const answer = await answerFromRow(at, keys, message);
-        if (answer !== undefined) return answer;
+        if (answer !== undefined) return replayed(tx, answer);
         // No row, though one stood in the claim's way: swept since (B1e-2), so
         // claimed again, once. A row still in the way and still unread is one
         // row security hides: someone past the app rewrote the table's policy.
@@ -351,7 +361,7 @@ export function createIdempotentWrites({
         const again = await orBusy(inserted.execute(tx));
         if (again.rows.length === 1) return await done();
         const second = await answerFromRow(at, keys, message);
-        if (second !== undefined) return second;
+        if (second !== undefined) return replayed(tx, second);
         log.error('idempotency.unreadable', { ...facts, problem: 'row_hidden' });
         throw new IdempotencyFailed(
           'unreadable',
@@ -379,6 +389,12 @@ export function createIdempotentWrites({
       }
     },
   });
+}
+
+/** An answer from an earlier write's row, its transaction marked so (answeredFromEarlier). */
+function replayed(tx: object, answer: IdempotentWrite): IdempotentWrite {
+  replayedIn.add(tx);
+  return answer;
 }
 
 /**

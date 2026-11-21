@@ -12,6 +12,8 @@
 // withSignedStates waits, after its transaction, for its `now` heads and any this process holds unconfirmed for the
 // organisation (`waitWitnessed`): WitnessUnconfirmed is the request's 503, its change saved, the head still queued.
 import type { Chain, ChainWitness, WitnessClass } from '@agentx/platform/audit-chain';
+import { afterCommit } from '@agentx/platform/db';
+import { sql, type Transaction } from 'kysely';
 
 import { strongerClass } from './witness-class.ts';
 
@@ -68,6 +70,27 @@ export function noteCommitted(
 /** The chains `tx` wrote with a `now` write: its answer waits for them (withSignedStates). */
 export const nowChainsOf = (tx: object): readonly Chain[] =>
   [...(writtenIn.get(tx)?.values() ?? [])].filter(({ klass }) => klass === 'now').map(({ chain }) => chain);
+
+/**
+ * The organisation's chain head as it stands, witnessed `now` once `tx` commits (TR-1): for an answer that writes
+ * nothing but tells of an earlier write (an idempotent replay), whose own head may never have been witnessed. A head
+ * witnessed at or above that write's covers it: every read is held to it, and a walk re-hashes through it. One statement.
+ */
+export async function witnessHeadAsItStands(tx: Transaction<unknown>, orgId: string): Promise<void> {
+  if (witness === undefined) return;
+  const chain: Chain = { kind: 'organisation', orgId: orgId.toLowerCase() };
+  const { rows } = await sql<{ seq: unknown; hash: unknown }>`
+    select h.seq, h.hash from audit.heads h where h.org_id = ${chain.orgId}
+  `.execute(tx);
+  const [row] = rows;
+  if (row === undefined || typeof row.seq !== 'bigint' || !(row.hash instanceof Buffer)) return;
+  const head = { seq: row.seq, hash: row.hash };
+  witnessedWrite(tx, chain, 'now');
+  wroteTo(tx, chain, head.seq);
+  await afterCommit(tx, () => {
+    noteCommitted(tx, chain, head);
+  });
+}
 
 /**
  * Waits for every `now` head this process noted for the chains, those of `tx` among them: WitnessUnconfirmed past the
