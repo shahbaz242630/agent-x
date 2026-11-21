@@ -18,6 +18,12 @@
 // 0079 ran (before PL-57) has none and needs none; any recorded from the place
 // 0079 wrote down on does, a place no running role can move. The rule is shared
 // with every organisation's chain (audit-chain/operator-signature.ts).
+//
+// **What the anchor check's walk reads is kept (AT13c).** Given `subjectOf`, the
+// walk from the anchor and the whole walk say, for each platform event that is
+// some object's signed state (the hand-off pause's moves, a session's signed
+// ends), that object's newest place they read: the signed states' digest keeps
+// it, so a read finding an older one is tampering at decision time.
 import {
   type AnchorPoint,
   appendEvent,
@@ -43,7 +49,9 @@ import {
   operatorSignature,
   passStep,
   sealedSigned,
+  type SignedSeen,
   type StoredEntry,
+  subjectKey,
   verifyChain,
   verifyFromAnchor,
 } from '@agentx/platform/audit-chain';
@@ -89,9 +97,10 @@ export interface PlatformChain {
    * each statement given 10 seconds at most, a wait for a lock included: a
    * held lock or a stalled query then fails the check, which says so. The
    * anchor check keeps its own deadline too, since someone who owns the
-   * database can get round this one.
+   * database can get round this one. One that holds says which signed objects
+   * it read, given `subjectOf` (AT13c).
    */
-  verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+  verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<WalkedReport>;
   /**
    * Every organisation the chain records as created (`organization.created`'s
    * `orgId`, B1c-2b), in the order recorded, in a transaction of its own, 10
@@ -103,9 +112,14 @@ export interface PlatformChain {
   createdOrganizations(db: Kysely<PlatformControlsTables>, page?: number, answeredWithinMs?: number): Promise<string[]>;
   /**
    * The chain checked from its last anchor (verifyFromAnchor, 4D2e E): at most
-   * `most` events past it, in a limited transaction of its own.
+   * `most` events past it, in a limited transaction of its own. One that holds
+   * says which signed objects it read, given `subjectOf` (AT13c).
    */
-  checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number): Promise<ChainStep>;
+  checkFromAnchor(
+    db: Kysely<PlatformControlsTables>,
+    from: CheckedPoint,
+    most?: number,
+  ): Promise<ChainStep & { readonly signed?: SignedSeen }>;
   /** One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's. */
   passStep(
     db: Kysely<PlatformControlsTables>,
@@ -132,6 +146,46 @@ export interface PlatformChain {
     answeredWithinMs?: number,
   ): Promise<{ readonly orgIds: readonly string[]; readonly seq: bigint }>;
 }
+
+/** A whole check's report, and for one that holds, the signed objects it read (AT13c). */
+type WalkedReport = ChainReport & { readonly signed?: SignedSeen };
+
+/**
+ * The signed states' object a platform event is, if it is one (AT13c): its type and ID as the digest keys it. Given by
+ * the process that keeps the digest, which knows every module's events (job-list.ts).
+ */
+export type PlatformSubjectOf = (action: string, details: string) => readonly [string, string] | undefined;
+
+/**
+ * The walk's reads, each event looked at as it goes for an object it is a signed state of: no read of its own. Kept
+ * only for a walk that holds (`walked`).
+ */
+function seeingSubjects(
+  reader: ChainReader & ChainEdgeReader,
+  seen: Map<string, bigint>,
+  subjectOf: PlatformSubjectOf,
+): ChainReader & ChainEdgeReader {
+  return {
+    ...reader,
+    async events(after, upTo, limit) {
+      const batch = await reader.events(after, upTo, limit);
+      for (const entry of batch) {
+        // platformEventContent's order: actor, its type and ID, then the action, then the details.
+        const [, , , , action, , details] = entry?.content ?? [];
+        if (entry === undefined || typeof action !== 'string' || typeof details !== 'string') continue;
+        const subject = subjectOf(action, details);
+        if (subject === undefined) continue;
+        const key = subjectKey(...subject);
+        if ((seen.get(key) ?? 0n) < entry.seq) seen.set(key, entry.seq);
+      }
+      return batch;
+    },
+  };
+}
+
+/** A walk and what it saw, kept only for one that holds: one that fails read no chain to believe. */
+const walked = <Step extends ChainReport>(step: Step, seen: SignedSeen): Step & { readonly signed?: SignedSeen } =>
+  step.ok && seen.size > 0 ? { ...step, signed: seen } : step;
 
 /** The platform event that records an organisation made, with its `orgId` in the details. */
 const ORGANIZATION_CREATED = 'organization.created';
@@ -505,10 +559,23 @@ async function boundHeadWait(tx: PlatformTransaction): Promise<void> {
 export function createPlatformChain({
   keys,
   ids,
+  subjectOf,
 }: {
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
+  /** Which events are some object's signed state, for the anchor check's walks to say (AT13c): none, and none say. */
+  readonly subjectOf?: PlatformSubjectOf;
 }): PlatformChain {
+  /** The walk's reads, seeing the signed objects where `subjectOf` is given, and what it saw kept for it. */
+  const walking = async <Step extends ChainReport>(
+    walk: (reader: ChainReader & ChainEdgeReader) => Promise<Step>,
+    tx: PlatformTransaction,
+  ): Promise<Step & { readonly signed?: SignedSeen }> => {
+    if (subjectOf === undefined) return walk(readerFor(tx, keys));
+    const seen = new Map<string, bigint>();
+    return walked(await walk(seeingSubjects(readerFor(tx, keys), seen, subjectOf)), seen);
+  };
+
   const record = async (tx: PlatformTransaction, input: PlatformEvent): Promise<RecordedPlatformEvent> => {
     const event = checkedPlatformEvent(input, hidesField);
     const details = canonicalDetails(event.details);
@@ -534,9 +601,9 @@ export function createPlatformChain({
       return verifyChain(keys, CHAIN, readerFor(tx, keys), anchor);
     },
 
-    verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<ChainReport> {
+    verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<WalkedReport> {
       // Each statement limited, waits for locks included, so the pool can be closed soon after a stop.
-      return limitedTransaction(db, (tx) => verifyChain(keys, CHAIN, readerFor(tx, keys), anchor), {
+      return limitedTransaction(db, (tx) => walking((reader) => verifyChain(keys, CHAIN, reader, anchor), tx), {
         answeredWithinMs: JOB_ANSWER_WITHIN_MS,
       });
     },
@@ -573,10 +640,12 @@ export function createPlatformChain({
       }
     },
 
-    checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number): Promise<ChainStep> {
-      return limitedTransaction(db, (tx) => verifyFromAnchor(keys, CHAIN, readerFor(tx, keys), from, most), {
-        answeredWithinMs: JOB_ANSWER_WITHIN_MS,
-      });
+    checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number) {
+      return limitedTransaction(
+        db,
+        (tx) => walking((reader) => verifyFromAnchor(keys, CHAIN, reader, from, most), tx),
+        { answeredWithinMs: JOB_ANSWER_WITHIN_MS },
+      );
     },
 
     passStep(

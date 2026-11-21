@@ -121,6 +121,16 @@ export async function latestPlatformTimeOf(
   return row?.latest ?? undefined;
 }
 
+/**
+ * The newest place among the chain's events that match `kind`, null with none (AT13c): what a read compares with the
+ * signed states' digest, which keeps places, not times. By the same indexes as the reads above.
+ */
+export const latestPlatformSeqRead = (db: Reader, kind: PlatformEventsMatching) =>
+  db
+    .selectFrom('platform_controls.audit_events')
+    .select(sql<bigint | null>`max(seq)`.as('latest'))
+    .where(sql<boolean>`${matches(kind)}`);
+
 /** The read platformEventWith runs. */
 export const platformEventWithRead = (
   db: Reader,

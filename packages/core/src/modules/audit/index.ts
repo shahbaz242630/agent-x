@@ -131,5 +131,6 @@ export {
   markHoldsWith,
   pollHoldsWaiting,
   type SignedStatesServices,
+  statesDigest,
   withSignedStates,
 } from './infrastructure/with-signed-states.ts';

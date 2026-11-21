@@ -14,7 +14,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createFakeWriteOnceStore, type FakeWriteOnceStore, FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createAnchorCheck, type OrganisationChains, type WalkedReport } from './anchor-check.ts';
+import { type CheckedChain, createAnchorCheck, type OrganisationChains, type WalkedReport } from './anchor-check.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -56,7 +56,11 @@ function chainOf(
 }
 
 /** One process's start: the anchors' log and the digest over the same store, and the check keeping both. */
-function process(fake: FakeWriteOnceStore, organizations: OrganisationChains, { deadlineMs = 120_000 } = {}) {
+function process(
+  fake: FakeWriteOnceStore,
+  organizations: OrganisationChains,
+  { deadlineMs = 120_000, chains = [] as readonly CheckedChain[] } = {},
+) {
   const capture = new LogCapture();
   const logger = testLogger(capture);
   const clock = new FixedClock(AT);
@@ -73,7 +77,7 @@ function process(fake: FakeWriteOnceStore, organizations: OrganisationChains, { 
     mostBytes: 1024 * 1024,
   });
   const check = createAnchorCheck({
-    chains: [],
+    chains,
     organizations,
     keys,
     clock,
@@ -87,6 +91,42 @@ function process(fake: FakeWriteOnceStore, organizations: OrganisationChains, { 
 }
 
 const digestFiles = (fake: FakeWriteOnceStore) => [...fake.files.keys()].filter((name) => name.includes('/digests/'));
+
+describe('the anchor check keeping the platform chain’s signed states in the digest (AT13c)', () => {
+  const PLATFORM = { kind: 'platform' } as const;
+  const PAUSE = subjectKey('platform.handoff_pause', 'pause');
+  const ENDED = subjectKey('identity.session_ended', 'p/r');
+
+  it('records its walk from the anchor, a whole walk from its first event even where the anchor stays, and reads back', async () => {
+    const fake = createFakeWriteOnceStore();
+    const platform: { current: WalkedReport } = { current: { ...walk(4n, new Map([[PAUSE, 3n]])), walkedFrom: 0n } };
+    const chains = [{ chain: PLATFORM, verify: () => Promise.resolve(platform.current) }];
+    const first = process(fake, chainOf({ current: walk(1n) }), { chains });
+    await first.check.run();
+    expect(first.digest.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(3n);
+    expect(first.digest.covers(PLATFORM, 4n)).toBe(true);
+    // The anchor stays at 4: a whole walk read it all again, so what it read is kept.
+    platform.current = { ...walk(4n, new Map([[ENDED, 2n]])), walkedFrom: 0n };
+    await first.check.run();
+    expect(first.digest.latest(PLATFORM, 'identity.session_ended', 'p/r')).toBe(2n);
+    // A walk from the anchor that moved nothing reads nothing new: nothing kept from it.
+    platform.current = walk(4n, new Map([[subjectKey('identity.sessions_ended', 'p'), 1n]]));
+    await first.check.run();
+    expect(first.digest.latest(PLATFORM, 'identity.sessions_ended', 'p')).toBeUndefined();
+    // One that moved it on, from the anchor: its stretch joins on.
+    platform.current = walk(6n, new Map([[PAUSE, 5n]]));
+    await first.check.run();
+    expect(first.digest.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(5n);
+    expect(first.digest.covers(PLATFORM, 6n)).toBe(true);
+
+    const restarted = process(fake, chainOf({ current: walk(1n) }), { chains });
+    expect(restarted.digest.covers(PLATFORM, 6n)).toBe(false);
+    await restarted.check.run();
+    expect(restarted.digest.covers(PLATFORM, 6n)).toBe(true);
+    expect(restarted.digest.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(5n);
+    expect(restarted.digest.latest(PLATFORM, 'identity.session_ended', 'p/r')).toBe(2n);
+  });
+});
 
 describe('the anchor check keeping the signed states’ digest (AT13)', () => {
   it('records what a walk read with its new anchor, writes it beside the anchors, and a restart reads it back', async () => {

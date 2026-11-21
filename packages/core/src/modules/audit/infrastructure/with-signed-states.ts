@@ -189,6 +189,9 @@ export function checkStatesWith(digest: Pick<StateDigest, 'latest'> | undefined)
   stateDigest = digest;
 }
 
+/** The digest given at boot, if any yet: for reads held to it outside this module (AT13c, the sessions' signed ends). */
+export const statesDigest = (): Pick<StateDigest, 'latest'> | undefined => stateDigest;
+
 /** How a hold set marks the hold history's work, in the hold's transaction (the header): none until a process gives it. */
 let markHold: ((tx: Transaction<AuditTables>, orgId: string) => Promise<void>) | undefined;
 

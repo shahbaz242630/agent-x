@@ -91,6 +91,46 @@ export const sessionRotatedEvent = (retired: RetiredSession, rotatedAt: Date) =>
     },
   }) satisfies PlatformEvent;
 
+/**
+ * Each signed end's object in the signed states' digest (AT13c, digest-log.ts): the facts a session's read matches it
+ * by, as its ID. A sign-out by its person and record; a rotation by those and the MAC it retired; a person's sessions
+ * all ended by the person, its newest place the newest such end.
+ */
+export const signedEndKey = {
+  ended: (person: string, record: string): string => `${person.toLowerCase()}/${record.toLowerCase()}`,
+  rotated: (person: string, record: string, retired: string): string =>
+    `${person.toLowerCase()}/${record.toLowerCase()}/${retired.toLowerCase()}`,
+};
+
+/** A fact of the details, if it is text. */
+const textIn = (details: Readonly<Record<string, unknown>>, name: string): string | undefined => {
+  const value = details[name];
+  return typeof value === 'string' ? value : undefined;
+};
+
+/**
+ * The digest's object a platform event is, if it is a signed end (AT13c): what the anchor check's walk of the platform
+ * chain keeps, so an end deleted below the anchor, its session's row put back, is found at the session's next read.
+ * Details that can't be read give none: the chain's own check is what judges the event.
+ */
+export function signedEndSubjectOf(action: string, detailsJson: string): readonly [string, string] | undefined {
+  if (action !== SESSION_ENDED && action !== SESSION_ROTATED && action !== SESSIONS_ENDED) return undefined;
+  let details: unknown;
+  try {
+    details = JSON.parse(detailsJson);
+  } catch {
+    return undefined;
+  }
+  if (typeof details !== 'object' || details === null) return undefined;
+  const facts = details as Readonly<Record<string, unknown>>;
+  const [person, record, retired] = [textIn(facts, 'person'), textIn(facts, 'record'), textIn(facts, 'retired')];
+  if (person === undefined) return undefined;
+  if (action === SESSIONS_ENDED) return [action, person.toLowerCase()];
+  if (record === undefined) return undefined;
+  if (action === SESSION_ENDED) return [action, signedEndKey.ended(person, record)];
+  return retired === undefined ? undefined : [action, signedEndKey.rotated(person, record, retired)];
+}
+
 /** How long ends are kept past the newest event checked: a login flow's ten minutes, two for clocks, and spare. */
 const KEPT_MS = 20 * 60 * 1000;
 

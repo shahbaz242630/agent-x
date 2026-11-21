@@ -29,8 +29,9 @@ import {
   keptPersonReader,
   membersFor,
   resetLinkFor,
+  signedEndSubjectOf,
 } from '@agentx/core/modules/identity';
-import { createPlatformChain } from '@agentx/core/modules/platform-controls';
+import { createPlatformChain, pauseSubjectOf, type PlatformSubjectOf } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
 import { sweepConnectionTokens } from '@agentx/core/modules/agents';
 import { sweepClientMetadata, sweepClientNetworks, sweepClients, sweepFlows } from '@agentx/core/modules/oauth';
@@ -107,6 +108,10 @@ const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
 /** What the signed states' digest may hold where no store keeps the anchors: a tenth of the heap, as with a store. */
 const MEMORY_DIGEST_BYTES = Math.floor(getHeapStatistics().heap_size_limit / 10);
+
+/** The platform events that are some object's signed state, for the digest (AT13c): the pause's, the sessions' ends. */
+export const platformSubjectOf: PlatformSubjectOf = (action, details) =>
+  pauseSubjectOf(action) ?? signedEndSubjectOf(action, details);
 
 /**
  * The idempotency keys' retention sweep (B1e-3): at each start, then an hour
@@ -283,17 +288,19 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       leading,
     });
   checkStatesWith(digest);
-  const platform = createPlatformChain({ keys, ids: uuidV7Ids });
+  // The platform chain's walks keep its signed states in the digest too (AT13c): the pause, the sessions' signed ends.
+  const platform = createPlatformChain({ keys, ids: uuidV7Ids, subjectOf: platformSubjectOf });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const anchors = createAnchorCheck({
     chains: [
       {
         chain: { kind: 'platform' },
-        // From its anchor, and whole once a day (4D2e E8).
+        // From its anchor, and whole once a day (4D2e E8), or when the digest owes it a walk (AT13c).
         verify: platformChainCheck({
           fromAnchor: (from) => platform.checkFromAnchor(database, from),
           whole: (anchor) => platform.verifyAlone(database, anchor),
           clock: systemClock,
+          owed: (anchor) => digest.owed({ kind: 'platform' }, anchor.seq),
         }),
       },
     ],

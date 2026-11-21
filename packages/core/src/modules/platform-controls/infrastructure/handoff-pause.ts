@@ -21,11 +21,20 @@
 // or reordered) is the anchor check's, every 5 minutes; no hand-off pays for
 // a full check of its own.
 //
+// Its newest events deleted once they lie below the platform chain's anchor,
+// older than its last 1,000, with the row pointed back at an older one, would
+// read true here (R-15). So where the process keeps the signed states' digest
+// (AT13c, digest-log.ts), the anchor check's walk keeps the pause's newest
+// place there (`pauseSubjectOf`), and a read finding an older newest event, or
+// none, is tampering too: the alarm, read as paused. Asked before the event's
+// statement, so whatever the walk read was committed before its snapshot.
+//
 // The row is the first lock any transaction that reads or moves it takes
 // (ADR-006 §6 level 1): FOR SHARE by a hand-off, FOR NO KEY UPDATE by a
 // change, so a pause can't commit halfway through a hand-off's check, and
 // whichever commits second sees the first. The change records its event
 // last, under the chain head's lock (level 13).
+import type { StateDigest } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -45,6 +54,13 @@ export const HANDOFF_PAUSED = 'platform.handoff_paused';
 
 /** The platform event that resumes them. */
 export const HANDOFF_RESUMED = 'platform.handoff_resumed';
+
+/** The pause's object in the signed states' digest (AT13c): one for the platform. */
+const PAUSE_SUBJECT = ['platform.handoff_pause', 'pause'] as const;
+
+/** The digest's object a platform event is, if it moves the pause: what the anchor check's walk keeps (AT13c). */
+export const pauseSubjectOf = (action: string): readonly [string, string] | undefined =>
+  action === HANDOFF_PAUSED || action === HANDOFF_RESUMED ? PAUSE_SUBJECT : undefined;
 
 /** The pause as its row and newest event agree on it: since when, and by which event (none for the row as born). */
 export type HandoffPause =
@@ -103,7 +119,12 @@ interface Read {
         readonly believed: boolean;
       }
     | undefined;
+  /** Where the digest says the newest pause or resume is (AT13c), if it says. */
+  readonly known: bigint | undefined;
 }
+
+/** What the pause's read is held to: the digest the process keeps, if it keeps one. */
+type PauseDigest = Pick<StateDigest, 'latest'> | undefined;
 
 /**
  * The row, locked, then the newest event. Two statements, in this order: under
@@ -113,9 +134,16 @@ interface Read {
  * event as it was before the wait while Postgres re-reads the row as it is
  * after, and take a pause just made for tampering.
  */
-async function readPause(tx: PlatformTransaction, lock: HandoffPauseLock, keys: KeyProvider): Promise<Read> {
+async function readPause(
+  tx: PlatformTransaction,
+  lock: HandoffPauseLock,
+  keys: KeyProvider,
+  digest: PauseDigest,
+): Promise<Read> {
   const locking = tx.selectFrom('platform_controls.handoff_pause').select(['paused', 'event_seq', 'event_id']);
   const rows = await (lock === 'share' ? locking.forShare() : locking.forNoKeyUpdate()).execute();
+  // Before the event's statement: what the walk read was committed before that statement's snapshot.
+  const known = digest?.latest({ kind: 'platform' }, ...PAUSE_SUBJECT);
   const newest = await platformEventsSigned(tx)
     .where('e.action', 'in', [HANDOFF_PAUSED, HANDOFF_RESUMED])
     .orderBy('e.seq', 'desc')
@@ -128,6 +156,7 @@ async function readPause(tx: PlatformTransaction, lock: HandoffPauseLock, keys: 
   else if (others.length === 0) read = { paused: row.paused, seq: row.event_seq, id: row.event_id };
   return {
     row: read,
+    known,
     newest:
       newest === undefined
         ? undefined
@@ -141,6 +170,10 @@ async function readPause(tx: PlatformTransaction, lock: HandoffPauseLock, keys: 
           },
   };
 }
+
+/** Whether the newest pause or resume read is older than the digest's, or gone (AT13c): moved or deleted past the app. */
+const rolledBack = ({ newest, known }: Read): boolean =>
+  known !== undefined && (newest === undefined || newest.seq < known);
 
 /** The pause its row and newest event agree on, or undefined when they don't. */
 function agreed({ row, newest }: Read): HandoffPause | undefined {
@@ -160,23 +193,32 @@ function agreed({ row, newest }: Read): HandoffPause | undefined {
 /**
  * The hand-off pause, its row locked as `lock` asks, the first lock the
  * caller's transaction takes (ADR-006 §6 level 1). `tampered` when the row
- * and its newest event don't agree, with the integrity alarm raised: a caller
- * reads it as paused, so nothing is handed off on a row that can't be believed.
+ * and its newest event don't agree, or that event is older than the digest's
+ * (`digest`, AT13c), with the integrity alarm raised: a caller reads it as
+ * paused, so nothing is handed off on a row that can't be believed.
  */
 export async function handoffPauseOf(
   tx: PlatformTransaction,
   lock: HandoffPauseLock,
-  { keys, logger }: { readonly keys: KeyProvider; readonly logger: Logger },
+  { keys, logger, digest }: { readonly keys: KeyProvider; readonly logger: Logger; readonly digest?: PauseDigest },
 ): Promise<HandoffPause> {
-  const read = await readPause(tx, lock, keys);
-  const pause = agreed(read);
+  const read = await readPause(tx, lock, keys, digest);
+  const pause = rolledBack(read) ? undefined : agreed(read);
   if (pause !== undefined) return pause;
   logger.error('audit.integrity_failed', {
     chain: 'platform',
     check: 'handoff_pause',
-    reason: typeof read.row === 'string' ? read.row : read.newest?.believed === false ? 'unsealed' : 'mismatch',
+    reason: pauseProblem(read),
+    ...(read.known === undefined ? {} : { seq: read.known.toString() }),
   });
   return { outcome: 'tampered' };
+}
+
+/** What the alarm says of a pause not believed: the row's own problem first, then the digest's, then the event's. */
+function pauseProblem(read: Read): string {
+  if (typeof read.row === 'string') return read.row;
+  if (rolledBack(read)) return 'rolled_back';
+  return read.newest?.believed === false ? 'unsealed' : 'mismatch';
 }
 
 /**

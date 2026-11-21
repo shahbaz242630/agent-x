@@ -455,7 +455,7 @@ describe('the organisations the platform chain records, read past the last read 
 
 describe("the platform chain's check (4D2e E8, each run's step 2)", () => {
   /** A check of the platform chain, each read recorded: from its anchor, or whole. */
-  function platformChain(wholeReports: readonly ChainReport[] = [ok(4n)]) {
+  function platformChain(wholeReports: readonly ChainReport[] = [ok(4n)], owed?: (anchor: CheckedPoint) => boolean) {
     const reads: string[] = [];
     let turn = 0;
     const clock = new FixedClock(AT);
@@ -471,6 +471,7 @@ describe("the platform chain's check (4D2e E8, each run's step 2)", () => {
         return Promise.resolve(report);
       },
       clock,
+      ...(owed === undefined ? {} : { owed }),
     });
     return { verify, reads, clock };
   }
@@ -497,5 +498,23 @@ describe("the platform chain's check (4D2e E8, each run's step 2)", () => {
     await verify(anchor);
 
     expect(reads).toEqual(['whole 4', 'whole 4', 'whole -', 'from 4']);
+  });
+
+  it('reads it whole while the digest owes it a walk from its first event (AT13c), saying so and when it began', async () => {
+    const owes = { now: false };
+    const asked: bigint[] = [];
+    const { verify, reads, clock } = platformChain([ok(4n)], (at) => {
+      asked.push(at.seq);
+      return owes.now;
+    });
+    expect(await verify(undefined)).toMatchObject({ ok: true, walkedFrom: 0n, began: AT });
+    clock.advanceBy(60_000);
+    const fromAnchor = await verify(anchor);
+    expect(fromAnchor).toMatchObject({ began: clock.now() });
+    expect(fromAnchor).not.toHaveProperty('walkedFrom');
+    owes.now = true;
+    expect(await verify(anchor)).toMatchObject({ walkedFrom: 0n });
+    expect(reads).toEqual(['whole -', 'from 4', 'whole 4']);
+    expect(asked).toEqual([4n, 4n]);
   });
 });

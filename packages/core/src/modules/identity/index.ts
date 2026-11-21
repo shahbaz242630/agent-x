@@ -98,6 +98,7 @@ export {
   type Sessions,
   type SessionTimeouts,
 } from './infrastructure/sessions.ts';
+export { signedEndSubjectOf } from './infrastructure/signed-ends.ts';
 export {
   ACCEPT_OPERATION,
   type Acceptance,
