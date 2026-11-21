@@ -134,7 +134,8 @@ export function createAllSessionsEnding({
       reason: 'cut_back',
       seq: done.seq.toString(),
       seen: cut.held.seq.toString(),
-      found: cut.found === null ? 'none' : cut.found.toString(),
+      // `null` where no head was found, its row gone.
+      found: String(cut.found),
       ended: done.ended,
     });
   };
