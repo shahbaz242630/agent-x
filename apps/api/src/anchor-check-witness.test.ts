@@ -389,6 +389,47 @@ describe('TR-1 the anchor check held to the witness log', () => {
     expect(fresh.steps.filter((step) => step.startsWith(`confirm ${ORG}`)).at(100)).toBe(`confirm ${ORG} 3`);
   });
 
+  /** ORG deep below its anchor, first in the run's order; OTHER_ORG's head `depth` events below its own. */
+  const deepThenShallow = (depth: bigint) => {
+    const top = 5n + depth;
+    const run = withWitness({
+      answers: { [ORG]: { kind: 'same' }, [OTHER_ORG]: { kind: 'same' } },
+      verified: (orgId) => ok(orgId === ORG ? 450_005n : top),
+      stepped: walkingTo(() => true),
+    });
+    run.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(450_005n), AT));
+    run.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: OTHER_ORG }, point(top), AT));
+    run.pending.set(ORG, [witnessed(5n)]);
+    run.pending.set(OTHER_ORG, [witnessed(5n)]);
+    return run;
+  };
+
+  it('a deep chain early in the run’s order starves none after it: each takes its floor of the budget', async () => {
+    const run = deepThenShallow(4_000n);
+    await run.check.run();
+    expect(run.steps.filter((step) => step.startsWith(`confirm ${ORG}`))).toHaveLength(100);
+    expect(run.pruned).toContainEqual([OTHER_ORG, [5n]]);
+    expect(run.pruned).not.toContainEqual([ORG, [5n]]);
+    // Both deep, both walking as the next run begins: an even share each, whatever the order.
+    const both = deepThenShallow(450_000n);
+    await both.check.run();
+    const count = (orgId: string) => both.steps.filter((step) => step.startsWith(`confirm ${orgId}`)).length;
+    expect([count(ORG), count(OTHER_ORG)]).toEqual([100, 3]);
+    await both.check.run();
+    expect([count(ORG), count(OTHER_ORG)]).toEqual([150, 53]);
+  });
+
+  it('a hand-off’s first anchor confirms within its own allowance after the run spent its budget', async () => {
+    const run = deepThenShallow(8_000n);
+    await run.check.run();
+    // The run: its floor, three steps, and no more.
+    expect(run.steps.filter((step) => step.startsWith(`confirm ${OTHER_ORG}`))).toHaveLength(3);
+    expect(run.pruned).not.toContainEqual([OTHER_ORG, [5n]]);
+    await run.check.anchorOrganisation(OTHER_ORG);
+    expect(run.pruned).toContainEqual([OTHER_ORG, [5n]]);
+    expect(run.alarms()).toEqual([]);
+  });
+
   it('a quick probe that fails is a warning: the run asks the same of every chain', async () => {
     const run = withWitness({ probeFails: true });
     run.pending.set(ORG, [witnessed(9n)]);
