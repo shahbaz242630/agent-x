@@ -813,6 +813,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
+      // AT13f: the operator's identity reads repair records with the plans' read role.
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
       'Microsoft.Insights/diagnosticSettings blob-logs-to-workspace',
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxdlstg[a-z0-9]{6}$/),
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxdlstg[a-z0-9]{6}\/default$/),
@@ -2805,6 +2809,39 @@ describe('SEC-OPS-09 each rule can fail', () => {
           grant.id = String(grant.id).replace('/containers/audit-exports', '/containers/audit-anchors');
         });
         expect(brokenRules(onAnchors)).toEqual(['evidence-store']);
+      });
+
+      it("AT13f the operator's read of repair records: the plans' read alone, on the exports alone, once, to it alone", () => {
+        const operatorReads = (resource: PredictedResource) =>
+          ASSIGNMENTS(resource) &&
+          String(at(resource.properties, 'description')).startsWith('operator reads chain repair records');
+        expect(staging.predictedResources.filter(operatorReads)).toHaveLength(1);
+        expect(brokenRules(without(operatorReads))).toEqual(['evidence-store']);
+        const onAnchors = changed(operatorReads, (grant: Mutable) => {
+          grant.id = String(grant.id).replace('/containers/audit-exports', '/containers/audit-anchors');
+        });
+        expect(brokenRules(onAnchors)).toEqual(['evidence-store']);
+        const toApi = changed(operatorReads, (grant: Mutable) => {
+          inside(grant, 'properties').principalId = String(at(grant, 'properties', 'principalId')).replace(
+            'id-agentx-stg-operator',
+            'id-agentx-stg-api',
+          );
+        });
+        expect(brokenRules(toApi)).toEqual(['evidence-store']);
+        // Wider: the exports' writer role given to read instead is the writer's role twice to the operator.
+        const asWriter = changed(operatorReads, (grant: Mutable) => {
+          inside(grant, 'properties').roleDefinitionId = String(
+            at(
+              staging.predictedResources.find(
+                (resource) =>
+                  ASSIGNMENTS(resource) &&
+                  String(at(resource.properties, 'description')).startsWith('chain-restore adds chain repair records'),
+              )?.properties,
+              'roleDefinitionId',
+            ),
+          );
+        });
+        expect(brokenRules(asWriter)).toEqual(['evidence-store']);
       });
 
       it('each of its three roles given once, to its identity: gone, or given to the API instead, is refused', () => {

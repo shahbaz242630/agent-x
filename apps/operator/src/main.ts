@@ -107,7 +107,7 @@ import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { type CountingContactsTables, listCountingContacts } from './counting-contacts.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
-import { evidenceSummary } from './evidence-read.ts';
+import { evidenceSummary, type EvidenceSummary, READ_DENIED_PROBLEM } from './evidence-read.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { type FactorResetNoticeTables, noticeFactorReset } from './factor-reset-notice.ts';
 import { changeHandoffPauseAsOperator, type HandoffPauseTables } from './handoff-pause.ts';
@@ -503,16 +503,24 @@ function afterRestoreProblems(restoreId: string, chain: Chain | undefined, reaso
   ];
 }
 
+/** A repair record's time as it wrote it (an ISO time, AT13f), or undefined. */
+function recordedTime(text: unknown): Date | undefined {
+  if (typeof text !== 'string') return undefined;
+  const at = new Date(text);
+  return Number.isNaN(at.getTime()) || at.toISOString() !== text ? undefined : at;
+}
+
 /**
  * Why a rebase may not follow the repair it names (AT13f), from that repair's own record in the evidence store: none
  * there, not this organisation's repair of that ID, one that didn't repair, one that ended elsewhere than the rebase
  * names, one short of its anchor (whose rebase is the plain one), or one that only put rows back, which needs none.
  */
 export function restoreRecordProblems(
-  record: Readonly<Record<string, unknown>> | 'missing' | 'unset',
+  record: EvidenceSummary,
   asked: { readonly orgId: string; readonly restoreId: string; readonly seq: bigint; readonly hash: Buffer },
 ): string[] {
   if (record === 'unset') return [NO_STORE_PROBLEM];
+  if (record === 'denied') return [READ_DENIED_PROBLEM];
   if (record === 'missing') return [`the repair ${asked.restoreId} has no readable outcome in the evidence store`];
   if (record.k !== 'restore' || record.restoreId !== asked.restoreId || record.orgId !== asked.orgId) {
     return [`the outcome read is not this organisation's repair ${asked.restoreId}`];
@@ -523,6 +531,12 @@ export function restoreRecordProblems(
   }
   if (record.endsShortOf !== null)
     return [`the repair ${asked.restoreId} ended short of its anchor: rebase it without ${AFTER_RESTORE}`];
+  // Its time, which a rebase of the chain since makes the record spent by (chain-rebase.ts): one without is spent.
+  if (recordedTime(record.at) === undefined) {
+    return [
+      `the repair ${asked.restoreId}'s record holds no time it was recorded: run a new repair and use its record`,
+    ];
+  }
   return record.rebaseNeeded === true
     ? []
     : [`the repair ${asked.restoreId} only put rows back: the chain is the app's own, and needs no rebase`];
@@ -1157,6 +1171,7 @@ async function chainRebase(
       log.error('operator.refused', { problems: ['the connection is not read-only, so nothing was read'] });
       return 1;
     }
+    let afterRestoreAt: Date | undefined;
     if (request.afterRestore !== undefined && chain.kind === 'organisation') {
       const record = await evidenceSummary(
         config,
@@ -1171,6 +1186,7 @@ async function chainRebase(
         log.error('operator.refused', { problems });
         return 1;
       }
+      afterRestoreAt = typeof record === 'object' ? recordedTime(record.at) : undefined;
     }
     const outcome = await rebaseChain({
       live,
@@ -1179,7 +1195,7 @@ async function chainRebase(
       store,
       anchors,
       chain,
-      asked: { ...request, release: config.release, run: config.run },
+      asked: { ...request, afterRestoreAt, release: config.release, run: config.run },
     });
     return rebaseSaid(log, outcome, rebaseId, chain);
   } catch (error) {

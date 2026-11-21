@@ -11,7 +11,7 @@ import { APP_ROLE, createDatabase, type Database, transactionsReadOnly } from '@
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { evidenceSummary } from './evidence-read.ts';
+import { evidenceSummary, READ_DENIED_PROBLEM } from './evidence-read.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 import { anchorLogOf, evidenceStoreOf } from './main.ts';
 import { NO_ANCHORS_PROBLEM, NO_STORE_PROBLEM } from './request.ts';
@@ -60,6 +60,7 @@ export async function storedPlanProblems(config: OperatorConfig, asked: PlanAske
   const name = `${asked.orgId}/${kind.file}-${asked.planId}.ndjson`;
   const summary = await evidenceSummary(config, name);
   if (summary === 'unset') return [];
+  if (summary === 'denied') return [READ_DENIED_PROBLEM];
   if (summary === 'missing') {
     return [
       `the plan ${asked.planId} has no readable file in the evidence store (${name}): make the plan first, or check its ID`,

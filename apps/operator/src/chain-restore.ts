@@ -259,5 +259,13 @@ export function outcomeLine(outcome: RestoreOutcome): Readonly<Record<string, un
 }
 
 /** The repair's record in the evidence store: one NDJSON line, the run's facts and its outcome. */
-export const restoreFile = (outcome: RestoreOutcome, facts: RestoreFacts): Buffer =>
-  Buffer.from(`${JSON.stringify({ k: 'restore', ...facts, ...outcomeLine(outcome) })}\n`);
+export const restoreFile = (outcome: RestoreOutcome, facts: RestoreFacts, at?: Date): Buffer =>
+  Buffer.from(
+    `${JSON.stringify({
+      k: 'restore',
+      ...facts,
+      ...outcomeLine(outcome),
+      // When it was recorded, by the database's clock (AT13f): a rebase of the chain dated after it spends the record.
+      ...(at === undefined ? {} : { at: at.toISOString() }),
+    })}\n`,
+  );

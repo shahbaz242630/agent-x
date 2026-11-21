@@ -36,6 +36,7 @@
 // drill's copy too (PL-29 follow-up, state-restore-main.ts): a request file
 // whose first word is `state-recovery-plan` or `state-restore` goes there.
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
+import { databaseNow } from '@agentx/platform/db';
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { createLogger, createStartupLogger, guardOutputs, type Logger } from '@agentx/platform/observability';
 
@@ -147,17 +148,22 @@ async function restoreRun(config: OperatorConfig, keys: KeyProvider, words: read
       said: { restoreId },
     },
     ({ copy, live, store, anchors }) =>
-      repaired(store, facts, log, () =>
-        restoreChain({
-          copy,
-          live,
-          keys,
-          orgId,
-          anchor: anchors.latest({ kind: 'organisation', orgId }),
-          digest,
-          discardFork,
-          shortOfAnchor,
-        }),
+      repaired(
+        store,
+        facts,
+        log,
+        () => databaseNow(live),
+        () =>
+          restoreChain({
+            copy,
+            live,
+            keys,
+            orgId,
+            anchor: anchors.latest({ kind: 'organisation', orgId }),
+            digest,
+            discardFork,
+            shortOfAnchor,
+          }),
       ),
   );
 }
@@ -170,6 +176,7 @@ async function repaired(
   store: EvidenceStore,
   facts: RestoreFacts,
   log: Logger,
+  recordedAt: () => Promise<Date>,
   repair: () => ReturnType<typeof restoreChain>,
 ): Promise<number> {
   const name = `${facts.orgId}/chain-restore-${facts.restoreId}`;
@@ -195,7 +202,9 @@ async function repaired(
   // AT13f: rows taken away or replaced, the anchor held: the API's copies alarm on the heads they saw until a rebase.
   const rebaseAfter = rebaseAfterLine(outcome, facts);
   if (rebaseAfter !== undefined) log.warn('operator.chain_restored_rebase_needed', rebaseAfter);
-  if ((await store.put(`${name}-outcome.ndjson`, restoreFile(outcome, facts))) === 'there_already') {
+  if (
+    (await store.put(`${name}-outcome.ndjson`, restoreFile(outcome, facts, await recordedAt()))) === 'there_already'
+  ) {
     log.error('operator.done_before', { command: CHAIN_RESTORE, restoreId: facts.restoreId });
     return 1;
   }

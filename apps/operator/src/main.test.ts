@@ -13,6 +13,7 @@ import type { Output } from '@agentx/platform/observability';
 import { LogCapture, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
+import { READ_DENIED_PROBLEM } from './evidence-read.ts';
 import { HELD_KEYS, type OperatorProcess, restoreRecordProblems, runOperator, USAGE } from './main.ts';
 import {
   ACTIVITY_EXPORT_USAGE,
@@ -1163,6 +1164,7 @@ describe("AT13f a rebase after a repair, held to the repair's own record", () =>
     endsAtHash: HASH.toString('hex'),
     endsShortOf: null,
     rebaseNeeded: true,
+    at: '2026-11-21T10:00:00.000Z',
   };
 
   it('takes a repair of this organisation that took rows away or replaced them, ending at the head named', () => {
@@ -1171,6 +1173,17 @@ describe("AT13f a rebase after a repair, held to the repair's own record", () =>
 
   it.each<[string, Parameters<typeof restoreRecordProblems>[0], string]>([
     ['no store named', 'unset', NO_STORE_PROBLEM],
+    ['a read the store refused this identity', 'denied', READ_DENIED_PROBLEM],
+    [
+      'a record with no time it was recorded',
+      { ...record, at: undefined },
+      `the repair ${REPAIR}'s record holds no time it was recorded: run a new repair and use its record`,
+    ],
+    [
+      'a record whose time is not one the repair writes',
+      { ...record, at: '21 November' },
+      `the repair ${REPAIR}'s record holds no time it was recorded: run a new repair and use its record`,
+    ],
     ['no record', 'missing', `the repair ${REPAIR} has no readable outcome in the evidence store`],
     ['another kind of line', { ...record, k: 'plan' }, `the outcome read is not this organisation's repair ${REPAIR}`],
     [

@@ -68,7 +68,7 @@ import { OverwriteRefused, type WriteOnceStore } from '@agentx/platform/storage'
 import { OPERATOR } from './create-organization.ts';
 
 /** Why a rebase is refused. */
-type RebaseRefusal = 'store' | 'not_needed' | 'broken' | 'head_differs' | 'done_before';
+type RebaseRefusal = 'store' | 'not_needed' | 'broken' | 'head_differs' | 'done_before' | 'restore_used';
 
 /** Whether the chain's owner can read of the rebase on its chain: written now, by a run before, or not written. */
 type RebaseRecorded = 'recorded' | 'already' | 'failed';
@@ -107,6 +107,8 @@ export interface RebaseAsked {
    * them, its outcome's record checked by the caller (main.ts). Without it such a chain is `not_needed`.
    */
   readonly afterRestore?: string | undefined;
+  /** When that repair's outcome was recorded (its record's `at`): a rebase of the chain since makes the record spent. */
+  readonly afterRestoreAt?: Date | undefined;
 }
 
 /** The tables a rebase reads, and the one event it records: either chain's. */
@@ -247,6 +249,65 @@ async function recordRebase(
   });
 }
 
+/** The most rebases an organisation's chain is read for, when one after a repair looks for those before it. */
+const MOST_REBASES_READ = 1000;
+
+/** Why a repair's record authorises no more rebases, in plain words. */
+const RESTORE_USED =
+  'this repair already has its rebase, or the chain was rebased since it was recorded: run a new repair and use its record';
+
+/**
+ * Whether the organisation's chain holds a rebase naming the repair already (AT13f): its `audit_chain.rebased` events,
+ * read whole through the signed states (a broken log is thrown, never read as none), any with the repair's ID.
+ */
+async function rebasedAfterRepair(
+  writer: Database<RebaseTables>,
+  services: SignedStatesServices,
+  orgId: string,
+  restoreId: string,
+): Promise<boolean> {
+  return withSignedStates(writer, orgId, services, async (tx, states) => {
+    const read = await states.historyOf(tx, orgId, {
+      subjectTypes: ['audit_chain'],
+      actions: [REBASED],
+      limit: MOST_REBASES_READ,
+    });
+    if (read.outcome === 'tampered') throw new Error("the organisation's audit log can't be verified");
+    return read.events.some((one) => one.event.details.afterRestore === restoreId);
+  });
+}
+
+/**
+ * Why a rebase after a repair may not be signed (AT13f), or undefined: the chain's head isn't the one named, or the
+ * repair's record is spent (one repair, one rebase): it holds no time, the chain was rebased since that time (the
+ * anchors' store), or the chain already holds a rebase naming the repair.
+ */
+async function refusedAfterRepair(
+  {
+    writer,
+    services,
+    anchors,
+    chain,
+  }: {
+    readonly writer: Database<RebaseTables>;
+    readonly services: SignedStatesServices;
+    readonly anchors: AnchorLog;
+    readonly chain: Chain;
+  },
+  head: AnchorPoint,
+  asked: RebaseAsked,
+  restoreId: string,
+): Promise<RebaseOutcome | undefined> {
+  if (head.seq !== asked.seq || !head.hash.equals(asked.hash))
+    return { ok: false, reason: 'head_differs', seq: head.seq };
+  const recordedAt = asked.afterRestoreAt;
+  const spent =
+    recordedAt === undefined ||
+    anchors.rebasedAfter(chain, recordedAt) ||
+    (chain.kind === 'organisation' && (await rebasedAfterRepair(writer, services, chain.orgId, restoreId)));
+  return spent ? { ok: false, reason: 'restore_used', problem: RESTORE_USED } : undefined;
+}
+
 /** The event recorded, or `failed`, said: the rebase stands, and the same request run again records it. */
 async function recorded(
   record: () => Promise<'recorded' | 'already'>,
@@ -316,9 +377,8 @@ export async function rebaseChain({
   // A chain holding its anchor needs none, but after a repair that took rows away or replaced them (AT13f): the API's
   // copies hold every read to the heads they saw, which only a rebase sets aside. At the head the repair ended at.
   if (held.ok && asked.afterRestore !== undefined) {
-    if (held.seq !== asked.seq || !held.hash.equals(asked.hash))
-      return { ok: false, reason: 'head_differs', seq: held.seq };
-    return signed(held, anchor, 0n);
+    const refused = await refusedAfterRepair({ writer, services, anchors, chain }, held, asked, asked.afterRestore);
+    return refused ?? signed(held, anchor, 0n);
   }
   if (held.ok) return { ok: false, reason: 'not_needed', ...(anchor === undefined ? {} : { seq: anchor.seq }) };
   // Only a chain failing against its anchor is what a rebase is for: with no anchor, a failure is the chain's own.

@@ -804,7 +804,13 @@ describe('SEC-DB-12 PL-29 AT9 a copy holding some lost events: put back, then th
     const restarted = await digestOf();
     expect(await readHeldTo(restarted.digest)).toMatchObject({ kind: 'broken' });
 
-    const rebaseOf = (afterRestore?: string, hash = fork.hash) =>
+    // The repair's record, as its job writes it: its ID and when it was recorded, by the database's clock.
+    const repair = uuidV7Ids.next();
+    const recordedAt = await databaseNow(on(live, 'operator', true));
+    const rebaseOf = (
+      afterRestore?: string,
+      { hash = fork.hash, seq = fork.seq, at = recordedAt }: { hash?: Buffer; seq?: bigint; at?: Date | null } = {},
+    ) =>
       rebaseChain({
         live: on(live, 'operator', true),
         writer: on(live, 'operator'),
@@ -814,13 +820,13 @@ describe('SEC-DB-12 PL-29 AT9 a copy holding some lost events: put back, then th
         chain,
         asked: {
           id: uuidV7Ids.next(),
-          seq: fork.seq,
+          seq,
           hash,
           reason: 'repaired',
           evidence: ['INC', 'AT13f'].join('-'),
           release: 'r-1',
           run: null,
-          ...(afterRestore === undefined ? {} : { afterRestore }),
+          ...(afterRestore === undefined ? {} : { afterRestore, ...(at === null ? {} : { afterRestoreAt: at }) }),
         },
       });
     // A rebase is dated by the database's clock, which this test's server keeps a little behind the app's: wait until
@@ -829,15 +835,32 @@ describe('SEC-DB-12 PL-29 AT9 a copy holding some lost events: put back, then th
     const clock = on(live, 'operator', true);
     await vi.waitUntil(async () => (await databaseNow(clock)).getTime() > readBy, { timeout: 5000, interval: 20 });
     // Its place named with another hash: not the head the repair ended at, refused.
-    expect(await rebaseOf(uuidV7Ids.next(), Buffer.alloc(32, 7))).toMatchObject({
+    expect(await rebaseOf(repair, { hash: Buffer.alloc(32, 7) })).toMatchObject({
       ok: false,
       reason: 'head_differs',
       seq: fork.seq,
     });
     // Without the repair named, the rebase is not needed: the chain holds its anchor.
     expect(await rebaseOf()).toMatchObject({ ok: false, reason: 'not_needed' });
-    const rebased = await rebaseOf(uuidV7Ids.next());
+    const rebased = await rebaseOf(repair);
     expect(rebased).toMatchObject({ ok: true, shorterBy: 0n, recorded: 'recorded' });
+
+    // One repair, one rebase: once the app has written on, the same repair named again at the new head is refused,
+    // by the rebase dated after its record, and by the rebase on the chain that names it, each on its own.
+    await record(live, 1);
+    const grown = await verifiedLive();
+    if (!grown.ok) throw new Error('The chain should check out');
+    const again = { seq: grown.seq, hash: grown.hash };
+    const spent = { ok: false, reason: 'restore_used' };
+    // A record dated before a rebase of the chain (another repair's ID, so no event names it): spent by the store.
+    expect(await rebaseOf(uuidV7Ids.next(), again)).toMatchObject(spent);
+    // The same repair, its record dated after every rebase: spent by the rebase on the chain that names it.
+    const now = await databaseNow(on(live, 'operator', true));
+    expect(await rebaseOf(repair, { ...again, at: now })).toMatchObject(spent);
+    // A record with no time: spent, whatever else holds.
+    expect(await rebaseOf(uuidV7Ids.next(), { ...again, at: null })).toMatchObject(spent);
+    // And a record dated after every rebase, never used: still takes its one rebase.
+    expect(await rebaseOf(uuidV7Ids.next(), { ...again, at: now })).toMatchObject({ ok: true });
 
     // Within one read of the anchors, the copy sets its heads and coverage aside: verified, no restart. Tx A waits for
     // the catch-up walk (`digest_pending`), owed from the chain's first event.

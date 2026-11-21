@@ -1223,13 +1223,13 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
     const head = await headOf({ kind: 'organisation', orgId });
     const evidence = path.join(folder, `evidence-${orgId}`);
     const repair = uuidV7Ids.next();
-    const after = (id = uuidV7Ids.next()) => {
+    const after = (id = uuidV7Ids.next(), named: CheckedPoint = head) => {
       const asked = path.join(folder, `rebase-after-${id}`);
       const words = JSON.parse(
         chainRebaseRequest({
           chain: orgId,
-          seq: head.seq.toString(),
-          hash: head.hash.toString('hex'),
+          seq: named.seq.toString(),
+          hash: named.hash.toString('hex'),
           reason: 'repaired',
           evidence: EVIDENCE,
           id,
@@ -1259,8 +1259,21 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
       endsAtHash: head.hash.toString('hex'),
       endsShortOf: null,
       rebaseNeeded: true,
+      at: (await databaseNow(app)).toISOString(),
     };
     writeFileSync(path.join(evidence, orgId, `chain-restore-${repair}-outcome.ndjson`), `${JSON.stringify(record)}\n`);
+    // The database's clock, which dates the rebase, past the record's: as an operator's rebase after a repair always is.
+    await vi.waitUntil(async () => (await databaseNow(app)).getTime() > Date.parse(record.at), {
+      timeout: 5000,
+      interval: 20,
+    });
+    const [savedHead] = await database
+      .as('admin')
+      .query<{ mac: Buffer; mac_key_version: number }>(
+        'select mac, mac_key_version from audit.heads where org_id = $1',
+        [orgId],
+      );
+    if (savedHead === undefined) throw new Error('The chain should have a head');
     const { id, running } = after();
     const { code, line } = await running;
     expect(code).toBe(0);
@@ -1280,6 +1293,33 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
     });
     expect(read).toMatchObject({
       rebase: { chain: `organisation:${orgId}`, seq: head.seq, hash: head.hash, from: null },
+    });
+
+    // One repair, one rebase. Named again at the chain's head since (its rebase's event): not the repair's head.
+    const second = await after(uuidV7Ids.next(), await headOf({ kind: 'organisation', orgId })).running;
+    expect(second.code).toBe(1);
+    expect(second.line('operator.refused')).toMatchObject({
+      problems: [`the repair ${repair} ended at another head than the one named: copy it from its line`],
+    });
+    // The chain back at the repair's head, the rebase's event gone (its record failed, or the owner wound it back):
+    // the rebase in the store dated after the record spends it all the same.
+    await database
+      .as('admin')
+      .query('delete from audit.events where org_id = $1 and seq > $2', [orgId, head.seq.toString()]);
+    await database
+      .as('admin')
+      .query('update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1', [
+        orgId,
+        head.seq.toString(),
+        head.hash,
+        savedHead.mac,
+        savedHead.mac_key_version,
+      ]);
+    const third = await after().running;
+    expect(third.code).toBe(1);
+    expect(third.line('operator.chain_rebase_refused')).toMatchObject({
+      reason: 'restore_used',
+      problem: expect.stringContaining('this repair already has its rebase') as unknown,
     });
   });
 
