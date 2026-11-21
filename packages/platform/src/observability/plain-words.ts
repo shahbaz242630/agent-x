@@ -875,10 +875,9 @@ export const PLAIN_WORDS = {
     next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
   },
   'handoff.held_before_sending': {
-    happened: 'An approved payment was ready for the bank, but a last check of the audit records raised a doubt.',
-    broke:
-      'It was not sent. Its money stays held, it is marked unknown in about 10 minutes, and the bank check settles it.',
-    next: 'Read the reason. A cut or fork means someone changed the database: follow the incident runbook. A store reason: check the witness store.',
+    happened: 'A last check of the audit records before paying the bank raised a doubt.',
+    broke: 'That payment was not sent; its money stays held and the bank check settles it.',
+    next: 'Read the reason: a cut means the database was changed, so follow the incident runbook.',
   },
   'handoff.queue_stale': {
     happened: 'Approved payments have waited over 15 minutes without being handed to the bank, for no known reason.',
