@@ -23,13 +23,18 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { createDigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AuditTables, ChainBroken, createAuditTrail, type StateDigest } from '../../audit/index.ts';
+import {
+  type AuditTables,
+  ChainBroken,
+  createAuditTrail,
+  createDigestLog,
+  type StateDigest,
+} from '../../audit/index.ts';
 import {
   createPlatformChain,
   type PlatformControlsTables,
