@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 
 import { DIGEST_FORGET_MARGIN_MS } from '../../audit/index.ts';
 import { APPROVAL_HORIZON_MS } from '../domain/voids.ts';
-import { capacityKept, sealedAtOf } from './endings.ts';
+import { money } from '../../../shared-kernel/index.ts';
+import { capacityKept, capacityOf, heldIn, sealedAtOf } from './endings.ts';
 
 const SEALED = new Date('2026-11-21T08:00:00.000Z');
 const HOUR = 3_600_000;
@@ -32,6 +33,47 @@ describe('capacityKept', () => {
 
   it('ages from the seal it is given, never the other way about', () => {
     expect(capacityKept(after(FROM), SEALED)).toBe(false);
+  });
+});
+
+describe('heldIn and capacityOf: aged by the sealed times given, never the wall clock', () => {
+  // In 2020, so a time taken from the wall clock anywhere would read years later, and nothing kept.
+  const DECIDED = new Date('2020-03-01T08:00:00.000Z');
+  const ENDED = new Date(DECIDED.getTime() + 8 * 24 * HOUR);
+  const request = {
+    id: '0199a0f0-0000-7000-8000-0000000000a1',
+    agentId: '0199a0f0-0000-7000-8000-0000000000a2',
+    supplierId: '0199a0f0-0000-7000-8000-0000000000a3',
+    amount: money(60_000n, 'AED'),
+    status: 'APPROVED' as const,
+  };
+  const decision = {
+    held: { month: '2020-03', reservedAt: DECIDED, payee: 'none' as const, bankKeyed: true, windows: null },
+    decidedAt: DECIDED,
+    approvedAt: DECIDED,
+  };
+  const said: unknown[] = [];
+  const states = { logger: { warn: (event: string, fields: unknown) => said.push([event, fields]) } } as never;
+
+  it('keeps one sealed 8 days before its ending, and says so', () => {
+    const held = heldIn('0199a0f0-0000-7000-8000-0000000000a0', request, decision);
+    expect(held).toEqual([expect.objectContaining({ requestId: request.id, amount: 60_000n, sealedAt: DECIDED })]);
+    const { giving, kept } = capacityOf(states, held, ENDED);
+    expect(giving).toEqual([]);
+    expect(kept).toEqual(held);
+    expect(said).toEqual([['spend_request.capacity_kept', { requestId: request.id, sealedAt: DECIDED.toISOString() }]]);
+  });
+
+  it('gives back one sealed a day before its ending', () => {
+    const held = heldIn('0199a0f0-0000-7000-8000-0000000000a0', request, decision);
+    const { giving, kept } = capacityOf(states, held, new Date(DECIDED.getTime() + 24 * HOUR));
+    expect(giving).toEqual(held);
+    expect(kept).toEqual([]);
+  });
+
+  it('holds nothing for no decision, or one that sealed nothing', () => {
+    expect(heldIn('0199a0f0-0000-7000-8000-0000000000a0', request, undefined)).toEqual([]);
+    expect(heldIn('0199a0f0-0000-7000-8000-0000000000a0', request, { ...decision, held: null })).toEqual([]);
   });
 });
 

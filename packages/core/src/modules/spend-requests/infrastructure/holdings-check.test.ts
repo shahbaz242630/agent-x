@@ -77,11 +77,54 @@ describe('when a request was approved, as its decision is read (AT13d)', () => {
     // Read on the decision's own trip: its approvals asked with it, room for one each.
     expect(asked).toEqual([
       expect.objectContaining({
-        actions: ['spend_request.decided', 'spend_request.approved', 'spend_request.windows_named'],
-        limit: 6 * 3,
+        actions: [
+          'spend_request.decided',
+          'spend_request.approved',
+          'spend_request.voided',
+          'spend_request.expired',
+          'spend_request.cancelled',
+          'spend_request.rejected',
+          'spend_request.windows_named',
+        ],
+        limit: 7 * 3,
       }),
     ]);
   });
+
+  it('reads a signed ending that kept its capacity, and only that: from the request’s own ending events', async () => {
+    const ending = (
+      seq: number,
+      id: string,
+      action: string,
+      details: Record<string, unknown>,
+      type = 'spend_request',
+    ) => event(seq, type, id, action, details);
+    const events = [
+      ...[OLD, NEW, NONE, BARE].map((id, at) => timed(at + 1, 0, id, 'spend_request.decided')),
+      ending(5, OLD, 'spend_request.voided', { causes: 'APPROVAL_LAPSED', capacityKept: true, keptAmountMinor: '1' }),
+      ending(6, NEW, 'spend_request.expired', { capacityKept: 'true' }),
+      ending(7, NONE, 'spend_request.carried', { capacityKept: true }),
+      ending(8, BARE, 'spend_request.cancelled', { capacityKept: true }, 'spend_request_windows'),
+    ];
+    const states = { historyOf: () => Promise.resolve({ outcome: 'read', events }) } as unknown as SignedStates;
+    const read = await decisionsRead(null as never, states, ORG, [OLD, NEW, NONE, BARE]);
+    if (read === 'tampered') throw new Error('read whole');
+    expect([OLD, NEW, NONE, BARE].map((id) => read.get(id)?.capacityKept)).toEqual([true, false, false, false]);
+  });
+
+  it.each(['spend_request.expired', 'spend_request.cancelled', 'spend_request.rejected'])(
+    'reads it on %s too',
+    async (action) => {
+      const events = [
+        timed(1, 0, OLD, 'spend_request.decided'),
+        event(2, 'spend_request', OLD, action, { capacityKept: true }),
+      ];
+      const states = { historyOf: () => Promise.resolve({ outcome: 'read', events }) } as unknown as SignedStates;
+      const read = await decisionsRead(null as never, states, ORG, [OLD]);
+      if (read === 'tampered') throw new Error('read whole');
+      expect(read.get(OLD)?.capacityKept).toBe(true);
+    },
+  );
 
   it('never moves back for an approval read before a later one', async () => {
     const events = [

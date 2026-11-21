@@ -1345,10 +1345,10 @@ export const PLAIN_WORDS = {
   },
   'spend_request.capacity_kept': {
     happened:
-      'A spend request approved or decided more than 8 days ago was ended (cancelled, rejected, expired or voided) without giving its amount back to its monthly total and payee window.',
+      'A spend request approved (or, while waiting, decided) 7 days and 23 hours ago or more was ended (cancelled, rejected, expired or voided) and kept its amount in its monthly total and payee window, its reservation still held.',
     broke:
-      "That amount stays counted as used in the agent's month and the supplier's window until the month or window rolls over. Nothing was paid.",
-    next: 'Nothing, for one now and then (a request left waiting through a long pause). Many in one organisation may mean someone changed its records past the app: check its integrity alarms.',
+      "That amount stays counted as used in the agent's month and the supplier's window until the month or window rolls over. Nothing was paid, and no integrity alarm follows: the request's signed ending records it.",
+    next: 'Nothing for one now and then (a request left waiting through a long pause or outage). Many in one organisation may mean someone changed its records past the app: check its integrity alarms.',
   },
   'request_void.failed': {
     happened:

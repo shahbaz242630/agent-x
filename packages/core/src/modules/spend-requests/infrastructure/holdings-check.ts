@@ -32,7 +32,13 @@
 import type { KeyProvider } from '@agentx/platform/keys';
 import { type RawBuilder, sql, type Transaction } from 'kysely';
 
-import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
+import {
+  type AuditEvent,
+  type AuditTables,
+  type PageAsked,
+  type SignedStates,
+  TooManyEventsToRead,
+} from '../../audit/index.ts';
 import {
   keptZonesOf,
   type LimitReservationsTables,
@@ -193,7 +199,20 @@ export interface Decided extends ApprovalClock {
    * person's, or the policy's at its decision), whatever was signed since (a carry, E4). Its age voids it (AT13d).
    */
   readonly approvedAt: Date;
+  /**
+   * Whether its signed ending kept its capacity (AT13d, endings.ts `capacityKept`): ended, its reservation stays HELD,
+   * counted in its month total and windows, which kept the amount. Read on the same trip.
+   */
+  readonly capacityKept: boolean;
 }
+
+/** The events that end a request before hand-off (endings.ts): one may say it kept its capacity (`capacityKept`). */
+const ENDING_ACTIONS: readonly string[] = [
+  'spend_request.voided',
+  'spend_request.expired',
+  'spend_request.cancelled',
+  'spend_request.rejected',
+];
 
 /**
  * Each request's decision (Decided), by the request's ID in lower case, in
@@ -226,9 +245,9 @@ export async function decisionsRead(
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SPEND_REQUESTS.subject, WINDOWS_NAMED_SUBJECT],
     subjectIds: ids,
-    actions: [...APPROVING_ACTIONS, WINDOWS_NAMED_ACTION],
-    // A person approves a request once at most: one event more each.
-    limit: (MOST_DECIDED_EVENTS + 2) * ids.length,
+    actions: [...APPROVING_ACTIONS, ...ENDING_ACTIONS, WINDOWS_NAMED_ACTION],
+    // A person approves a request once at most, and it ends once: an event more each, for each.
+    limit: (MOST_DECIDED_EVENTS + 3) * ids.length,
   });
   if (history.outcome !== 'read') return 'tampered';
   const named = history.events.filter(({ event }) => event.action === WINDOWS_NAMED_ACTION);
@@ -238,7 +257,10 @@ export async function decisionsRead(
       const held = heldOf(event.details);
       const waitHours = approvalWaitOf(event.details);
       const id = event.subject.id.toLowerCase();
-      return [id, { held, decidedAt: recordedAt, waitHours, seq, approvedAt: recordedAt }] as const;
+      return [
+        id,
+        { held, decidedAt: recordedAt, waitHours, seq, approvedAt: recordedAt, capacityKept: false },
+      ] as const;
     });
   // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.
   const counts = new Map<string, number>();
@@ -247,13 +269,7 @@ export async function decisionsRead(
     throw new TooManyEventsToRead(MOST_DECIDED_EVENTS);
   // In chain order, so each request's last decided event is the one left.
   const read = new Map<string, Decided>(decided);
-  // A person's approval comes after its decision: then it is when the request was approved. None without a decision.
-  for (const { event, recordedAt } of history.events) {
-    const id = event.subject.id.toLowerCase();
-    const approval = event.action === APPROVED && event.subject.type === SPEND_REQUESTS.subject;
-    const found = approval ? read.get(id) : undefined;
-    if (found !== undefined && recordedAt > found.approvedAt) read.set(id, { ...found, approvedAt: recordedAt });
-  }
+  for (const found of history.events) afterItsDecision(read, found);
   // A decision before GM-1b sealed no windows: those its cutover named stand for them (the chain's MAC keeps both).
   for (const { event } of named) {
     const id = event.subject.id.toLowerCase();
@@ -262,6 +278,24 @@ export async function decisionsRead(
     read.set(id, { ...found, held: { ...found.held, windows: windowsOf(event.details.payeeWindows) } });
   }
   return read;
+}
+
+/**
+ * What a request's own event after its decision says (AT13d), into `read`: a person's approval, when it was approved;
+ * its ending, sealed, saying its capacity was kept, which alone lets an ended request still hold it. None without a
+ * decision read.
+ */
+function afterItsDecision(
+  read: Map<string, Decided>,
+  { event, recordedAt }: { readonly event: AuditEvent; readonly recordedAt: Date },
+): void {
+  const id = event.subject.id.toLowerCase();
+  const found = event.subject.type === SPEND_REQUESTS.subject ? read.get(id) : undefined;
+  if (found === undefined) return;
+  if (event.action === APPROVED && recordedAt > found.approvedAt) read.set(id, { ...found, approvedAt: recordedAt });
+  if (ENDING_ACTIONS.includes(event.action) && event.details.capacityKept === true) {
+    read.set(id, { ...found, capacityKept: true });
+  }
 }
 
 /**
@@ -355,17 +389,17 @@ async function judged<Tx extends HoldingsTransaction>(
     tx,
     requests.filter(({ status }) => status === 'APPROVAL_REQUIRED').map(({ id }) => id),
   );
-  // Only what still holds anything was sealed with what it holds.
-  const sealed = await decisionsOf(
-    tx,
-    states,
-    orgId,
-    requests.filter(({ status }) => holdsNow(status)).map(({ id }) => id),
-  );
+  // Every one's decision, on one read: what still holds anything, and an ended one whose signed ending kept its
+  // capacity (AT13d), was sealed with what it holds; any other ended one holds nothing.
+  const decided = await decisionsOf(tx, states, orgId, found);
+  const heldBy = (request: SpendRequestRecord): HeldSealed | null => {
+    const decision = decided.get(request.id);
+    return decision !== undefined && (holdsNow(request.status) || decision.capacityKept) ? decision.held : null;
+  };
   // Each sealed month must be the month of its instant in the agent's signed zone (0054, PL-40): a decision made
   // while the zone was changed past the app is caught, even once it is changed back.
   const zones = await keptZonesOf(tx, states, orgId, [
-    ...new Set(requests.filter(({ id }) => (sealed.get(id)?.held ?? null) !== null).map(({ agentId }) => agentId)),
+    ...new Set(requests.filter((request) => heldBy(request) !== null).map(({ agentId }) => agentId)),
   ]);
   const inItsZone = (agentId: string, held: HeldSealed): boolean => {
     const zone = zones.get(agentId.toLowerCase());
@@ -373,7 +407,8 @@ async function judged<Tx extends HoldingsTransaction>(
   };
   let mismatched = 0;
   for (const request of requests) {
-    const held = sealed.get(request.id)?.held ?? null;
+    const held = heldBy(request);
+    const capacityKept = !holdsNow(request.status) && decided.get(request.id)?.capacityKept === true;
     const asSealed = (payeeKey: string | null) =>
       held === null || payeeAsSealed(keys, held.payee, { orgId, requestId: request.id, payeeKey });
     // A claim is its request's own when it is on the request's supplier and order, in canonical form, and,
@@ -397,9 +432,9 @@ async function judged<Tx extends HoldingsTransaction>(
       payeeAsSealed: asSealed(reservation.payeeKey),
     }));
     if (
-      !holdingsMatch({ ...request, held, payment: payments.get(request.id) }, reserved, claims) ||
+      !holdingsMatch({ ...request, held, payment: payments.get(request.id), capacityKept }, reserved, claims) ||
       (held !== null && !inItsZone(request.agentId, held)) ||
-      !waitsAsSealed(waitsUntil.get(request.id), sealed.get(request.id))
+      !waitsAsSealed(waitsUntil.get(request.id), decided.get(request.id))
     ) {
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
       mismatched += 1;

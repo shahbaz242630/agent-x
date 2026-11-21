@@ -987,6 +987,118 @@ describe('an approval older than the horizon: denied at the hand-off, its holdin
     expect(lines('spend_request.capacity_kept')).toEqual([expect.objectContaining({ requestId: request.id })]);
   });
 
+  /** The holdings check over the world, as the job runs it: each page's line, and every integrity alarm said. */
+  const holdingsCheckedNow = async (w: World) => {
+    await createHoldingsCheck({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    }).run();
+    return { passed: lines('holdings_check.passed'), alarms: lines('audit.integrity_failed') };
+  };
+
+  /** What the books must say once a request ended late, with no tampering: its reservation HELD, all level. */
+  const booksLevel = async (w: World, requestId: string) => {
+    expect(await holdingsOf(w, requestId)).toEqual({ reservation: 'HELD', released: true });
+    const { passed, alarms } = await holdingsCheckedNow(w);
+    expect(passed).toEqual([
+      expect.objectContaining({ mismatched: 0, tampered: 0, totalsMismatched: 0, windowsMismatched: 0 }),
+    ]);
+    expect(alarms).toEqual([]);
+    const ending = (await shared.eventsAbout(w.org, requestId, SPEND_REQUESTS.subject)).at(-1);
+    expect(ending).toMatchObject({ details: { capacityKept: true, keptAmountMinor: '60000' } });
+  };
+
+  it.each([
+    ['voided by the hand-off (its approval lapsed)', 'void'],
+    ['expired', 'expire'],
+  ] as const)(
+    'one simply %s late, untouched: capacity kept, its reservation HELD, the holdings check level, no alarm',
+    async (_what, how) => {
+      const { w, acting } = await ready(how === 'void' ? {} : { approvalThreshold: AED(50_000n) });
+      const request = await ask(acting, w, { amount: AED(60_000n) });
+      const spent = await spentOf(w, acting);
+      clock.advanceBy(PAST_THE_DIGEST);
+      if (how === 'void') await handoffOf(w).run();
+      else {
+        await withSignedStates(app, w.org, { ...quiet(), logger: testLogger(capture) }, (tx, states) =>
+          expireRequest(tx, states, keys, { orgId: w.org, id: request.id }, clock.now()),
+        );
+      }
+
+      expect(await statusOf(w, request.id)).toBe(how === 'void' ? 'DENIED' : 'EXPIRED');
+      expect(await spentOf(w, acting)).toBe(spent);
+      await booksLevel(w, request.id);
+    },
+  );
+
+  it('a brake’s batch ending one late, untouched: the books level too', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: AED(60_000n) });
+    clock.advanceBy(PAST_THE_DIGEST);
+    await withSignedStates(app, w.org, { ...quiet(), logger: testLogger(capture) }, (tx, states) =>
+      voidPendingOf(tx, states, keys, w.org, { agentId: w.agent }, 'AGENT_SUSPENDED', clock.now()),
+    );
+    expect(await statusOf(w, request.id)).toBe('DENIED');
+    await booksLevel(w, request.id);
+  });
+
+  it('a kept reservation moved past the app is still the alarm: it must hold as its decision sealed', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: AED(60_000n) });
+    clock.advanceBy(PAST_THE_DIGEST);
+    await handoffOf(w).run();
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      await owner.query('alter table limit_reservations.reservations disable trigger user');
+      await owner.query(
+        "update limit_reservations.reservations set reserved_at = reserved_at - interval '1 second' where request_id = $1",
+        [request.id],
+      );
+      await owner.query('alter table limit_reservations.reservations enable trigger user');
+    } finally {
+      await owner.end();
+    }
+
+    const { passed, alarms } = await holdingsCheckedNow(w);
+
+    expect(passed).toEqual([expect.objectContaining({ mismatched: 1 })]);
+    expect(alarms).toContainEqual(expect.objectContaining({ reason: 'holding', subjectType: 'spend_request' }));
+  });
+
+  it('the negative control: an ended request still holding a reservation its signed ending never kept is the alarm', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: AED(60_000n) });
+    await signed(w, (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: request.id },
+        { kind: 'user', userId: w.admin.userId },
+        clock.now(),
+      ),
+    );
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      await owner.query('alter table limit_reservations.reservations disable trigger user');
+      await owner.query(
+        "update limit_reservations.reservations set state = 'HELD', settled_at = null where request_id = $1",
+        [request.id],
+      );
+      await owner.query('alter table limit_reservations.reservations enable trigger user');
+    } finally {
+      await owner.end();
+    }
+
+    const { passed, alarms } = await holdingsCheckedNow(w);
+
+    expect(passed).toEqual([expect.objectContaining({ mismatched: 1 })]);
+    expect(alarms).toContainEqual(expect.objectContaining({ reason: 'holding', subjectType: 'spend_request' }));
+  });
+
   it('a brake’s batch voids one taken back past the digest the same: its capacity never given back twice', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: AED(60_000n) });
