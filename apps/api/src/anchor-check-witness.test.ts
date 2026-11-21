@@ -21,13 +21,20 @@ const point = (seq: bigint): CheckedPoint => ({ seq, hash: Buffer.alloc(32, Numb
 const ok = (seq: bigint): ChainReport => ({ ok: true, ...point(seq) });
 const witnessed = (seq: bigint) => ({ seq, hash: Buffer.alloc(32, Number(seq)), at: AT.getTime() });
 
-type Asked = { readonly orgId: string; readonly from: CheckedPoint; readonly heldTo?: readonly { seq: bigint }[] };
+interface Asked {
+  readonly orgId: string;
+  readonly from: CheckedPoint;
+  readonly heldTo?: readonly { seq: bigint }[];
+}
 
-function withWitness({
-  verified = (): ChainReport => ok(1n),
-  answers = {} as Record<string, ProbeAnswer>,
-  probeFails = false,
-} = {}) {
+/** How a test's check answers. */
+interface Answering {
+  readonly verified?: () => ChainReport;
+  readonly answers?: Readonly<Record<string, ProbeAnswer>>;
+  readonly probeFails?: boolean;
+}
+
+function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false }: Answering = {}) {
   const steps: string[] = [];
   const asked: { orgId: string; from: bigint; heldTo: bigint[] }[] = [];
   const pending = new Map<string, ReturnType<typeof witnessed>[]>();
