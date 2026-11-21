@@ -305,6 +305,54 @@ describe(`SEC-HA-14 the sign-ins under way, held to their caps (S206 V8, Postgre
     }
   });
 
+  it('at its share, only its own oldest sign-in gives way: never a newer step-up, never an older network’s, and never refused by the backstop', async () => {
+    const at = new Date('2027-01-17T09:00:00Z');
+    // A backstop already passed (the network alone holds 100): giving way keeps the count, so it is never asked.
+    const store = createLoginFlows({ clock: new FixedClock(at), mostOpen: 50 });
+    const network = '198.51.100.14';
+    const neighbour = '198.51.100.15';
+    const admin = database.as('admin');
+    // The network at its share (/s1 oldest to /s100), a step-up of its own NEWER than all of them, and a neighbour's
+    // sign-ins older than every one of the network's: a delete counting the step-up among the newest, or reaching past
+    // the network, would take the wrong rows.
+    await admin.query(
+      `insert into identity.login_flows
+         (cookie_hash, state, nonce, verifier, return_to, created_at, ends_at, network_key, step_up_challenge_id)
+       select pg_catalog.sha256(('s209-share-' || n)::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/s' || n,
+         $1::timestamptz - pg_catalog.make_interval(secs => 60), $1::timestamptz + pg_catalog.make_interval(secs => 10 + n),
+         $2, null
+       from pg_catalog.generate_series(1, $4::int) as n
+       union all
+       select pg_catalog.sha256('s209-share-step-up'::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/step-up',
+         $1::timestamptz - pg_catalog.make_interval(secs => 60), $1::timestamptz + pg_catalog.make_interval(secs => 500),
+         $2, '0199a0f0-0000-7000-8000-0000000000c5'::uuid
+       union all
+       select pg_catalog.sha256(('s209-neighbour-' || n)::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/n' || n,
+         $1::timestamptz - pg_catalog.make_interval(secs => 60), $1::timestamptz + pg_catalog.make_interval(secs => n),
+         $3, null
+       from pg_catalog.generate_series(1, 5) as n`,
+      [at, network, neighbour, MOST_OPEN_SIGN_INS_A_NETWORK],
+    );
+    try {
+      expect(await store.start(app, newFlow(), '/new', network)).toMatchObject({ outcome: 'started', gaveWay: true });
+      const left = (
+        await admin.query<{ return_to: string }>(
+          'select return_to from identity.login_flows where network_key = $1 order by ends_at, return_to',
+          [network],
+        )
+      ).map((row) => row.return_to);
+      // Only /s1 gave way: its other 99, the new one and its step-up are left.
+      expect(left).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK + 1);
+      expect(left.slice(0, 2)).toEqual(['/s2', '/s3']);
+      expect(left).toContain('/step-up');
+      expect(left).toContain('/new');
+      // The neighbour's five, older than all of them, are untouched.
+      expect(await openFrom(neighbour)).toHaveLength(5);
+    } finally {
+      await admin.query('delete from identity.login_flows where network_key = any($1)', [[network, neighbour]]);
+    }
+  });
+
   it('two starts past a network’s share at once both start: the second waits on the oldest the first deletes', async () => {
     const clock = new FixedClock(new Date('2027-01-20T09:00:00Z'));
     const store = createLoginFlows({ clock });

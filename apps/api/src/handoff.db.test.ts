@@ -504,14 +504,15 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     const { rail, submitted } = counted(w);
     const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
     const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
-    let stopping: Promise<unknown> = Promise.resolve();
+    let stopping: Promise<unknown> | undefined;
     const hold = async (change: () => Promise<unknown>) => {
       await change();
       holding(undefined);
       await gate;
     };
     const list = async () => {
-      stopping = take(w, hold);
+      // Once: the run's sweep lists again, and a second stop would only be refused.
+      stopping ??= take(w, hold);
       await held;
       return [w.org];
     };
@@ -1478,7 +1479,7 @@ describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, S
 
         const step = STEPS[job](first.w.org, { orgId: first.w.org, id: theirs.id });
         // The void job's read throws (its run logs it); expiry reads it as not found.
-        if (job === 'void') await expect(step).rejects.toThrow();
+        if (job === 'void') await expect(step).rejects.toThrow('no result');
         else await expect(step).resolves.toMatchObject({ outcome: 'missing' });
 
         expect(await statusOf(second.w, theirs.id)).toBe(status);
