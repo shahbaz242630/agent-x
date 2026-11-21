@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { StoredEntry } from './chain.ts';
+import type { ChainReader } from './store.ts';
 import { heldToWitnessed, watchingPlaces } from './witness-path.ts';
 
 const hash = (fill: number): Buffer => Buffer.alloc(32, fill);
@@ -12,7 +13,8 @@ describe('TR-1 a walk held to the witnessed heads', () => {
   it('keeps the hash its own reads found at each witnessed place, no read of its own', async () => {
     const found = new Map<bigint, Buffer>();
     const entries = [4n, 5n, 6n].map((seq) => ({ seq, hash: hash(Number(seq)) }) as unknown as StoredEntry);
-    const reader = watchingPlaces({ events: () => Promise.resolve([...entries, undefined]) }, [head(5n, 0)], found);
+    const source: Pick<ChainReader, 'events'> = { events: () => Promise.resolve([...entries, undefined]) };
+    const reader = watchingPlaces(source, [head(5n, 0)], found);
     await reader.events(3n, 6n, 10);
     expect([...found]).toEqual([[5n, hash(5)]]);
     // No heads, the reader as it was.
