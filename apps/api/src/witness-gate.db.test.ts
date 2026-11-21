@@ -719,11 +719,12 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
     }
     // More of the organisation's writes after the stop, so the walk raises F past it, not to it (the event at F itself
     // is read whole by every walk from F).
+    const noted = ids.next();
     await signed(w, (tx) =>
       createAuditTrail({ keys, ids }).record(tx, w.org, {
         actor: OPERATOR,
         action: 'handoff.held_for_bank',
-        subject: { type: 'handoff_hold', id: ids.next(), version: 1 },
+        subject: { type: 'handoff_hold', id: noted, version: 1 },
         details: { hold: 'lane' },
       }),
     );
@@ -731,6 +732,10 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
     expect(await handOffOnJ(w, j)).toBe(1);
     expect(await statusOf(w, paid.id)).toBe('HANDED_OFF');
     expect(await statusOf(w, stopped.id)).toBe('CANCELLED');
+    // Kept in the digest from Tx A's walk: the cancel, a signed state; never an event carrying no state seal.
+    const orgChain = { kind: 'organisation', orgId: w.org } as const;
+    expect(j.digest.latest(orgChain, SPEND_REQUESTS.subject, stopped.id)).toBeDefined();
+    expect(j.digest.latest(orgChain, 'handoff_hold', noted)).toBeUndefined();
     if (rewrite) {
       const cutting = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
       try {

@@ -138,15 +138,27 @@ describe('SEC-DB-20 TR-1 F.1 the walk within a transaction and the path frontier
       anchors: { latest: () => chain.point(2n), rebasedAfter: () => false },
       now: () => AT,
       seen: (each, signed) => kept.push([each.kind, signed]),
-      mostBytes: 32,
     });
     const start = frontier.startOf(CHAIN);
     if (start === undefined) throw new Error('anchored');
-    // Past its memory (no stretch kept) and again at the same head: handed on each time all the same.
+    // Raised, then again at the same head (F there already, nothing raised): handed on each time all the same.
     frontier.raise(CHAIN, start, walk);
     frontier.raise(CHAIN, start, walk);
     frontier.raise(CHAIN, start, undefined);
+    expect(frontier.startOf(CHAIN)?.from.seq).toBe(8n);
+    // Past its memory (no stretch kept): handed on all the same.
+    const small = createChainFrontier({
+      anchors: { latest: () => chain.point(2n), rebasedAfter: () => false },
+      now: () => AT,
+      seen: (each, signed) => kept.push([each.kind, signed]),
+      mostBytes: 32,
+    });
+    const smallStart = small.startOf(CHAIN);
+    if (smallStart === undefined) throw new Error('anchored');
+    small.raise(CHAIN, smallStart, walk);
+    expect(small.startOf(CHAIN)?.from.seq).toBe(2n);
     expect(kept).toEqual([
+      ['organisation', walk.signed],
       ['organisation', walk.signed],
       ['organisation', walk.signed],
     ]);
