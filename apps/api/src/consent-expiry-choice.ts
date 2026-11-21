@@ -38,11 +38,13 @@ export const CONSENT_EXPIRY_STATEMENTS = {
   pause:
     'When this account’s bank consent runs out, its requests are held as they are: none can be approved or paid ' +
     'until the consent is renewed at the bank and refreshed in Agent X, when they stand again at once. Requests ' +
-    'waiting for approval still expire when their wait ends. A consent revoked or ended early still cancels them.',
+    'waiting for approval still expire when their wait ends. A consent revoked or ended early still cancels them. ' +
+    'Approved requests waiting more than 7 days in total since their approval, paused time included, are cancelled ' +
+    'and must be asked for again.',
 } as const satisfies Record<PendingChoice, string>;
 
-/** The version of CONSENT_EXPIRY_STATEMENTS each event names: raised with any change to their words. */
-export const CONSENT_EXPIRY_STATEMENT_VERSION = 1;
+/** The version of CONSENT_EXPIRY_STATEMENTS each event names: raised with any change to their words (2: AT13d). */
+export const CONSENT_EXPIRY_STATEMENT_VERSION = 2;
 
 /** The choice as a body names it: confirmed by the admin, no default. */
 export const CONSENT_EXPIRY = z

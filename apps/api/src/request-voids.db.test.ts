@@ -24,6 +24,7 @@ import { mandateOf } from '@agentx/core/modules/mandates';
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
+  APPROVAL_HORIZON_MS,
   type AuthorityNow,
   cancelRequest,
   checkHoldings,
@@ -243,7 +244,7 @@ describe('pending spend requests voided once their authority no longer stands (C
       const suspends = await shared.eventsAbout(w.org, idOf(w, mandateId, which), SUSPENDS[which].type);
       expect(suspends.at(-1)).toMatchObject({
         action: SUSPENDS[which].action,
-        details: { pendingRequests: 'cancel', pendingStatementVersion: 4 },
+        details: { pendingRequests: 'cancel', pendingStatementVersion: 5 },
       });
     },
   );
@@ -602,16 +603,28 @@ describe('pending spend requests voided once their authority no longer stands (C
         supplier: { status: 'VERIFIED', currentVersionId: row.supplier_version_id ?? '', pausedFrom: [] },
         paused: new Set(),
         cancelledBy: new Set(),
+        at: clock.now(),
       } satisfies AuthorityNow;
     });
-    const voiding = (id: string, under = named) =>
+    const voiding = (id: string, under = named, approvedAt = clock.now()) =>
       withSignedStates(app, w.org, quiet(), (tx, states) =>
-        voidRequest(tx, states, keys, { orgId: w.org, id }, { named: under, authority: standing }, clock.now()),
+        voidRequest(
+          tx,
+          states,
+          keys,
+          { orgId: w.org, id },
+          { named: under, authority: standing, approvedAt },
+          clock.now(),
+        ),
       );
 
     expect(await voiding(ids.next())).toEqual({ outcome: 'missing' });
     expect(await voiding(cancelled.id)).toMatchObject({ outcome: 'not_open', request: { status: 'CANCELLED' } });
     expect(await voiding(waiting.id)).toEqual({ outcome: 'standing' });
+    // One waiting for approval has no approval to age, however old its decision (AT13d): its own wait expires it.
+    expect(await voiding(waiting.id, named, new Date(clock.now().getTime() - 30 * APPROVAL_HORIZON_MS))).toEqual({
+      outcome: 'standing',
+    });
     // Each of what it names read for another: the agent's, the mandate's, the source's or the supplier's.
     for (const field of ['agentId', 'mandateId', 'fundingSourceId', 'supplierId'] as const) {
       await expect(voiding(waiting.id, { ...named, [field]: ids.next() })).rejects.toThrow(
