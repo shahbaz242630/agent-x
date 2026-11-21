@@ -1067,16 +1067,6 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet. A list past its limit stops working; a hold clearing only gets slower.',
     next: 'Find out why the organisation has so many, and tell the developer.',
   },
-  'identity.session_last_use_unsealed': {
-    happened: 'A console sign-in from before the last-use seal came back, so it was ended.',
-    broke: 'That person is signed out and signs in again once; nothing else is affected.',
-    next: 'Expected for a while after the release that added the seal. Long after it, treat it as tampering.',
-  },
-  'identity.session_last_use_mismatch': {
-    happened: "A console sign-in's last-use seal did not match, so it was ended.",
-    broke: 'That person signs in again; nothing else is affected.',
-    next: 'Expected during a release or after a rollback (then clear the seals per the incident playbook before rolling forward). Otherwise treat it as tampering.',
-  },
   'identity.session_sweep_failed': {
     happened: 'The hourly clean-up of ended sign-in sessions failed.',
     broke: 'Some old sign-in sessions were not deleted this time; none can be used again.',
