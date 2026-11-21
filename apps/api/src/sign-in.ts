@@ -26,10 +26,14 @@
 // - At either, a login service that can't be reached (on staging, often one
 //   still waking from zero) is SIGN_IN_UNAVAILABLE, 503 with Retry-After: a
 //   failure on our side, so no security event, never the 500 it was (S47).
-//   So is a sign-in started while too many are under way (S206 V8,
-//   login-flows.ts): every network's together, or the caller's network's. No
-//   flow is kept, and the cap's warning is said at most once a minute, as the
-//   OAuth flows' caps are (capWarning).
+//   So is a sign-in started while too many are under way, every network's
+//   together, from a busy network (S206 V8, login-flows.ts). No flow is kept,
+//   and the cap's warning is said at most once a minute, as the OAuth flows'
+//   caps are (capWarning). One started past its own network's share still
+//   starts, that network's oldest unfinished sign-ins giving way (S208): one
+//   caller can't lock everyone behind a shared address out. That is warned of
+//   the same way; a flow that gave way finds nothing at its callback, so that
+//   browser is refused SIGN_IN_FAILED and starts again.
 // - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
 //   a step-up for a challenge of the signed-in person's own session: a flow
 //   cookie, and off to the login service to sign in again (`prompt=login`).
@@ -231,10 +235,15 @@ export function registerSignIn(
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   // S206 V8: each cap's refusals said at most once a minute, with how many, so a flood is a line a minute.
-  const capped = {
-    full: capWarning(logger, clock, 'auth.sign_ins_capped', { most: MOST_OPEN_SIGN_INS }),
-    network_full: capWarning(logger, clock, 'auth.sign_ins_network_capped', { most: MOST_OPEN_SIGN_INS_A_NETWORK }),
-  };
+  const capped = capWarning(logger, clock, 'auth.sign_ins_capped', { most: MOST_OPEN_SIGN_INS });
+  // S208: a network's oldest giving way, said the same way, with how many sign-ins started past its share.
+  const gaveWay = capWarning(
+    logger,
+    clock,
+    'auth.sign_ins_gave_way',
+    { most: MOST_OPEN_SIGN_INS_A_NETWORK },
+    'started',
+  );
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
   const failed = (request: FastifyRequest, reply: FastifyReply, failure: SignInFailure, reason?: string) => {
     logger
@@ -303,7 +312,7 @@ export function registerSignIn(
         return unavailable(request, reply, thrown.message);
       }
       if (thrown instanceof SignInBusy) {
-        capped[thrown.cap]();
+        capped();
         return sendErrorBody(
           reply.header('retry-after', String(UNAVAILABLE_RETRY_SECONDS)),
           503,
@@ -314,6 +323,7 @@ export function registerSignIn(
       throw thrown;
     }
     const { url, flowId } = begun;
+    if (begun.gaveWay === true) gaveWay();
     return reply
       .code(302)
       .header('location', url)

@@ -466,11 +466,13 @@ export const PLAIN_WORDS = {
     broke: 'People on a busy network were asked to try again shortly; everyone else signs in as usual.',
     next: 'Look for many addresses starting sign-ins over and over. They end within ten minutes.',
   },
-  'auth.sign_ins_network_capped': {
-    happened: 'One address or network started more sign-ins at once than its share.',
-    broke: 'Only people on that network were asked to try again shortly; everyone else signs in as usual.',
+  'auth.sign_ins_gave_way': {
+    happened:
+      'One address or network had more sign-ins under way than its share, so its oldest unfinished ones were let go.',
+    broke: 'People there part-way through signing in must start again; new sign-ins still go ahead.',
     next: 'Nothing if rare: an office can share an address. If it goes on, block it at the front door.',
   },
+
   'auth.step_up_failed': {
     happened: "A person's check of who they are, before a sensitive change, failed.",
     broke: 'The change was refused; they stay signed in, and it was noted as a security event.',

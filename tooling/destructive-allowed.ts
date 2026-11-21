@@ -256,8 +256,8 @@ export const ALLOWED: readonly Allowed[] = [
       file: 'packages/core/src/modules/identity/infrastructure/login-flows.db.test.ts',
       title: 'sweeps flows past their ten minutes, a batch at a time, and leaves the rest',
     },
-    why: 'a sign-in flow taken once by its cookie hash, and the sweep of those past their ten minutes',
-    lines: 2,
+    why: "a sign-in flow taken once by its cookie hash, the sweep of those past their ten minutes, and (S209) a full network's oldest unfinished sign-ins giving way, its own network's only, never a step-up's (proved by 'at its share, only its own oldest sign-in gives way')",
+    lines: 3,
   },
   {
     file: 'packages/core/src/modules/oauth/infrastructure/clients.ts',

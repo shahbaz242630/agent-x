@@ -457,6 +457,63 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
     });
   });
 
+  it('SEC-OAUTH-10 refuses another organisation’s agent at the consent and its confirm: NOT_FOUND, nothing made in that organisation', async () => {
+    const theirOrg = await organization();
+    const theirAdmin = await member(theirOrg, 'admin');
+    const theirAgent = await agent(theirOrg, theirAdmin);
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const own = await agent(org, admin);
+    const flow = await opened();
+    const scopes = ['requests:read'] as const;
+
+    // Their agent's ID, sent in our admin's consent body: no agent of ours, so nothing to ask a step-up for.
+    expect(await consent(admin, flow, { agentId: theirAgent, scopes })).toEqual({
+      outcome: 'refused',
+      status: 404,
+      code: 'NOT_FOUND',
+    });
+    // At the confirm, with a step-up asked and passed for our own agent, their agent's ID swapped in.
+    const challengeId = askedFor(await consent(admin, flow, { agentId: own, scopes }));
+    await stepUp(admin, challengeId);
+    const swapped = { agentId: theirAgent, scopes };
+    expect(
+      await consents.confirm(
+        admin,
+        keyed(admin, CONSENT_CONFIRM_OPERATION, JSON.stringify({ ...swapped, challengeId })),
+        flow,
+        swapped,
+        challengeId,
+        CORRELATION,
+      ),
+    ).toEqual({ outcome: 'refused', status: 404, code: 'NOT_FOUND' });
+
+    // Read past the tenant wall: no key and no connection in their organisation, and the flow still undecided.
+    const made = async (orgId: string) => {
+      const admins = database.as('admin');
+      const [keysMade, connectionsMade] = await Promise.all([
+        admins.query('select 1 from agents.agent_keys where org_id = $1', [orgId]),
+        admins.query('select 1 from agents.connections where org_id = $1', [orgId]),
+      ]);
+      return { keys: keysMade.length, connections: connectionsMade.length };
+    };
+    expect(await made(theirOrg)).toEqual({ keys: 0, connections: 0 });
+    expect(await flowById(app, flow.flowId)).toMatchObject({ decided: null, orgId: null });
+    // The control: the same step-up confirms our own agent, and that read sees the connection it made.
+    expect(
+      await consents.confirm(
+        admin,
+        keyed(admin, CONSENT_CONFIRM_OPERATION, JSON.stringify({ agentId: own, scopes, challengeId })),
+        flow,
+        { agentId: own, scopes },
+        challengeId,
+        CORRELATION,
+      ),
+    ).toMatchObject({ outcome: 'connected', connection: { agentId: own } });
+    expect((await made(org)).connections).toBe(1);
+    expect(await made(theirOrg)).toEqual({ keys: 0, connections: 0 });
+  });
+
   it('confirms a flow once: a confirm for a flow decided since rolls back, and a retry answers no address', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');

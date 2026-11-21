@@ -449,6 +449,44 @@ async function send(confirm: Operation, body: Readonly<Record<string, unknown>>)
   });
 }
 
+/**
+ * The source of the test named `title` in `text`, from its title to the next
+ * test or block that starts after it; undefined when no test, or more than one,
+ * carries that title. Read as text, so the proof's file is never run here.
+ */
+function testBodyOf(text: string, title: string): string | undefined {
+  const quoted = `'${title}'`;
+  const at = text.indexOf(quoted);
+  if (at === -1 || text.lastIndexOf(quoted) !== at) return undefined;
+  const rest = text.slice(at + quoted.length);
+  const next = rest.search(/\n\s*(?:it|test|describe)(?:\.\w+)*\(/);
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+/**
+ * Whether a test's body asserts a refusal STEP_UP_FAILED: one statement, its
+ * comments left out, with an `expect` and either the code as a quoted string or
+ * a constant the body declared holding it (`const refused = { ...,
+ * code: 'STEP_UP_FAILED' }`). A test that only mentions the code, or asserts
+ * something else, doesn't count.
+ */
+function assertsStepUpRefused(body: string): boolean {
+  const statements = body
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n')
+    .split(';');
+  const holding = statements.flatMap((statement) => {
+    const declared = /\bconst (\w+) =/.exec(statement);
+    return declared?.[1] !== undefined && statement.includes("'STEP_UP_FAILED'") ? [declared[1]] : [];
+  });
+  return statements.some(
+    (statement) =>
+      statement.includes('expect') &&
+      (statement.includes("'STEP_UP_FAILED'") || holding.some((name) => new RegExp(`\\b${name}\\b`).test(statement))),
+  );
+}
+
 describe('SEC-HA-02 every step-up action, walked', () => {
   it('walks exactly the step-up actions the API’s document holds: a new one fails here until it is added', () => {
     expect(
@@ -480,7 +518,7 @@ describe('SEC-HA-02 every step-up action, walked', () => {
     }
   });
 
-  it('names for each the database test proving its refusals, tagged SEC-HA-02', () => {
+  it('names for each the database test proving its refusals, tagged SEC-HA-02, whose own body asserts the refusal', () => {
     const missing = Object.entries(WALK)
       .filter(
         ([
@@ -490,11 +528,51 @@ describe('SEC-HA-02 every step-up action, walked', () => {
           },
         ]) => {
           const text = readFileSync(new URL(`../../../${file}`, import.meta.url), 'utf8');
-          return !title.startsWith('SEC-HA-02') || !text.includes(`'${title}'`) || !text.includes('STEP_UP_FAILED');
+          const body = testBodyOf(text, title);
+          return !title.startsWith('SEC-HA-02') || body === undefined || !assertsStepUpRefused(body);
         },
       )
       .map(([ask]) => ask);
     expect(missing).toEqual([]);
+  });
+
+  it('finds a named test’s own body, and refuses an empty one, one named twice, or one asserting nothing', () => {
+    const file = [
+      "describe('d', () => {",
+      "  it('SEC-HA-02 proves it', async () => {",
+      "    expect(await confirm()).toEqual(refused(403, 'STEP_UP_FAILED'));",
+      '  });',
+      "  it('SEC-HA-02 empty', async () => {});",
+      "  it('SEC-HA-02 says it only', async () => {",
+      '    // STEP_UP_FAILED, in words alone, then expect( nothing about it',
+      '    expect(1).toBe(1);',
+      '  });',
+      "  it('SEC-HA-02 by its constant', async () => {",
+      "    const refused = { outcome: 'refused', code: 'STEP_UP_FAILED' };",
+      '    expect(await confirm()).toEqual(refused);',
+      '  });',
+      "  it('SEC-HA-02 its constant unused', async () => {",
+      "    const refused = { outcome: 'refused', code: 'STEP_UP_FAILED' };",
+      "    expect(await confirm()).toEqual({ outcome: 'written' });",
+      '  });',
+      "  it('SEC-HA-02 named twice', () => {});",
+      "  it('SEC-HA-02 named twice', () => { expect(x).toBe('STEP_UP_FAILED'); });",
+      "  it('after', () => { expect(y).toBe('STEP_UP_FAILED'); });",
+      '});',
+    ].join('\n');
+    const proves = (title: string) => {
+      const body = testBodyOf(file, title);
+      return body !== undefined && assertsStepUpRefused(body);
+    };
+
+    expect(proves('SEC-HA-02 proves it')).toBe(true);
+    expect(proves('SEC-HA-02 by its constant')).toBe(true);
+    expect(proves('SEC-HA-02 its constant unused')).toBe(false);
+    // The next test's assertion never counts for an empty one before it.
+    expect(proves('SEC-HA-02 empty')).toBe(false);
+    expect(proves('SEC-HA-02 says it only')).toBe(false);
+    expect(proves('SEC-HA-02 named twice')).toBe(false);
+    expect(proves('SEC-HA-02 not there')).toBe(false);
   });
 
   it.each(SENT.map(({ confirm, body }) => [confirm.id, confirm, body] as const))(
