@@ -324,8 +324,23 @@ export const PLAIN_WORDS = {
   },
   'audit.anchor_store_not_set': {
     happened: 'This API was started with no store named for the audit anchors.',
-    broke: 'Anchors are in memory alone: a restart forgets them, and a history wound back meanwhile goes unseen.',
+    broke: 'A copy running the jobs forgets every anchor at a restart; a web copy decides without the digest.',
     next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_ANCHORS_URL: playbook section H.',
+  },
+  'audit.web_anchors_read_failed': {
+    happened: 'A web copy of the API could not read the audit anchors or their digest just now.',
+    broke: 'Its decisions go on with what it read before. Payments are not affected: they are checked at the hand-off.',
+    next: 'Nothing if it passes: it tries again each minute. If it keeps failing, a lasting warning follows.',
+  },
+  'audit.web_anchors_read_failing': {
+    happened: 'A web copy of the API has not been able to read the audit anchors for some time.',
+    broke: 'Its decisions go on with today’s checks, without the digest. Payments are not affected.',
+    next: 'Check the API identity’s anchors reader role on the anchors container, and that the foundation deploy has run.',
+  },
+  'audit.web_anchors_beyond_memory': {
+    happened: 'A web copy of the API could not hold the audit anchors in memory.',
+    broke: 'Its decisions go on with today’s checks, without the digest. Payments are not affected.',
+    next: 'Give the API a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
   'audit.anchor_store_write_refused': {
     happened: 'An API copy that only reads the audit anchors tried to write a file to their store.',

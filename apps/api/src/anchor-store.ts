@@ -13,7 +13,7 @@ import type { Clock } from '@agentx/core/shared-kernel';
 import { type AnchorLog, createAnchorLog, createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { type Config, LOCAL_ONLY } from '@agentx/platform/config';
 import type { KeyProvider } from '@agentx/platform/keys';
-import type { Logger } from '@agentx/platform/observability';
+import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 import {
   azureBlobOrigins,
@@ -55,17 +55,57 @@ export function anchorLogOf(config: Config, services: StoreServices): AnchorLog 
   return anchorsKeptOf(config, services)?.log;
 }
 
-/** The store the config names, or none, said where that is a fault. */
+/** The store the config names, or none, said where `faulty` says that is a fault. */
 function storeOf(
   { environment, anchorStore: { directory, container } }: Config,
   logger: Logger,
+  faulty: (environment: Config['environment']) => boolean,
 ): WriteOnceStore | undefined {
   if (container !== null) {
     return azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
   }
   if (directory !== null) return folderWriteOnceStore(directory);
-  if (!LOCAL_ONLY.includes(environment)) logger.error('audit.anchor_store_not_set', { environment });
+  if (faulty(environment)) logger.error('audit.anchor_store_not_set', { environment });
   return undefined;
+}
+
+/**
+ * What a store's failures are called on a web copy (AT13b): the jobs copy's lines say payments wait, which is never so
+ * on a web copy (Tx A runs in the jobs copy), so each is said under a web copy's own name and words, as a warning: its
+ * decisions go on with today's checks. The daily email of warnings carries a lasting one; none pages.
+ */
+export const WEB_COPY_NAMES = {
+  'audit.anchor_store_read_failed': 'audit.web_anchors_read_failed',
+  'audit.anchor_shard_unreadable': 'audit.web_anchors_read_failed',
+  'audit.state_digest_store_failed': 'audit.web_anchors_read_failed',
+  'audit.anchor_store_read_failing': 'audit.web_anchors_read_failing',
+  'audit.anchor_store_unreadable': 'audit.web_anchors_read_failing',
+  'audit.state_digest_store_failing': 'audit.web_anchors_read_failing',
+  'audit.anchor_store_beyond_memory': 'audit.web_anchors_beyond_memory',
+} as const satisfies Partial<Record<ProblemEvent, ProblemEvent>>;
+
+/** A web copy's logger: every line says `copy: web`, and a store's failures go by the web copy's names (above). */
+export function webCopyLogger(logger: Logger): Logger {
+  const renamed =
+    (said: Logger['error']): Logger['error'] =>
+    (event, fields) => {
+      const web = (WEB_COPY_NAMES as Partial<Record<ProblemEvent, ProblemEvent>>)[event];
+      if (web === undefined) said(event, { ...fields, copy: 'web' });
+      else logger.warn(web, { ...fields, copy: 'web', was: event });
+    };
+  const marked =
+    (said: Logger['info']): Logger['info'] =>
+    (event, fields) => {
+      said(event, { ...fields, copy: 'web' });
+    };
+  return Object.freeze({
+    error: renamed(logger.error.bind(logger)),
+    warn: renamed(logger.warn.bind(logger)),
+    info: marked(logger.info.bind(logger)),
+    debug: marked(logger.debug.bind(logger)),
+    child: (bindings: Parameters<Logger['child']>[0]) => webCopyLogger(logger.child(bindings)),
+    flush: logger.flush.bind(logger),
+  });
 }
 
 /** The log and the digest over a store: the digest after the log, whose rebases and shards it goes by. */
@@ -112,7 +152,7 @@ export function anchorsKeptOf(
   /** Whether this process leads the jobs: one that doesn't says nothing from its digest (digest-log.ts). */
   leading?: () => boolean,
 ): AnchorsKept | undefined {
-  const store = storeOf(config, services.logger);
+  const store = storeOf(config, services.logger, (environment) => !LOCAL_ONLY.includes(environment));
   // The API's jobs anchor, so they move the store on to the shards (PL-65 PR2); the operator's job only reads it.
   return store && keptIn(store, config.audit.anchorEpoch, services, { cutOver: true, leading });
 }
@@ -120,15 +160,27 @@ export function anchorsKeptOf(
 /**
  * A `web` copy's (AT13b): the same log and digest, read only. It never moves the store on (no cutover: that is a write),
  * never leads, so its digest speaks from what it read whatever the lease says, and its store refuses every write. The
- * same budget as a copy that keeps them, a share of its own heap, so it gives way the same way.
+ * same budget as a copy that keeps them, a share of its own heap, so it gives way the same way. Its lines by a web
+ * copy's logger (`webCopyLogger`).
+ *
+ * No store named is a fault only in production, whose policy holds every web copy to the store: elsewhere a web copy
+ * without one is on purpose (Stage G's throwaway copy, whose jobs keep their own container the API isn't given), so it
+ * goes on as before the digest, said once as information, never as the anchors' alert.
  */
 export function anchorsReadOf(config: Config, services: StoreServices): AnchorsKept | undefined {
-  const store = storeOf(config, services.logger);
-  return (
-    store &&
-    keptIn(readOnlyStore(store, services.logger), config.audit.anchorEpoch, services, {
+  const logger = webCopyLogger(services.logger);
+  const store = storeOf(config, logger, (environment) => environment === 'production');
+  if (store === undefined) {
+    if (config.environment !== 'production') logger.info('audit.web_anchors_off', { environment: config.environment });
+    return undefined;
+  }
+  return keptIn(
+    readOnlyStore(store, logger),
+    config.audit.anchorEpoch,
+    { ...services, logger },
+    {
       cutOver: false,
       leading: undefined,
-    })
+    },
   );
 }

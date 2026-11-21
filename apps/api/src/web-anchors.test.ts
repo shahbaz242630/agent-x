@@ -15,7 +15,15 @@ import { LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { PastDeadline, Stopped } from './background.ts';
-import { type AnchorsKept, anchorsKeptOf, anchorsReadOf, ReadOnlyStore, readOnlyStore } from './anchor-store.ts';
+import {
+  type AnchorsKept,
+  anchorsKeptOf,
+  anchorsReadOf,
+  ReadOnlyStore,
+  readOnlyStore,
+  WEB_COPY_NAMES,
+  webCopyLogger,
+} from './anchor-store.ts';
 import { type Booted, sharedParts } from './boot.ts';
 import { webCopyJobs } from './job-list.ts';
 import { createWebAnchorRead, WEB_ANCHORS_EVERY_MS } from './web-anchors.ts';
@@ -86,7 +94,7 @@ function webOver(directory: string) {
   if (kept === undefined) throw new Error('a folder is named');
   const read = createWebAnchorRead({ ...kept, logger: services.logger });
   const said = (event: string) => capture.lines().filter((line) => line.event === event);
-  return { ...kept, read, said };
+  return { ...kept, read, said, capture };
 }
 
 describe('a web copy reads the anchors and the digest the jobs copy keeps (AT13b)', () => {
@@ -194,13 +202,83 @@ describe('a web copy reads the anchors and the digest the jobs copy keeps (AT13b
     expect(web.log.memoryHeld().bytes).toBeGreaterThanOrEqual(before + web.digest.memoryHeld().bytes);
   });
 
-  it('none where no store is named, said as for any copy deployed without one', () => {
+  it('none where no store is named: the anchors’ alert in production alone, information elsewhere (Stage G)', () => {
+    const lines = (environment: string) => {
+      const capture = new LogCapture();
+      expect(anchorsReadOf(configWith(null, environment), servicesWith(capture))).toBeUndefined();
+      return capture.lines().map(({ level, event, copy }) => ({ level, event, copy }));
+    };
+    expect(lines('production')).toEqual([{ level: 'error', event: 'audit.anchor_store_not_set', copy: 'web' }]);
+    // Staging's throwaway copy gives its web copies no store on purpose: never the alert telling the partner to deploy.
+    for (const environment of ['staging', 'development', 'test']) {
+      expect(lines(environment)).toEqual([{ level: 'info', event: 'audit.web_anchors_off', copy: 'web' }]);
+    }
+    // The jobs copy's rule is unchanged: staging without a store is its alert.
+    const jobs = new LogCapture();
+    expect(anchorsKeptOf(configWith(null, 'staging'), servicesWith(jobs))).toBeUndefined();
+    expect(jobs.lines().map(({ level, event }) => [level, event])).toEqual([['error', 'audit.anchor_store_not_set']]);
+  });
+
+  it('a store it can’t read says so as a web copy: a warning under its own name, never that payments wait', async () => {
+    const directory = folder();
+    const notAFolder = join(directory, 'a-file');
+    await folderWriteOnceStore(directory).put('a-file', Buffer.from('x'));
+    const web = webOver(notAFolder);
+    await web.read.run();
+    await web.read.run();
+    const problems = web.capture
+      .lines()
+      .filter(({ level }) => level === 'warn' || level === 'error')
+      .map(({ level, event, copy }) => ({ level, event, copy }));
+    expect(problems.length).toBeGreaterThan(0);
+    for (const problem of problems) {
+      expect(problem).toEqual({
+        level: 'warn',
+        event: expect.stringMatching(/^audit\.web_anchors_/) as unknown,
+        copy: 'web',
+      });
+    }
+    expect(web.digest.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
+  });
+});
+
+describe('a web copy’s logger (AT13b)', () => {
+  it('says each store failure under the web copy’s name, as a warning, naming what it was', () => {
     const capture = new LogCapture();
-    expect(anchorsReadOf(configWith(null), servicesWith(capture))).toBeUndefined();
-    expect(anchorsReadOf(configWith(null, 'production'), servicesWith(capture))).toBeUndefined();
-    expect(capture.lines().map((line) => [line.event, line.environment])).toEqual([
-      ['audit.anchor_store_not_set', 'production'],
+    const logger = webCopyLogger(testLogger(capture));
+    for (const [event, web] of Object.entries(WEB_COPY_NAMES)) {
+      logger.error(event as keyof typeof WEB_COPY_NAMES, { n: 1 });
+      logger.warn(event as keyof typeof WEB_COPY_NAMES, { n: 2 });
+      expect(capture.lines().slice(-2)).toEqual([
+        expect.objectContaining({ level: 'warn', event: web, was: event, n: 1 }),
+        expect.objectContaining({ level: 'warn', event: web, was: event, n: 2 }),
+      ]);
+    }
+    expect(Object.values(WEB_COPY_NAMES).toSorted()).toEqual([
+      'audit.web_anchors_beyond_memory',
+      'audit.web_anchors_read_failed',
+      'audit.web_anchors_read_failed',
+      'audit.web_anchors_read_failed',
+      'audit.web_anchors_read_failing',
+      'audit.web_anchors_read_failing',
+      'audit.web_anchors_read_failing',
     ]);
+  });
+
+  it('lets every other line through as it is, the alarm among them, and keeps renaming in a child', () => {
+    const capture = new LogCapture();
+    const logger = webCopyLogger(testLogger(capture));
+    logger.error('audit.integrity_failed', { chain: 'store' });
+    logger.warn('audit.anchor_store_foreign', { files: 1 });
+    logger.info('audit.anchors_read', { chains: 1 });
+    logger.child({ orgId: ORG }).error('audit.anchor_store_unreadable');
+    expect(capture.lines().map(({ level, event, orgId }) => [level, event, orgId])).toEqual([
+      ['error', 'audit.integrity_failed', undefined],
+      ['warn', 'audit.anchor_store_foreign', undefined],
+      ['info', 'audit.anchors_read', undefined],
+      ['warn', 'audit.web_anchors_read_failing', ORG],
+    ]);
+    expect(capture.lines().map(({ copy }) => copy)).toEqual(['web', 'web', 'web', 'web']);
   });
 });
 
@@ -293,7 +371,7 @@ describe('the web copy’s run that reads the store again (AT13b)', () => {
     const { run, capture } = standIns({ digest: () => Promise.reject(new PastDeadline('slow')) });
     await expect(run.run()).resolves.toBeUndefined();
     expect(capture.lines()).toEqual([
-      expect.objectContaining({ level: 'warn', event: 'audit.state_digest_store_failed', what: 'read' }),
+      expect.objectContaining({ level: 'warn', event: 'audit.web_anchors_read_failed', copy: 'web', what: 'read' }),
     ]);
   });
 

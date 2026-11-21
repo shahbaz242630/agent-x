@@ -53,7 +53,14 @@ export function createWebAnchorRead({
       try {
         await withinDeadline(digest.read(), DIGEST_WITHIN_MS, signal);
       } catch (error) {
-        if (!(error instanceof Stopped)) logger.warn('audit.state_digest_store_failed', { what: 'read', err: error });
+        if (!(error instanceof Stopped)) {
+          logger.warn('audit.web_anchors_read_failed', {
+            copy: 'web',
+            what: 'read',
+            was: 'audit.state_digest_store_failed',
+            err: error,
+          });
+        }
       }
     },
   };
