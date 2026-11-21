@@ -1686,7 +1686,7 @@ describe(`SEC-DB-10 R-15 the owner can't send a sign-in's browser to another sit
   });
 });
 
-describe(`S208 the owner can't point a step-up's flow at another challenge of the session (Postgres ${server.version})`, () => {
+describe(`SEC-DB-14 SEC-DB-20 S208 the owner can't point a step-up's flow at another challenge of the session (Postgres ${server.version})`, () => {
   // A step-up flow's challenge is kept unsealed (0014). The owner, holding none of the app's keys, can point it at
   // another pending challenge of the same session; the fresh sign-in's nonce is the first challenge's, which the
   // callback checks against the sealed challenge's own, so the other is never verified, and the alarm is raised.

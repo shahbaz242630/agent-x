@@ -129,7 +129,7 @@ const integrity = (capture: LogCapture) =>
 
 const seqs = (heads: readonly { readonly seq: bigint }[]) => heads.map(({ seq }) => seq);
 
-describe('the witness log: writing', () => {
+describe('SEC-DB-20 the witness log: writing', () => {
   it('writes a `now` head at once and resolves once its Put holding it succeeded; one Put in flight takes all waiting', async () => {
     const { log, heads } = witnessOn();
     let release: () => void = () => undefined;
@@ -231,7 +231,7 @@ describe('the witness log: writing', () => {
   });
 });
 
-describe('the witness log: reading', () => {
+describe('SEC-DB-20 the witness log: reading', () => {
   it('keeps both copies’ heads, the honest one and a stale copy’s on a cut branch: a list, never only the highest', async () => {
     const store = createFakeWriteOnceStore();
     const copyA = witnessOn(store);
@@ -516,7 +516,7 @@ describe('the witness log: reading', () => {
   });
 });
 
-describe('the witness log: memory and snapshots', () => {
+describe('SEC-DB-20 the witness log: memory and snapshots', () => {
   it('a thousand heads let go write the leader’s next snapshot before the hour, at most one a quarter hour, so a restart doesn’t confirm them again', async () => {
     const snapshots = createFakeWriteOnceStore();
     const time = clock();

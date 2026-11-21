@@ -149,7 +149,7 @@ async function ranUntil(started: { stop(): Promise<void> }, capture: LogCapture,
   }
 }
 
-describe('TR-1 the jobs side wired over the database and a witness store', () => {
+describe('SEC-DB-20 TR-1 the jobs side wired over the database and a witness store', () => {
   it('anchors both chains held to the heads witnessed, probes a head another copy wrote, and pays through the gate', async () => {
     const { w, acting } = await ready();
     const { made, job, capture } = jobsSide();

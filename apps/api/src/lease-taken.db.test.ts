@@ -144,7 +144,7 @@ async function asOwner(w: World, run: (owner: Awaited<ReturnType<typeof tamperAs
   }
 }
 
-describe('TR-1 A: the jobs lease taken for a moment, then the chain cut back below a head the copy saw', () => {
+describe('SEC-DB-20 TR-1 A: the jobs lease taken for a moment, then the chain cut back below a head the copy saw', () => {
   it('the error at once; the copy leads again, and Tx A and the next decision still refuse the cut', async () => {
     await database.as('admin').query("update platform_controls.job_lease set holder = null, until = '-infinity'");
     const { w, acting } = await ready();

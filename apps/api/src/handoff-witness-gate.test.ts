@@ -107,7 +107,7 @@ async function cleared(
   return { go, held, forks };
 }
 
-describe('TR-1 F.6 the witness gate before the partner call', () => {
+describe('SEC-DB-20 TR-1 F.6 the witness gate before the partner call', () => {
   it('lets the payment go where every head witnessed is on Tx A’s paths, or its own head; H_A noted, its Put waited for', async () => {
     const witness = witnessWith({ org: [seen(4n), seen(8n)], platform: [seen(5n)] });
     expect(await cleared(witness)).toEqual({ go: true, held: [], forks: [] });

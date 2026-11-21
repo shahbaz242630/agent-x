@@ -36,7 +36,7 @@ afterEach(() => {
   witnessWith(undefined);
 });
 
-describe('TR-1 each transaction’s chain heads to the witness log', () => {
+describe('SEC-DB-20 TR-1 each transaction’s chain heads to the witness log', () => {
   it('notes a transaction’s highest head once, `now` if any of its writes there is', () => {
     const { witness, notes } = recording();
     witnessWith(witness);

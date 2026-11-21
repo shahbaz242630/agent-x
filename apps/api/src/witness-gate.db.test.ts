@@ -330,7 +330,7 @@ async function outcome(w: World, requestId: string, submitted: number) {
 
 const heldNow = async (w: World) => (await signed(w, (tx, states) => states.holdRecord(tx, w.org))).outcome;
 
-describe('TR-1 PR-1d the positive control: an honest jobs copy held to the frontier and the gate', () => {
+describe('SEC-DB-20 TR-1 PR-1d the positive control: an honest jobs copy held to the frontier and the gate', () => {
   it('pays once: Tx A walks from the frontier, the gate witnesses its head and finds every head on the path', async () => {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
@@ -350,7 +350,7 @@ describe('TR-1 PR-1d the positive control: an honest jobs copy held to the front
   });
 });
 
-describe('TR-1 (3): the gate after a forced order', () => {
+describe('SEC-DB-20 TR-1 (3): the gate after a forced order', () => {
   it('J reads the store, W stops the agent and the owner cuts it off, J’s Tx A commits: the gate sends nothing, the organisation held', async () => {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
@@ -386,7 +386,7 @@ describe('TR-1 (3): the gate after a forced order', () => {
   });
 });
 
-describe('TR-1 (4): a forced lock order', () => {
+describe('SEC-DB-20 TR-1 (4): a forced lock order', () => {
   /** J's run queued on the pause row the owner holds; `meanwhile` done; the row let go; the run's calls. */
   async function queuedBehindThePause(w: World, j: JobsCopy, meanwhile: () => Promise<void>): Promise<number> {
     const holder = await database.connect('owner');
@@ -439,7 +439,7 @@ describe('TR-1 (4): a forced lock order', () => {
   });
 });
 
-describe('TR-1 (9): the witness store unreadable', () => {
+describe('SEC-DB-20 TR-1 (9): the witness store unreadable', () => {
   it('a view older than 30 s waits (witness_pending), nothing committed; read again, it goes', async () => {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
@@ -477,7 +477,7 @@ describe('TR-1 (9): the witness store unreadable', () => {
   });
 });
 
-describe('TR-1 (12): a rebase after a restore sets the witnesses and the frontier aside', () => {
+describe('SEC-DB-20 TR-1 (12): a rebase after a restore sets the witnesses and the frontier aside', () => {
   it('the stop W witnessed, cut off by a restore: held without the rebase; with it recorded, the payment goes', async () => {
     const control = createFakeWriteOnceStore();
     const first = await ready();
@@ -517,7 +517,7 @@ describe('TR-1 (12): a rebase after a restore sets the witnesses and the frontie
   });
 });
 
-describe('TR-1 F.3 Tx A’s own walk, and a frontier with no anchor', () => {
+describe('SEC-DB-20 TR-1 F.3 Tx A’s own walk, and a frontier with no anchor', () => {
   it('a stop witnessed before Tx A, cut off, its reads not held to it: Tx A’s walk finds it (hold_tampered), nothing committed', async () => {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
@@ -581,7 +581,7 @@ describe('TR-1 F.3 Tx A’s own walk, and a frontier with no anchor', () => {
   });
 });
 
-describe('TR-1 review: the platform frontier, witness writes failing, a restart', () => {
+describe('SEC-DB-20 TR-1 review: the platform frontier, witness writes failing, a restart', () => {
   it('82: each Tx A raises the platform frontier to the head it walked to, so the next walks only what came since', async () => {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
@@ -686,7 +686,7 @@ describe('TR-1 review: the platform frontier, witness writes failing, a restart'
   });
 });
 
-describe('TR-3 a stop rewritten in place below the frontier, its hash kept', () => {
+describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash kept', () => {
   /**
    * Two requests; W cancels the second, its head witnessed; J's Tx A for the first walks past the cancel, raising F
    * beyond it. Then, `rewrite` given, the owner moves the cancel's event to another subject (its stored hash left as it
@@ -861,7 +861,7 @@ describe('TR-3 a stop rewritten in place below the frontier, its hash kept', () 
   });
 });
 
-describe('TR-1 (13): a walk past its reach', () => {
+describe('SEC-DB-20 TR-1 (13): a walk past its reach', () => {
   it('more events past the frontier than a walk may take waits (chain_unverified); within it, it goes', async () => {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
@@ -876,7 +876,7 @@ describe('TR-1 (13): a walk past its reach', () => {
   });
 });
 
-describe('TR-1 (6): the pause hidden for a moment', () => {
+describe('SEC-DB-20 TR-1 (6): the pause hidden for a moment', () => {
   /** The platform rows past `seq`, the head and the pause row, as the owner saves them to put back. */
   async function ownerSaves(seq: string) {
     const owner = await database.connect('owner');

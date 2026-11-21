@@ -27,7 +27,7 @@ const nth = (n: number) => `0199a0f0-0000-7000-8000-${n.toString(16).padStart(12
 const bank = (...entries: BankEntry[]) => ({ kind: 'bank' as const, entries });
 const order = (holder: string | null) => ({ kind: 'order' as const, holder });
 
-describe("a slot's holders", () => {
+describe("SEC-DB-21 a slot's holders", () => {
   it('names an order kind by one request or none, a bank kind by its entries', () => {
     expect(SLOT_KINDS.filter(isOrderKind)).toEqual(['supplier_order', 'payee_order']);
     expect(noHolders('supplier_order')).toEqual(order(null));
@@ -90,7 +90,7 @@ describe("a slot's holders", () => {
   });
 });
 
-describe("what a request's slots say of its order", () => {
+describe("SEC-DB-21 what a request's slots say of its order", () => {
   it('a duplicate where another holds the order; never its own, nor one left out', () => {
     expect(slotsLook([order(A)], { orderHash: ONE, except: [] })).toEqual({ duplicate: true, possible: false });
     expect(slotsLook([order(A)], { orderHash: ONE, except: [A.toUpperCase()] })).toEqual({
