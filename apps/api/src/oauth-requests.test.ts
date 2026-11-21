@@ -207,6 +207,25 @@ describe('the deny', () => {
   });
 });
 
+// S208, ZAP 10055: the CSP holds form-action to 'self', and Chrome holds a form's redirects to it too. An app's
+// address (https, or http to loopback on any port: redirects.ts) is reached only because these answers are JSON the
+// page's script follows: a 302 here would be a redirect form-action could block.
+describe("the app's address under form-action 'self'", () => {
+  it.each([
+    'https://claude.ai/api/mcp/auth_callback?code=axc_x&state=s',
+    'http://127.0.0.1:53682/callback?code=axc_x&state=s',
+    'http://localhost:33418/?code=axc_x&state=s',
+    'http://[::1]:8080/cb?code=axc_x&state=s',
+  ])('answers %s to the script, never as a redirect', async (redirectTo) => {
+    const denied = await consentServer({ outcome: 'denied', redirectTo });
+    const response = await denied.app.inject(write('/deny', {}));
+    expect(response.statusCode).toBe(200);
+    expect(response.headers.location).toBeUndefined();
+    expect(response.json()).toEqual({ redirectTo });
+    expect(response.headers['content-security-policy']).toContain("form-action 'self'");
+  });
+});
+
 describe('a device’s request (6E3c, RFC 8628 §3.3)', () => {
   const lookup = (userCode: string, cookie = cookies): InjectOptions => ({
     method: 'POST',
