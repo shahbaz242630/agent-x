@@ -118,7 +118,7 @@ function keptIn(
   store: WriteOnceStore,
   epoch: number,
   { clock, ...services }: StoreServices,
-  { cutOver, leading }: { readonly cutOver: boolean; readonly leading: (() => boolean) | undefined },
+  { cutOver, writes }: { readonly cutOver: boolean; readonly writes: (() => boolean) | undefined },
 ): AnchorsKept {
   const now = (): Date => clock.now();
   // Made after the log, which counts it: asked only once both are made.
@@ -140,7 +140,7 @@ function keptIn(
     epoch,
     now,
     anchors: log,
-    leading,
+    writes,
     mostBytes: Math.floor(log.memoryHeld().mostBytes / 2),
     // An approval older than this is never handed off (AT13d): so a request's facts needn't be kept past it.
     forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
@@ -158,17 +158,21 @@ function keptIn(
 export function anchorsKeptOf(
   config: Config,
   services: StoreServices,
-  /** Whether this process leads the jobs: one that doesn't says nothing from its digest (digest-log.ts). */
-  leading?: () => boolean,
+  /**
+   * Whether this process may write the digest: it leads the jobs. One that doesn't still reads and says all it holds,
+   * forgetting nothing at a lease lost, and writes what it held back once it leads again (digest-log.ts, TR-1 A).
+   */
+  writes?: () => boolean,
 ): AnchorsKept | undefined {
   const store = storeOf(config, services.logger, (environment) => !LOCAL_ONLY.includes(environment));
   // The API's jobs anchor, so they move the store on to the shards (PL-65 PR2); the operator's job only reads it.
-  return store && keptIn(store, config.audit.anchorEpoch, services, { cutOver: true, leading });
+  return store && keptIn(store, config.audit.anchorEpoch, services, { cutOver: true, writes });
 }
 
 /**
  * A `web` copy's (AT13b): the same log and digest, read only. It never moves the store on (no cutover: that is a write),
- * never leads, so its digest speaks from what it read whatever the lease says, and its store refuses every write. The
+ * never leads, its digest speaking from what it read as every copy's does whatever the lease says (TR-1 A), and its
+ * store refuses every write. The
  * same budget as a copy that keeps them, a share of its own heap, so it gives way the same way. Its lines by a web
  * copy's logger (`webCopyLogger`).
  *
@@ -189,7 +193,7 @@ export function anchorsReadOf(config: Config, services: StoreServices): AnchorsK
     { ...services, logger },
     {
       cutOver: false,
-      leading: undefined,
+      writes: undefined,
     },
   );
 }
