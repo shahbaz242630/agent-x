@@ -450,7 +450,7 @@ export function createHandoff({
    * every head a copy witnessed, and the gate before every partner call. None (some tests), and neither is.
    */
   readonly witnessing?: {
-    readonly witness: Pick<WitnessLog, 'now' | 'refreshWhole' | 'pending' | 'beyondMemory' | 'freshAt'>;
+    readonly witness: Pick<WitnessLog, 'now' | 'settled' | 'refreshWhole' | 'pending' | 'beyondMemory' | 'freshAt'>;
     readonly frontier: ChainFrontier;
     /** The gate (handoff-witness-gate.ts) unless a test gives its own. */
     readonly gate?: HandoffWitnessGate;

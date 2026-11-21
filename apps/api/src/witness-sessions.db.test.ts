@@ -7,7 +7,7 @@
 import { checkStatesWith, witnessWith } from '@agentx/core/modules/audit';
 import { createSessions, type IdentityTables, userForSubject } from '@agentx/core/modules/identity';
 import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
-import { createDigestLog, createWitnessLog, type DigestLog } from '@agentx/platform/audit-chain';
+import { createDigestLog, createWitnessLog, type DigestLog, WitnessUnconfirmed } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -102,56 +102,65 @@ async function asOwner(text: string, values: readonly unknown[] = []): Promise<R
   }
 }
 
-describe('TR-1 (11): a platform cut below another copy’s witnessed head, answered as AT13h answers it', () => {
-  it('found on J from W’s head: the alarm, every session ended once, then a new sign-in works on J; the pause stays held', async () => {
-    const store = createFakeWriteOnceStore();
-    const witnessOf = () =>
-      createWitnessLog({
-        store: store.store,
-        keys,
-        logger: testLogger(capture),
-        now: () => clock.now(),
-        epoch: 1,
-        alertAfterMs: 60_000,
-        mostBytes: 1024 * 1024,
-      });
-    const bystander = await signedIn();
-    const [before] = await asOwner(
-      'select h.seq::text as seq, pg_catalog.row_to_json(h) as kept from platform_controls.audit_head h',
-    );
-    // W writes on the platform chain; its head goes to the store before W's process says it is done.
-    const onW = witnessOf();
-    witnessWith(onW);
-    await started();
-    witnessWith(undefined);
-    await onW.drained();
-    expect(store.files.size).toBe(1);
-    // The owner cuts W's event off and puts back the head before it: every seal true.
-    await asOwner('delete from platform_controls.audit_events where seq > $1::bigint', [String(before?.seq)]);
-    await asOwner(
-      `update platform_controls.audit_head h set (seq, hash, mac, mac_key_version) =
-         (select r.seq, r.hash, r.mac, r.mac_key_version
-          from pg_catalog.json_populate_record(null::platform_controls.audit_head, $1::json) r)`,
-      [JSON.stringify(before?.kept)],
-    );
-
-    // J never read W's event: only the store tells it.
-    const onJ = witnessOf();
-    await onJ.refresh();
-    const digest = createDigestLog({
+/**
+ * W writes on the platform chain, its head witnessed; the owner cuts it off; J reads the store, its digest held to it.
+ * Someone signed in before, and J's sessions.
+ */
+async function cutWitnessedOnW() {
+  const store = createFakeWriteOnceStore();
+  const witnessOf = (waitMs?: number) =>
+    createWitnessLog({
+      store: store.store,
       keys,
       logger: testLogger(capture),
       now: () => clock.now(),
       epoch: 1,
       alertAfterMs: 60_000,
-      mostBytes: 64 * 1024 * 1024,
-      witnessed: (chain) => onJ.pending(chain),
+      mostBytes: 1024 * 1024,
+      ...(waitMs === undefined ? {} : { waitMs }),
     });
-    await digest.read();
-    expect(digest.heads(PLATFORM)?.seen).toBeUndefined();
-    const witnessed = onJ.pending(PLATFORM)[0]?.seq;
-    expect(witnessed).toBeGreaterThan(BigInt(String(before?.seq)));
-    const j = sessionsOn(digest);
+  const bystander = await signedIn();
+  const [before] = await asOwner(
+    'select h.seq::text as seq, pg_catalog.row_to_json(h) as kept from platform_controls.audit_head h',
+  );
+  // W writes on the platform chain; its head goes to the store before W's process says it is done.
+  const onW = witnessOf();
+  witnessWith(onW);
+  await started();
+  witnessWith(undefined);
+  await onW.drained();
+  expect(store.files.size).toBe(1);
+  // The owner cuts W's event off and puts back the head before it: every seal true.
+  await asOwner('delete from platform_controls.audit_events where seq > $1::bigint', [String(before?.seq)]);
+  await asOwner(
+    `update platform_controls.audit_head h set (seq, hash, mac, mac_key_version) =
+         (select r.seq, r.hash, r.mac, r.mac_key_version
+          from pg_catalog.json_populate_record(null::platform_controls.audit_head, $1::json) r)`,
+    [JSON.stringify(before?.kept)],
+  );
+
+  // J never read W's event: only the store tells it.
+  const onJ = witnessOf();
+  await onJ.refresh();
+  const digest = createDigestLog({
+    keys,
+    logger: testLogger(capture),
+    now: () => clock.now(),
+    epoch: 1,
+    alertAfterMs: 60_000,
+    mostBytes: 64 * 1024 * 1024,
+    witnessed: (chain) => onJ.pending(chain),
+  });
+  await digest.read();
+  expect(digest.heads(PLATFORM)?.seen).toBeUndefined();
+  const witnessed = onJ.pending(PLATFORM)[0]?.seq;
+  expect(witnessed).toBeGreaterThan(BigInt(String(before?.seq)));
+  return { store, witnessOf, bystander, onJ, digest, witnessed, j: sessionsOn(digest) };
+}
+
+describe('TR-1 (11): a platform cut below another copy’s witnessed head, answered as AT13h answers it', () => {
+  it('found on J from W’s head: the alarm, every session ended once, then a new sign-in works on J; the pause stays held', async () => {
+    const { bystander, onJ, digest, witnessed, j } = await cutWitnessedOnW();
 
     expect(await j.use(app, bystander.cookie)).toBeUndefined();
     expect(lines('audit.integrity_failed')).toEqual([
@@ -173,5 +182,22 @@ describe('TR-1 (11): a platform cut below another copy’s witnessed head, answe
       heads?.some(({ seq, hash }) => seq === gone?.seq && hash.equals(gone.hash));
     expect(same(digest.heads(PLATFORM)?.heldTo)).toBe(true);
     expect(same(digest.heads(PLATFORM)?.accepted?.heldTo)).toBe(false);
+  });
+
+  it('PR-1d: the answer’s own head unwitnessed (the store down) is the request’s 503, never a locked console: the next sign-in works', async () => {
+    const { store, witnessOf, bystander, j } = await cutWitnessedOnW();
+    let down = true;
+    store.instead.put = (name, bytes) => (down ? Promise.reject(new Error('store down')) : store.real.put(name, bytes));
+    witnessWith(witnessOf(100));
+    await expect(j.use(app, bystander.cookie)).rejects.toBeInstanceOf(WitnessUnconfirmed);
+    // Answered all the same: every session ended, once.
+    expect(lines('identity.sessions_all_ended')).toHaveLength(1);
+    expect(lines('identity.sessions_all_end_failed')).toEqual([]);
+    // Still down, a new sign-in on J is let in: the cut taken as it stands, nothing more to answer or to wait for.
+    clock.advanceBy(1000);
+    const again = await signedIn();
+    expect(await j.use(app, again.cookie)).toMatchObject({ sessionId: again.sessionId });
+    down = false;
+    expect(lines('identity.sessions_all_ended')).toHaveLength(1);
   });
 });

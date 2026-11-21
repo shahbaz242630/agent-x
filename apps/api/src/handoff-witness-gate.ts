@@ -71,7 +71,7 @@ export function createHandoffWitnessGate({
   deadlineMs = GATE_DEADLINE_MS,
   most = MOST_WALKED_WITHIN,
 }: {
-  readonly witness: Pick<WitnessLog, 'now' | 'refreshWhole' | 'pending' | 'beyondMemory'>;
+  readonly witness: Pick<WitnessLog, 'now' | 'settled' | 'refreshWhole' | 'pending' | 'beyondMemory'>;
   readonly database: Database<AuditTables & PlatformControlsTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
@@ -126,8 +126,12 @@ export function createHandoffWitnessGate({
   const doubtOf = async (txA: WitnessedTxA): Promise<Doubt | undefined> => {
     const chain: Chain = { kind: 'organisation', orgId: txA.orgId };
     if (txA.head === undefined) return { reason: 'no_head' };
-    // Tx A's head out, and a read of the store begun after the commit, at once.
-    const [put, read] = await Promise.allSettled([witness.now(chain, txA.head), witness.refreshWhole()]);
+    // Tx A's head out, and a read of the store begun after the commit, at once. Its commit noted it already (`now`,
+    // its Put under way): waited for, never a second line; one not noted is noted now.
+    const { seq, hash } = txA.head;
+    const noted = witness.pending(chain).some((seen) => seen.seq === seq && seen.hash.equals(hash));
+    const out = noted ? witness.settled([chain]) : witness.now(chain, txA.head);
+    const [put, read] = await Promise.allSettled([out, witness.refreshWhole()]);
     if (put.status === 'rejected') return { reason: 'witness_unconfirmed' };
     if (read.status === 'rejected' || !read.value) return { reason: 'witness_unread' };
     if (witness.beyondMemory(chain) || witness.beyondMemory(PLATFORM)) return { reason: 'witness_pending' };

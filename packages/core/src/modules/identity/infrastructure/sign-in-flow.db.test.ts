@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  createFakeWriteOnceStore,
   createTestDatabase,
   FixedClock,
   LogCapture,
@@ -13,11 +14,13 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
+import { createWitnessLog, WitnessUnconfirmed } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { witnessWith } from '../../audit/index.ts';
 import {
   createPlatformChain,
   type PlatformControlsTables,
@@ -525,6 +528,66 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     // Back in the table, its MAC holding, and still no session (its alarm: sessions-tamper.db).
     expect(await sessionsOf(first.userId)).toEqual([{ id: second.sessionId }]);
     expect(await signIn.signedIn(second.cookie)).toBeUndefined();
+  });
+
+  describe('TR-1 PR-1d the platform heads a sign-in and a sign-out write, with the witness store down', () => {
+    /** A witness log over a store whose Puts fail while `down.now`, its waits short. */
+    function witnessed() {
+      const store = createFakeWriteOnceStore();
+      const down = { now: true };
+      store.instead.put = (name, bytes) =>
+        down.now ? Promise.reject(new Error('store down')) : store.real.put(name, bytes);
+      const witness = createWitnessLog({
+        store: store.store,
+        keys,
+        logger: testLogger(),
+        now: () => clock.now(),
+        epoch: 1,
+        alertAfterMs: 60_000,
+        mostBytes: 1024 * 1024,
+        waitMs: 100,
+      });
+      witnessWith(witness);
+      return { store, down };
+    }
+
+    it('a sign-out never fails closed: signed out and answered, said as a warning, its end still queued; up, none said', async () => {
+      const done = await roundTrip();
+      const { store, down } = witnessed();
+      try {
+        expect(await signIn.signOut(done.cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
+        expect(await sessionsOf(done.userId)).toEqual([]);
+        expect(capture.lines().filter((line) => line.event === 'identity.sign_out_unwitnessed')).toHaveLength(1);
+        expect(store.files.size).toBe(0);
+        // The positive control: the store answering, a sign-out says nothing, its end (and the one queued) out first.
+        down.now = false;
+        clock.advanceBy(1_000);
+        const again = await roundTrip();
+        expect(await signIn.signOut(again.cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
+        expect(capture.lines().filter((line) => line.event === 'identity.sign_out_unwitnessed')).toHaveLength(1);
+        expect(store.files.size).toBeGreaterThan(0);
+      } finally {
+        witnessWith(undefined);
+      }
+    });
+
+    it('a sign-in that ends the session the browser brought answers WitnessUnconfirmed (503), its session saved', async () => {
+      const first = await roundTrip();
+      const { down } = witnessed();
+      try {
+        await expect(roundTrip(undefined, first.cookie)).rejects.toBeInstanceOf(WitnessUnconfirmed);
+        // Saved: the session brought ended, the new one open.
+        expect(await sessions.use(app, first.cookie)).toBeUndefined();
+        expect(await sessionsOf(first.userId)).toHaveLength(1);
+        down.now = false;
+        // Past the backed-off retry's first wait: a new waiter tries again at once.
+        clock.advanceBy(1_000);
+        const second = await roundTrip(undefined, (await roundTrip()).cookie);
+        expect(second.userId).toBe(first.userId);
+      } finally {
+        witnessWith(undefined);
+      }
+    });
   });
 
   describe('SEC-DB-14 R-15 a sign-out whose end cannot be signed still signs out, with the alarm (S207)', () => {
