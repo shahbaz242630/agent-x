@@ -46,7 +46,7 @@ import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
 import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
 import { platformSubjectOf } from './platform-subjects.ts';
-import { anchorsKeptOf } from './anchor-store.ts';
+import { anchorsKeptOf, anchorsReadOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
@@ -98,6 +98,7 @@ import { createRoundTripTiming, ROUND_TRIP_EVERY_MS, ROUND_TRIPS_A_RUN } from '.
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createWaitingRequests } from './waiting-requests.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS, waitingRejectionsDue } from './waiting-rejections.ts';
+import { createWebAnchorRead, WEB_ANCHORS_EVERY_MS } from './web-anchors.ts';
 
 /**
  * How long the anchor check of one chain, or its probe of every head, may hold its
@@ -248,6 +249,22 @@ export function eachProcessJobs({ keys, logger, database }: Booted, { recorder, 
     // What sees the rest (job-watch.ts): not watched itself, and each minute whatever the others do.
     { name: 'pulse', start: () => scheduleRuns(watch, PULSE_EVERY_MS) },
   ];
+}
+
+/**
+ * A `web` copy's own (AT13b, web-anchors.ts): the anchors and the signed states' digest read from their store, read
+ * only, and every signed state this process reads held to that digest from here, as the jobs copy's are. Made but not
+ * started; the digest is given to core at once, read or not: until its first read it holds nothing, and every read goes
+ * on as before it. None where no store is named (development, test, Stage G's copy): reads as before the digest.
+ */
+export function webCopyJobs({ config, keys, logger }: Booted, { watch }: SharedParts): readonly Job[] {
+  // As the anchor check's own stale limit: what a store's reads may fail before that is the alert.
+  const alertAfterMs = config.audit.anchorSeconds * 3 * 1000;
+  const kept = anchorsReadOf(config, { keys, logger, clock: systemClock, alertAfterMs });
+  checkStatesWith(kept?.digest);
+  if (kept === undefined) return [];
+  const job = jobsWatchedBy(watch);
+  return [job('anchors_read', createWebAnchorRead({ ...kept, logger }), WEB_ANCHORS_EVERY_MS, QUICK_MS)];
 }
 
 /**

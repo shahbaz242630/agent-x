@@ -216,9 +216,6 @@ function splitTheApi(from: Snapshot): Snapshot {
   setSetting(api, 'AGENTX_WEB_COPIES', '1');
   setSetting(api, 'AGENTX_DB_POOL_MAX', '5');
   setSetting(jobs, 'AGENTX_DB_JOBS_POOL_MAX', '6');
-  containerOf(api).env = settingsOf(api).filter(
-    ({ name }) => !/^AGENTX_(?:ANCHOR_EPOCH|AUDIT_ANCHORS_)/.test(String(name)),
-  );
   containerOf(jobs).name = 'jobs';
   delete inside(jobs, 'properties', 'configuration').ingress;
   // The jobs hand out no machine IDs (SA3e), so neither read Zitadel's machine-ID config (AG10).
@@ -228,7 +225,22 @@ function splitTheApi(from: Snapshot): Snapshot {
   for (const volume of list(at(jobs, 'properties', 'template', 'volumes')) as Mutable[]) {
     volume.secrets = list(volume.secrets).filter((item) => at(item, 'secretRef') !== 'zitadel-machine-config');
   }
-  const kept = [...resources, jobs].filter(
+  // Production's anchors (main.bicep `anchorKeepers`, `anchorReaders`): the jobs app's identity keeps them, and the
+  // API's, whose web copies are told the store as staging's one API is, only reads them (AT13b): the chain repair's role.
+  const restorerReads = resources.find(
+    (resource) =>
+      at(resource, 'properties', 'description') ===
+      'chain-restore reads audit anchors (deploy/azure/modules/evidence.bicep)',
+  );
+  if (restorerReads === undefined) throw new Error("no chain repair's read of the anchors");
+  const apiReads = JSON.parse(
+    JSON.stringify(restorerReads)
+      .replaceAll('id-agentx-stg-chain-restore', 'id-agentx-stg-api')
+      .replace('chain-restore reads audit anchors', 'api web copies read audit anchors'),
+  ) as Mutable;
+  apiReads.id = `${String(apiReads.id)}-api`;
+  apiReads.name = `${String(apiReads.name)}-api`;
+  const kept = [...resources, jobs, apiReads].filter(
     (resource) =>
       at(resource, 'properties', 'description') !== 'api keeps audit anchors (deploy/azure/modules/evidence.bicep)',
   );
@@ -2526,12 +2538,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
           rule: 'evidence-store',
           resource: 'job-agentx-stg-migrate',
           message:
-            "sets AGENTX_AUDIT_ANCHORS_URL: only the app that holds the jobs and the operator's job keep the chains' anchors and the chain repair's job reads them",
+            "sets AGENTX_AUDIT_ANCHORS_URL: only the app that holds the jobs and the operator's job keep the chains' anchors, and the API's web copies and the chain repair's job read them",
         },
       ]);
     });
 
-    it("in production the jobs app's identity alone keeps them, and a web copy is never told of them (4D2e D13)", () => {
+    it("in production the jobs app's identity alone keeps them (4D2e D13)", () => {
       const production = { region: 'uaenorth', environment: 'production' } as const;
       const split = productionLike({ subject: true });
       const anchorRules = (snapshotted: Snapshot) =>
@@ -2575,28 +2587,81 @@ describe('SEC-OPS-09 each rule can fail', () => {
         split,
       );
       expect(anchorRules(asApi).map(({ resource }) => resource)).toEqual(['ca-agentx-stg-jobs']);
-      // A web copy told where they are, even as its own identity, which has no role there in production.
-      const webTold = changed(
+    });
+
+    it("in production the web copies read them as the API's identity, with the read-only role alone (AT13b)", () => {
+      const production = { region: 'uaenorth', environment: 'production' } as const;
+      const split = productionLike({ subject: true });
+      const anchorRules = (snapshotted: Snapshot) =>
+        policyProblems(snapshotted, production)
+          .filter(({ rule }) => rule === 'evidence-store' || rule === 'anchor-epoch')
+          .map(({ rule, resource }) => `${rule} ${resource}`);
+      expect(anchorRules(split)).toEqual([]);
+      const apiReads = (resource: PredictedResource) =>
+        ASSIGNMENTS(resource) &&
+        at(resource.properties, 'description') ===
+          'api web copies read audit anchors (deploy/azure/modules/evidence.bicep)';
+      expect(split.predictedResources.filter(apiReads)).toHaveLength(1);
+      const anchorSettings = (app: Mutable): Mutable[] =>
+        settingsOf(app).filter((entry) => /^AGENTX_(?:ANCHOR_EPOCH|AUDIT_ANCHORS_)/.test(String(entry.name)));
+      expect(anchorSettings(split.predictedResources.find(APP('api')) as unknown as Mutable)).toHaveLength(3);
+      const withoutResource = (drop: (resource: PredictedResource) => boolean): Snapshot => ({
+        ...split,
+        predictedResources: split.predictedResources.filter((resource) => !drop(resource)),
+      });
+      // The read-only role taken from the API's identity: its web copies told a store they can't read.
+      expect(anchorRules(withoutResource(apiReads))).toEqual(
+        expect.arrayContaining(['evidence-store the deployment', 'evidence-store ca-agentx-stg-api']),
+      );
+      // A web copy told nothing of them: its decisions would read without the digest.
+      const untold = changed(
         APP('api'),
-        (app) =>
-          settingsOf(app).push(
-            ...settingsOf(split.predictedResources.find(APP('jobs')) as unknown as Mutable)
-              .filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_ANCHORS_'))
-              .map((entry) => ({
-                ...entry,
-                value: String(entry.value).replace('id-agentx-stg-jobs', 'id-agentx-stg-api'),
-              })),
-          ),
+        (app) => {
+          containerOf(app).env = settingsOf(app).filter((entry) => !anchorSettings(app).includes(entry));
+        },
         split,
       );
-      expect(anchorRules(webTold)).toEqual([
-        {
-          rule: 'evidence-store',
-          resource: 'ca-agentx-stg-api',
-          message:
-            "sets AGENTX_AUDIT_ANCHORS_URL, AGENTX_AUDIT_ANCHORS_CLIENT_ID: only the app that holds the jobs and the operator's job keep the chains' anchors and the chain repair's job reads them",
-        },
+      expect(anchorRules(untold)).toEqual(['evidence-store ca-agentx-stg-api']);
+      // Told the jobs app's identity, which may write; or another container; or another epoch than the jobs'.
+      const told = (change: (entry: Mutable) => void, name: string): Snapshot =>
+        changed(
+          APP('api'),
+          (app) => {
+            const entry = anchorSettings(app).find((each) => each.name === name);
+            if (entry !== undefined) change(entry);
+          },
+          split,
+        );
+      expect(
+        anchorRules(
+          told((entry) => {
+            entry.value = String(entry.value).replace('id-agentx-stg-api', 'id-agentx-stg-jobs');
+          }, 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'),
+        ),
+      ).toEqual(['evidence-store ca-agentx-stg-api']);
+      expect(
+        anchorRules(
+          told((entry) => {
+            entry.value = String(entry.value).replace("'audit-anchors'", "'audit-exports'");
+          }, 'AGENTX_AUDIT_ANCHORS_URL'),
+        ),
+      ).toEqual(['evidence-store ca-agentx-stg-api']);
+      expect(anchorRules(told((entry) => (entry.value = '7'), 'AGENTX_ANCHOR_EPOCH'))).toEqual([
+        'anchor-epoch the deployment',
       ]);
+      // The read-only role given to another workload too: the jobs app's own, beside its keeping.
+      const jobsReads = structuredClone(split.predictedResources.find(apiReads)) as unknown as Mutable;
+      jobsReads.id = `${String(jobsReads.id)}-jobs`;
+      inside(jobsReads, 'properties').principalId = String(at(jobsReads, 'properties', 'principalId')).replace(
+        'id-agentx-stg-api',
+        'id-agentx-stg-jobs',
+      );
+      expect(
+        anchorRules({
+          ...split,
+          predictedResources: [...split.predictedResources, jobsReads as unknown as PredictedResource],
+        }),
+      ).not.toEqual([]);
     });
 
     /** An identity's resource ID, by the work it does. */
@@ -2786,7 +2851,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         rule: 'anchor-epoch',
         resource: 'job-agentx-stg-migrate',
         message:
-          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the operator's job and the chain repair's",
+          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the web copies that read its anchors, the operator's job and the chain repair's",
       },
     ]);
   });
@@ -8132,7 +8197,13 @@ describe('the load run (D2c, PL-38)', () => {
       ['web', '3', '11'],
     );
     expect(at(api.properties, 'template', 'scale')).toEqual({ minReplicas: 3, maxReplicas: 3 });
-    expect(settingNames(api).filter((name) => name.includes('ANCHOR'))).toEqual([]);
+    // The web copies read the anchors the jobs keep, as the API's identity, which keeps them on staging (AT13b).
+    expect(settingNames(api).filter((name) => name.includes('ANCHOR'))).toEqual([
+      'AGENTX_ANCHOR_EPOCH',
+      'AGENTX_AUDIT_ANCHORS_URL',
+      'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+    ]);
+    expect(value(api, 'AGENTX_AUDIT_ANCHORS_CLIENT_ID')).toMatch(/id-agentx-stg-api/);
     expect(settingNames(found(staging, APP('api')))).not.toContain('AGENTX_ROLE');
     const jobsApp = found(load.together, APP('jobs'));
     expect(Object.keys(at(jobsApp.identity, 'userAssignedIdentities') as Mutable)).toEqual([
@@ -8391,7 +8462,32 @@ describe('the load run (D2c, PL-38)', () => {
       expect(at(containerOf(app), 'probes') ?? null, workload).toBeNull();
     }
     const problems = policyProblems(production, { region: 'uaenorth', environment: 'production' });
-    expect(problems.filter(({ rule }) => rule === 'apps' || rule === 'jobs')).toEqual([]);
+    expect(problems.filter(({ rule }) => rule === 'apps' || rule === 'jobs' || rule === 'anchor-epoch')).toEqual([]);
+    // AT13b: the web copies told the anchors as the API's own identity, which the foundation gives the read-only role
+    // on the anchors' container alone; the jobs app's identity alone keeps them.
+    const anchorsTold = (workload: string): unknown[] =>
+      settingsOf(production.predictedResources.find(APP(workload)) as unknown as Mutable)
+        .filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_ANCHORS_'))
+        .map((entry) => [entry.name, String(entry.value).replace(/^.*\/(id-agentx-prd-[a-z-]+)'.*$/, '$1')]);
+    expect(anchorsTold('api')).toEqual([
+      ['AGENTX_AUDIT_ANCHORS_URL', expect.stringContaining("'audit-anchors')]")],
+      ['AGENTX_AUDIT_ANCHORS_CLIENT_ID', 'id-agentx-prd-api'],
+    ]);
+    expect(anchorsTold('jobs')).toEqual([
+      ['AGENTX_AUDIT_ANCHORS_URL', expect.stringContaining("'audit-anchors')]")],
+      ['AGENTX_AUDIT_ANCHORS_CLIENT_ID', 'id-agentx-prd-jobs'],
+    ]);
+    const anchorGrants = production.predictedResources
+      .filter((resource) => resource.type === 'Microsoft.Authorization/roleAssignments')
+      .map((resource) => String(at(resource.properties, 'description')))
+      .filter((description) => description.includes('audit anchors'))
+      .toSorted();
+    expect(anchorGrants).toEqual([
+      'api web copies read audit anchors (deploy/azure/modules/evidence.bicep)',
+      'chain-restore reads audit anchors (deploy/azure/modules/evidence.bicep)',
+      'jobs keeps audit anchors (deploy/azure/modules/evidence.bicep)',
+      'operator reads and adds audit anchors (deploy/azure/modules/evidence.bicep)',
+    ]);
     // Its count at production's defaults (Azure.md): web 60, jobs 20, Zitadel 10 x (4 + 2), and two more.
     expect(problems.filter(({ rule }) => rule === 'connections').map(({ message }) => message)).toEqual([
       "has 35 connections for users (max_connections 50 less Azure's 15), but the apps may hold 142: two of each API copy's pool, each Zitadel copy's, one job and one to spare",
@@ -8619,13 +8715,21 @@ describe('the load run (D2c, PL-38)', () => {
       });
     expect(rulesFor(asApi('AGENTX_AUDIT_ANCHORS_'))).toEqual(['evidence-store ca-agentx-stg-jobs']);
     expect(rulesFor(asApi('AGENTX_ACTIVITY_DOWNLOADS_'))).toEqual(['activity-downloads ca-agentx-stg-jobs']);
-    // The web copies, which hold no jobs, are told nothing of the anchors, nor their epoch.
+    // The web copies read the anchors as the API's own identity (AT13b): told the jobs app's, or told them twice, refused.
+    const ANCHOR_SETTING = /^AGENTX_(?:ANCHOR_EPOCH|AUDIT_ANCHORS_)/;
     const anchorsOf = settingsOf(found(load.together, jobs) as unknown as Mutable).filter((entry) =>
-      /^AGENTX_(?:ANCHOR_EPOCH|AUDIT_ANCHORS_)/.test(String(entry.name)),
+      ANCHOR_SETTING.test(String(entry.name)),
     );
-    const webTold = loadChanged(APP('api'), (app) => settingsOf(app).push(...structuredClone(anchorsOf)));
-    expect(rulesFor(webTold)).toEqual(
-      expect.arrayContaining(['evidence-store ca-agentx-stg-api', 'anchor-epoch ca-agentx-stg-api']),
+    const asJobs = loadChanged(APP('api'), (app) => {
+      containerOf(app).env = [
+        ...settingsOf(app).filter((entry) => !ANCHOR_SETTING.test(String(entry.name))),
+        ...structuredClone(anchorsOf),
+      ];
+    });
+    expect(rulesFor(asJobs)).toEqual(['evidence-store ca-agentx-stg-api']);
+    const twice = loadChanged(APP('api'), (app) => settingsOf(app).push(...structuredClone(anchorsOf)));
+    expect(rulesFor(twice)).toEqual(
+      expect.arrayContaining(['evidence-store ca-agentx-stg-api', 'anchor-epoch the deployment']),
     );
   });
 

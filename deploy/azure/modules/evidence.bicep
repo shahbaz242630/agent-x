@@ -31,7 +31,9 @@
 //   operator's own `audit-rebase` key; anything else it adds is a file the API
 //   reads as spoiled, the alarm: it holds the keepers' own role there. Neither can
 //   overwrite or delete. The chain repair's (4D2e E10) may read and list
-//   `audit-anchors` alone: it adds nothing there. No one else is given anything
+//   `audit-anchors` alone: it adds nothing there. So may production's API
+//   (`anchorReaders`, AT13b), whose `web` copies read the anchors and the
+//   signed states' digest beside them and never write. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -57,6 +59,9 @@ param writerIdentityName string
 
 @description('Who keeps the anchors, each `{ workload, identity }`: the identity of the app that holds the jobs (4D2e D13), created by the foundation under that name, as the writer\'s is.')
 param anchorKeepers array
+
+@description('Who reads the anchors and keeps none, each `{ workload, identity }` (AT13b): production\'s API, whose `web` copies hold its decisions to the signed states\' digest kept beside them. Created by the foundation under that name.')
+param anchorReaders array
 
 @description('The chain repair\'s identity (4D2e E10): it adds its records as the writer does and reads the anchors as the operator does. Created by the foundation under this name.')
 param restorerIdentityName string
@@ -262,6 +267,28 @@ resource readsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     description: 'operator reads and adds audit anchors (deploy/azure/modules/evidence.bicep)'
   }
 }
+
+resource anchorReader 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = [
+  for reader in anchorReaders: {
+    name: reader.identity
+  }
+]
+
+// Production's `web` copies (AT13b): Get Blob and List Blobs on the anchors, as
+// the chain repair reads them, so their decisions are held to the signed states'
+// digest the jobs keep there. Never add, overwrite or delete: only the jobs write.
+resource readsAnchorsOnly 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (reader, index) in anchorReaders: {
+    scope: anchorContainer
+    name: guid(anchorContainer.id, anchorReader[index].id, anchorReaderRole.id)
+    properties: {
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+      principalId: anchorReader[index].properties.principalId
+      principalType: 'ServicePrincipal'
+      description: '${reader.workload} web copies read audit anchors (deploy/azure/modules/evidence.bicep)'
+    }
+  }
+]
 
 // The chain repair (4D2e E10, PL-29): its own identity, as its job alone holds
 // the owner's login. It adds the records of each repair beside the plans, and

@@ -327,6 +327,11 @@ export const PLAIN_WORDS = {
     broke: 'Anchors are in memory alone: a restart forgets them, and a history wound back meanwhile goes unseen.',
     next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_ANCHORS_URL: playbook section H.',
   },
+  'audit.anchor_store_write_refused': {
+    happened: 'An API copy that only reads the audit anchors tried to write a file to their store.',
+    broke: 'Nothing: the write was refused before it left the process, and the store is unchanged.',
+    next: 'This is a bug in the API: report it with this line. Only the copy that runs the jobs writes anchors.',
+  },
   'audit.anchor_store_read_failed': {
     happened:
       'A regular read of the store that keeps the audit anchors failed, after it had been read fine since the start.',

@@ -2,7 +2,7 @@
 // start command; `AGENTX_ROLE` says which side of the work this process does
 // (4D2e D):
 // - `all`, the default: the server and every job, as one process
-// - `web`: the server, with what every process runs for itself
+// - `web`: the server, with what every process runs for itself and the anchors read only (AT13b)
 // - `jobs`: the jobs, with no server
 // Whichever has the jobs runs them only while it holds their lease (background.ts).
 // Each first does what boot.ts says, then its own work, then stops as it says.
@@ -23,7 +23,7 @@ import {
 } from './boot.ts';
 import { HEARTBEAT_STALE_MS } from './handoff.ts';
 import { type HealthCheck, heartbeatChecks, sharedHeartbeat } from './health.ts';
-import { eachProcessJobs, oneCopyJobs } from './job-list.ts';
+import { eachProcessJobs, oneCopyJobs, webCopyJobs } from './job-list.ts';
 import { anchorLogOf } from './anchor-store.ts';
 import { platformAnchorsOf, sealLegacyNotices } from './notice-legacy.ts';
 import { keepAlive, startJobs } from './start-jobs.ts';
@@ -87,6 +87,9 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     parts.recorder.drop();
   });
   const oneCopy = leadership && oneCopyJobs(booted, parts, leadership);
+  // A `web` copy holds the anchors and the digest read only (AT13b), its digest given to core before it serves and first
+  // read as its jobs start; `all` and `jobs` keep their own (oneCopyJobs), so none holds two.
+  const webCopy = role === 'web' ? webCopyJobs(booted, parts) : [];
 
   // What a stop finds, which comes at any moment from here on.
   const started: {
@@ -126,7 +129,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     });
     if (started.server === undefined) return undefined;
   }
-  if (!stopping()) started.jobs = startJobs([...(oneCopy?.jobs ?? []), ...eachProcessJobs(booted, parts)]);
+  if (!stopping()) started.jobs = startJobs([...(oneCopy?.jobs ?? []), ...webCopy, ...eachProcessJobs(booted, parts)]);
   // S206 V4: the notices from before seals sealed in the background, once it runs: off the start's own path, so a
   // long chain check never holds the start up; until then they wait unclaimed. It never throws.
   // TODO(S206 V4): delete with sealLegacyNotices once NOTICE_SEAL_BACKFILL_UNTIL has passed (Outstanding-Work AT10).

@@ -714,7 +714,7 @@ var jobsDownloadsSettings = [
 
 // The anchors' epoch, the same setting for the app that holds the jobs and the
 // operator, so a plan reads the files those jobs write (4D2e E9; the policy's
-// `anchor-epoch` holds them equal).
+// `anchor-epoch` holds them equal), and for the `web` copies that read them (AT13b).
 var anchorEpochSetting = {
   name: 'AGENTX_ANCHOR_EPOCH'
   value: string(anchorEpoch)
@@ -727,7 +727,8 @@ var throwawayAnchorsUrl = 'https://${evidenceAccountName(shortName(environment),
 
 // Where the app that holds the jobs keeps the audit chains' anchors (4D2e E,
 // PL-58; D13): the write-once store's second container, as its own identity.
-// Kept apart by identity as the downloads' settings are.
+// Kept apart by identity as the downloads' settings are. The API's are also
+// what its `web` copies read the anchors with in a split (AT13b).
 var apiAnchorSettings = [
   anchorEpochSetting
   {
@@ -1570,8 +1571,13 @@ var apps = concat([
     // on Stage G's copy, as its jobs app doesn't (`jobsApp`).
     keepsDownloads: !throwaway
     // Keeps the audit chains' anchors (`apiAnchorSettings`) where it holds the
-    // jobs: out of a split. In one, the `jobs` app keeps them (4D2e D13).
-    keepsAnchors: !split
+    // jobs: out of a split. In one, the `jobs` app keeps them (4D2e D13), and
+    // the `web` copies read them, never writing (AT13b: modules/evidence.bicep
+    // gives production's API identity the anchors' reader role alone), so their
+    // decisions are held to the signed states' digest. Not on Stage G's copy,
+    // whose jobs keep its anchors in a container of its own the API isn't given:
+    // its `web` copies decide as before the digest.
+    keepsAnchors: !throwaway
     // Hands Zitadel's processes their machine IDs, on its internal host alone (SA3e).
     handsOutMachineIds: true
     // AGENTX_ROLE all (unset) holds the jobs and counts its rate limits as the
