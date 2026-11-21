@@ -464,6 +464,13 @@ const SETTINGS = {
   AGENTX_AUDIT_ANCHORS_DIR: { schema: mountedFolder.optional() },
   AGENTX_AUDIT_ANCHORS_URL: { schema: blobContainer.optional() },
   AGENTX_AUDIT_ANCHORS_CLIENT_ID: { schema: clientId.optional() },
+  // Where every copy puts the chain heads it wrote and reads the others' (TR-1): a write-once container in the UAE, as
+  // the process's own managed identity, deployed since TR-1's infrastructure. Accepted so the start isn't refused;
+  // nothing reads them until the witness log itself lands.
+  AGENTX_AUDIT_WITNESS_URL: { schema: blobContainer.optional() },
+  AGENTX_AUDIT_WITNESS_CLIENT_ID: { schema: clientId.optional() },
+  // The log's hourly snapshots, a container of their own that only the app holding the jobs adds to (TR-1).
+  AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: { schema: blobContainer.optional() },
   // Moves on only for a sanctioned restore of the whole database: anchors of an earlier epoch are no longer held to.
   AGENTX_ANCHOR_EPOCH: { schema: wholeNumber({ min: 1, max: 1_000_000 }), default: '1' },
   // The anchors' public keys (4D2e E9, PL-29), as the API logs them at start (`api.starting`, keys): the operator's chain
@@ -610,6 +617,9 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_AUDIT_ANCHORS_DIR',
       'AGENTX_AUDIT_ANCHORS_URL',
       'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+      'AGENTX_AUDIT_WITNESS_URL',
+      'AGENTX_AUDIT_WITNESS_CLIENT_ID',
+      'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL',
       'AGENTX_ANCHOR_EPOCH',
       'AGENTX_ACTIVITY_DOWNLOADS_DIR',
       'AGENTX_ACTIVITY_DOWNLOADS_URL',
@@ -673,6 +683,9 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_AUDIT_ANCHORS_DIR',
       'AGENTX_AUDIT_ANCHORS_URL',
       'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+      'AGENTX_AUDIT_WITNESS_URL',
+      'AGENTX_AUDIT_WITNESS_CLIENT_ID',
+      'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL',
       'AGENTX_ANCHOR_EPOCH',
       'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS',
       'AGENTX_EVIDENCE_DIR',
