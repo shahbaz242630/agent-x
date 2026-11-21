@@ -106,7 +106,8 @@ const TERM_FIELDS = {
     .describe(
       'Whether orders split to slip under the approval threshold count together (ADR-014 §5), chosen with no ' +
         'default. true: orders to one supplier within the split window that together pass the threshold go to a ' +
-        'person. false: each order is weighed alone, so splitting one order into smaller ones avoids approval.',
+        'person (the window counts whole hours, from the start of the hour it begins in). false: each order is ' +
+        'weighed alone, so splitting one order into smaller ones avoids approval.',
     ),
   consentLimits: z
     .enum(CONSENT_LIMITS)
@@ -201,7 +202,12 @@ const MANDATE_FIELDS = {
   id: z.uuid().describe('The mandate, by its ID: the same across its versions.'),
   agentId: z.uuid().describe('The agent it gives authority to.'),
   timeZone: z.string().describe('The IANA time zone its months are counted in, fixed when it was drafted.'),
-  splitWindowHours: z.int().describe('The split check’s rolling window, in hours, fixed when it was drafted.'),
+  splitWindowHours: z
+    .int()
+    .describe(
+      'The split check’s rolling window, in hours, fixed when it was drafted. It counts whole hours from the start ' +
+        'of the hour the window begins in, so up to 59 minutes more, never less.',
+    ),
   status: STATUS,
 };
 
@@ -254,7 +260,8 @@ const DRAFT_SCHEMA = {
         .describe(
           `The split check’s rolling window in hours, ${String(SPLIT_WINDOW_HOURS.least)} to ` +
             `${String(SPLIT_WINDOW_HOURS.most)}, chosen with no default: orders to one supplier within it count ` +
-            'together. Longer catches more splitting and sends more to a person. Fixed for good.',
+            'together. It counts whole hours from the start of the hour the window begins in, so up to 59 minutes ' +
+            'more, never less. Longer catches more splitting and sends more to a person. Fixed for good.',
         ),
       ...TERM_FIELDS,
       statementVersion: statementVersion('over_limit'),

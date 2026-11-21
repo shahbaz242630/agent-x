@@ -99,7 +99,7 @@ export interface DecisionInput {
   readonly mandatePolicy: PolicyRules | null;
   /** What the agent holds or spent this month (the mandate's zone's), every reservation but a released one. */
   readonly monthSpent: Money;
-  /** The same supplier's other open requests in the split window: counted only when the mandate's split check is on. */
+  /** The same supplier's other open requests in the split window (whole hours, from the start of the hour it begins in: GM-1b): counted only when the mandate's split check is on. */
   readonly splitOpen: Money;
   /** Whether an open, unknown or paid request already claims this supplier and order reference (D3). */
   readonly duplicateOrder: boolean;

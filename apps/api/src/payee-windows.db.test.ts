@@ -56,6 +56,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { createHoldingsCheck } from './holdings-check.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
+import { weighedAgain } from './spend-request-approvals.ts';
 import { AED, keys, mandateWorld, type MandateWorldTables, refused, type World } from './mandate-world.helper.test.ts';
 import {
   type AgentActing,
@@ -668,6 +669,46 @@ describe('in the lock order (11b: after the month totals, in order of ID), force
     await holder;
     await voiding;
     expect(await heldIn(w, supplierKey(supplierOf_(w)))).toBe(0n);
+  });
+
+  it("makes an approval's confirm take its request's own sealed windows with its payee's, before anything after them: it waits for one held", async () => {
+    const { w, acting } = await ready();
+    const supplierId = supplierOf_(w);
+    await payeeKeyOf(w, supplierId, 'payee-1');
+    // Over the threshold alone: it waits for an approver, its capacity in the old key's windows.
+    const waiting = await decided(acting, w, 600_000n, supplierId);
+    expect(waiting.decision).toBe('REQUIRE_APPROVAL');
+    // The supplier's key changes while it waits: its payee's windows now are the new key's, not those it sealed.
+    await payeeKeyOf(w, supplierId, null);
+    await payeeKeyOf(w, supplierId, 'payee-2');
+    const sealedOnly: PayeeWindowKey = { supplierId: null, payeeKey: 'payee-1', currency: 'AED' };
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const holder = windowHeld(w, sealedOnly, gate, () => {
+      holding(undefined);
+    });
+    await held;
+    let weighed = false;
+    const confirming = within(
+      20_000,
+      withSignedStates(app, w.org, quiet(), async (tx, states) => {
+        await weighedAgain(tx, states, {
+          orgId: w.org,
+          requestId: waiting.id,
+          now: clock.now(),
+          decides: true,
+        });
+        weighed = true;
+      }),
+      'the confirm',
+    );
+    // It waits for the old key's window, which its reject would give back to, as it reads its payee's windows.
+    await waitUntilQueued(database.as('admin'), 1);
+    expect(weighed).toBe(false);
+    open(undefined);
+    await holder;
+    await confirming;
+    expect(weighed).toBe(true);
   });
 
   it('makes two brakes over the same windows take the lower first and wait for the higher: neither deadlocks', async () => {
