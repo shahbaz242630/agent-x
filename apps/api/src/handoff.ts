@@ -462,6 +462,10 @@ export function createHandoff({
   if (unknownAfterMs <= callTimeoutMs) {
     throw new RangeError("A transaction's wait for its answer must be longer than the partner's call may take");
   }
+  // Refused at start (TR-1 F): the walks the gate holds a call to go from the anchors, so a witness log needs them.
+  if (witnessing !== undefined && anchoring === undefined) {
+    throw new RangeError('The witness log holds hand-offs only with the anchors to walk from');
+  }
   const anchorGate = createGate(ANCHOR_GATE);
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
   const gate =
@@ -611,7 +615,7 @@ export function createHandoff({
   ): Promise<string | { readonly start: FrontierStart; readonly walk: WalkedWithin } | undefined> => {
     const chain = { kind: 'organisation', orgId } as const;
     // TR-1 F.2: a witness view gone stale, or a log past its memory, may miss a stop another copy wrote.
-    if (witnessing !== undefined && !witnessFresh(chain)) return 'witness_pending';
+    if (witnessing !== undefined && !witnessFresh(witnessing.witness, chain)) return 'witness_pending';
     const hold = await states.integrityHold(tx, orgId, 'head');
     if (hold.outcome !== 'clear') return `hold_${hold.outcome}`;
     if (anchoring === undefined) return undefined;
@@ -638,9 +642,7 @@ export function createHandoff({
   };
 
   /** Whether the witness log's view is fresh enough to hold Tx A to, and holds every head of both chains it read. */
-  const witnessFresh = (chain: Chain): boolean => {
-    if (witnessing === undefined) return true;
-    const { witness } = witnessing;
+  const witnessFresh = (witness: NonNullable<typeof witnessing>['witness'], chain: Chain): boolean => {
     const fresh = witness.freshAt();
     if (fresh === undefined || clock.now().getTime() - fresh.getTime() > WITNESS_FRESH_MS) return false;
     return !witness.beyondMemory(chain) && !witness.beyondMemory(PLATFORM);
@@ -928,7 +930,8 @@ export function createHandoff({
       return { outcome: 'stopped' };
     }
     try {
-      const opened: { tx?: object } = {};
+      // The transaction once it begins: nothing written in this placeholder, so no head read from it.
+      const opened: { tx: object } = { tx: {} };
       const done = await withSignedStates(
         database,
         orgId,
@@ -941,7 +944,7 @@ export function createHandoff({
         { witnessedByCaller: (result) => gate !== undefined && result.outcome === 'handed_off' },
       );
       if (done.outcome === 'handed_off') {
-        const head = opened.tx === undefined ? undefined : headWrittenIn(opened.tx, { kind: 'organisation', orgId });
+        const head = headWrittenIn(opened.tx, { kind: 'organisation', orgId });
         return { ...done, head, settle };
       }
       settle('not_sent');

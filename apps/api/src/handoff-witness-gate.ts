@@ -29,7 +29,7 @@ import {
   type PlatformControlsTables,
 } from '@agentx/core/modules/platform-controls';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
-import type { Chain, HeadSeen, WitnessLog } from '@agentx/platform/audit-chain';
+import type { Chain, ChainStep, CheckedPoint, HeadSeen, SignedSeen, WitnessLog } from '@agentx/platform/audit-chain';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -52,6 +52,15 @@ export interface HandoffWitnessGate {
   clear(txA: WitnessedTxA, log: Logger): Promise<boolean>;
 }
 
+/** The gate's walks from a head Tx A proved: each held to the heads given; the platform's says the pauses it walked. */
+export interface GateWalks {
+  readonly org: (orgId: string, from: CheckedPoint, heldTo: readonly HeadSeen[]) => Promise<ChainStep>;
+  readonly platform: (
+    from: CheckedPoint,
+    heldTo: readonly HeadSeen[],
+  ) => Promise<ChainStep & { readonly signed?: SignedSeen }>;
+}
+
 /** Why the gate held a payment: and, for a fork, where, and on which chain. */
 interface Doubt {
   readonly reason: string;
@@ -70,6 +79,7 @@ export function createHandoffWitnessGate({
   ids,
   deadlineMs = GATE_DEADLINE_MS,
   most = MOST_WALKED_WITHIN,
+  walks,
 }: {
   readonly witness: Pick<WitnessLog, 'now' | 'settled' | 'refreshWhole' | 'pending' | 'beyondMemory'>;
   readonly database: Database<AuditTables & PlatformControlsTables>;
@@ -77,18 +87,26 @@ export function createHandoffWitnessGate({
   readonly ids: IdGenerator;
   readonly deadlineMs?: number;
   readonly most?: number;
+  /** The read-only walks above Tx A's heads: the trail's and the platform chain's, unless a test gives its own. */
+  readonly walks?: GateWalks;
 }): HandoffWitnessGate {
   const trail = createAuditTrail({ keys, ids });
   // Only the pause marked: any one among the events walked past `P` is the platform pausing hand-offs after Tx A.
-  const platform = createPlatformChain({
+  const platformChain = createPlatformChain({
     keys,
     ids,
     subjectOf: (action) => (action === HANDOFF_PAUSED ? PAUSE_STARTED : undefined),
   });
+  const { org: walkOrg, platform: walkPlatform }: GateWalks = walks ?? {
+    org: (orgId, from, heldTo) => trail.checkFromAnchor(database, orgId, from, most, heldTo),
+    platform: (from, heldTo) => platformChain.checkFromAnchor(database, from, most, heldTo),
+  };
 
   /** The organisation's witnessed heads against Tx A's walk, its own head and, above, a walk from the head it locked. */
-  const orgDoubt = async ({ orgId, head, org }: WitnessedTxA): Promise<Doubt | undefined> => {
-    if (head === undefined) return { reason: 'no_head' };
+  const orgDoubt = async (
+    { orgId, org }: WitnessedTxA,
+    head: NonNullable<WitnessedTxA['head']>,
+  ): Promise<Doubt | undefined> => {
     const chain: Chain = { kind: 'organisation', orgId };
     const others: HeadSeen[] = [];
     for (const seen of witness.pending(chain)) {
@@ -102,7 +120,7 @@ export function createHandoffWitnessGate({
     // Below where Tx A's stretch began: nothing here to place it on.
     if (judged.seqs.some((seq) => seq <= org.walk.head.seq)) return { reason: 'unjudged' };
     const above = others.filter(({ seq }) => seq > org.walk.head.seq);
-    const step = await trail.checkFromAnchor(database, orgId, org.walk.head, most, [...above, head]);
+    const step = await walkOrg(orgId, org.walk.head, [...above, head]);
     if (!step.ok) return { reason: step.problem.reason, fork: { chain: 'organisation', seq: step.problem.seq } };
     return step.seq === step.to ? undefined : { reason: 'too_far' };
   };
@@ -115,7 +133,7 @@ export function createHandoffWitnessGate({
     if (judged.kind === 'held') return undefined;
     if (judged.seqs.some((seq) => seq <= walked.walk.head.seq)) return { reason: 'unjudged' };
     const above = pending.filter(({ seq }) => seq > walked.walk.head.seq);
-    const step = await platform.checkFromAnchor(database, walked.walk.head, most, above);
+    const step = await walkPlatform(walked.walk.head, above);
     if (!step.ok)
       return { reason: `platform_${step.problem.reason}`, fork: { chain: 'platform', seq: step.problem.seq } };
     if (step.seq !== step.to) return { reason: 'too_far' };
@@ -135,7 +153,7 @@ export function createHandoffWitnessGate({
     if (put.status === 'rejected') return { reason: 'witness_unconfirmed' };
     if (read.status === 'rejected' || !read.value) return { reason: 'witness_unread' };
     if (witness.beyondMemory(chain) || witness.beyondMemory(PLATFORM)) return { reason: 'witness_pending' };
-    return (await orgDoubt(txA)) ?? (await platformDoubt(txA));
+    return (await orgDoubt(txA, txA.head)) ?? (await platformDoubt(txA));
   };
 
   /** doubtOf within the deadline: past it, or failing, a doubt of its own. */

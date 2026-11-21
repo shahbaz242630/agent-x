@@ -4,7 +4,14 @@
 // the state it is in already recording nothing, a row changed past the app
 // read as tampered (the alarm raised, nothing recorded), and a hand-off's
 // FOR SHARE read waiting for a change in flight, then seeing it whole.
-import { createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
+import type { FrontierStart } from '../../audit/index.ts';
+import {
+  CHAIN_START,
+  type CheckedPoint,
+  createDigestLog,
+  type DigestLog,
+  type HeadSeen,
+} from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -579,5 +586,77 @@ describe('AT13h the pause cut off with the platform chain’s end, above the anc
     await change(true);
     expect(await pauseNow('share', digest)).toMatchObject({ pause: { outcome: 'paused' }, lines: [] });
     expect(await pauseNow('change', digest)).toMatchObject({ pause: { outcome: 'paused' }, lines: [] });
+  });
+});
+
+describe('TR-1 F.4 the platform chain walked from its frontier on the pause’s own trip', () => {
+  /** The chain's start, as a walk from before its first event begins (no anchor yet: the frontier at 0). */
+  const fromStart = (from: CheckedPoint = CHAIN_START): FrontierStart => ({
+    base: from,
+    hashes: Buffer.alloc(0),
+    from,
+    at: 0,
+  });
+
+  /** The pause read within a walk from `start`, held to `witnessed`, the log captured. */
+  async function pauseWithin(start: FrontierStart, witnessed: readonly HeadSeen[], most?: number) {
+    const capture = new LogCapture();
+    const pause = await app.transaction().execute((tx) =>
+      handoffPauseOf(tx, 'share', {
+        keys,
+        logger: testLogger(capture),
+        within: { start, witnessed, ...(most === undefined ? {} : { most }) },
+      }),
+    );
+    return { pause, lines: capture.lines() };
+  }
+
+  /** The platform chain's events, by place, as stored: what a witness of each would hold. */
+  const witnessOf = async (seq: number): Promise<HeadSeen> => {
+    const [found] = await database
+      .as('owner')
+      .query<{ hash: Buffer }>('select hash from platform_controls.audit_events where seq = $1', [seq]);
+    if (found === undefined) throw new Error(`no event ${String(seq)}`);
+    return { seq: BigInt(seq), hash: found.hash };
+  };
+
+  it('running, its walk to the head with it: every witnessed head on the path', async () => {
+    await change(false);
+    await change(true);
+    await change(false);
+    const { pause, lines } = await pauseWithin(fromStart(), [await witnessOf(2), await witnessOf(3)]);
+    expect(pause).toMatchObject({ outcome: 'running', walk: { kind: 'walked', head: { seq: 3n } } });
+    expect(lines).toEqual([]);
+  });
+
+  it('a witnessed head above the head, or another at its place: the cut, tampered, the alarm', async () => {
+    await change(false);
+    const above = await pauseWithin(fromStart(), [{ seq: 5n, hash: Buffer.alloc(32, 5) }]);
+    expect(above.pause).toEqual({ outcome: 'tampered' });
+    expect(above.lines).toEqual([
+      expect.objectContaining({ chain: 'platform', check: 'witness', reason: 'cut_back', seq: '5' }),
+    ]);
+    const other = await pauseWithin(fromStart(), [{ seq: 1n, hash: Buffer.alloc(32, 1) }]);
+    expect(other.pause).toEqual({ outcome: 'tampered' });
+  });
+
+  it('a walk from a place the chain doesn’t hold is broken: tampered, the alarm (frontier)', async () => {
+    await change(false);
+    await change(true);
+    await change(false);
+    const { pause, lines } = await pauseWithin(fromStart({ seq: 1n, hash: Buffer.alloc(32, 9), macKeyVersion: 1 }), []);
+    expect(pause).toEqual({ outcome: 'tampered' });
+    expect(lines).toEqual([expect.objectContaining({ chain: 'platform', check: 'frontier', reason: 'anchor' })]);
+  });
+
+  it('past the walk’s reach, or a head below where it began: unverified, no alarm', async () => {
+    await change(false);
+    await change(true);
+    await change(false);
+    expect(await pauseWithin(fromStart(), [], 2)).toEqual({ pause: { outcome: 'unverified' }, lines: [] });
+    const start = fromStart({ ...(await witnessOf(2)), macKeyVersion: 1 });
+    expect(await pauseWithin(start, [await witnessOf(1)])).toEqual({ pause: { outcome: 'unverified' }, lines: [] });
+    // The change's own read is never asked within, so never unverified: tampered stays its only refusal.
+    expect((await change(true)).done).toMatchObject({ outcome: 'changed' });
   });
 });

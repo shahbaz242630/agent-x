@@ -158,7 +158,12 @@ interface JobsCopy {
   readonly frontier: ChainFrontier;
 }
 
-async function jobsCopy(w: World, store: FakeWriteOnceStore, rebases: Rebases = new Map()): Promise<JobsCopy> {
+async function jobsCopy(
+  w: World,
+  store: FakeWriteOnceStore,
+  rebases: Rebases = new Map(),
+  { readsHeld = true }: { readonly readsHeld?: boolean } = {},
+): Promise<JobsCopy> {
   const witness = witnessOver(store);
   const rebasedAfter = rebasedIn(rebases);
   const digest = createDigestLog({
@@ -169,7 +174,8 @@ async function jobsCopy(w: World, store: FakeWriteOnceStore, rebases: Rebases = 
     epoch: 1,
     alertAfterMs: 60_000,
     mostBytes: 64 * 1024 * 1024,
-    witnessed: (each, most) => witness.pending(each, most),
+    // Its reads held to the heads witnessed too (PR-1c); left out, only Tx A's own walk holds to them.
+    ...(readsHeld ? { witnessed: (each: Chain, most?: number) => witness.pending(each, most) } : {}),
     anchors: { rebasedAfter, holds: () => true },
   });
   await digest.read();
@@ -503,6 +509,70 @@ describe('TR-1 (12): a rebase after a restore sets the witnesses and the frontie
     expect(j.witness.pending({ kind: 'organisation', orgId: w.org })).toEqual([]);
     expect(await handOffOnJ(w, j)).toBe(1);
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+  });
+});
+
+describe('TR-1 F.3 Tx A’s own walk, and a frontier with no anchor', () => {
+  it('a stop witnessed before Tx A, cut off, its reads not held to it: Tx A’s walk finds it (hold_tampered), nothing committed', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const j = await jobsCopy(w, store, new Map(), { readsHeld: false });
+    const cut = await savedForCut(w);
+    await suspendOnW(w, store);
+    await cut();
+    await j.witness.refresh();
+    expect(await handOffOnJ(w, j)).toBe(0);
+    expect(await outcome(w, request.id, 0)).toMatchObject({ request: 'APPROVED', transaction: undefined, held: [] });
+    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'hold_tampered' }));
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ chain: 'organisation', check: 'witness', reason: 'cut_back' }),
+    );
+    expect(await heldNow(w)).toBe('held');
+  });
+
+  it('a frontier that knows no anchor of a chain waits (anchor_pending), the platform’s or the organisation’s', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const j = await jobsCopy(w, store);
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await j.witness.refresh();
+    for (const known of [
+      () => undefined,
+      (each: Chain) => (each.kind === 'platform' ? j.anchors.latest(each) : undefined),
+    ]) {
+      const frontier = createChainFrontier({
+        anchors: { latest: known, rebasedAfter: () => false },
+        now: () => clock.now(),
+      });
+      expect(await handOffOnJ(w, { ...j, frontier })).toBe(0);
+    }
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    expect(lines('handoff.waiting').map(({ why }) => why)).toEqual(['anchor_pending', 'anchor_pending']);
+  });
+
+  it('refuses at start a witness log with no anchors to walk from', () => {
+    expect(() =>
+      createHandoff({
+        witnessing: {
+          witness: witnessOver(createFakeWriteOnceStore()),
+          frontier: createChainFrontier({
+            anchors: { latest: () => undefined, rebasedAfter: () => false },
+            now: () => clock.now(),
+          }),
+        },
+        list: () => Promise.resolve([]),
+        database: app,
+        outbox: createOutbox({ ids, clock, keys }),
+        rail: {} as never,
+        keys,
+        ids,
+        clock,
+        logger: testLogger(capture),
+        health: createRailHealth({ clock, logger: testLogger(capture) }),
+        databaseGate: handoffDatabaseGate(6),
+      }),
+    ).toThrow(RangeError);
   });
 });
 
