@@ -12,7 +12,13 @@
 import { LONGEST_ABSOLUTE_SECONDS } from '@agentx/core/modules/identity';
 import { APPROVAL_HORIZON_MS } from '@agentx/core/modules/spend-requests';
 import type { Clock } from '@agentx/core/shared-kernel';
-import { type AnchorLog, createAnchorLog, createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
+import {
+  type AnchorLog,
+  createAnchorLog,
+  createDigestLog,
+  type DigestLog,
+  type WitnessLog,
+} from '@agentx/platform/audit-chain';
 import { type Config, LOCAL_ONLY } from '@agentx/platform/config';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger, ProblemEvent } from '@agentx/platform/observability';
@@ -29,6 +35,8 @@ interface StoreServices {
   readonly logger: Logger;
   readonly clock: Clock;
   readonly alertAfterMs: number;
+  /** The witness log (TR-1): every read the digest holds is held to the heads it witnessed too, and it to the anchors. */
+  readonly witness?: WitnessLog | undefined;
 }
 
 /** The anchors' log and the signed states' digest, kept in the same store. */
@@ -87,6 +95,9 @@ export const WEB_COPY_NAMES = {
   'audit.anchor_store_read_failing': 'audit.web_anchors_read_failing',
   'audit.state_digest_store_failing': 'audit.web_anchors_read_failing',
   'audit.anchor_store_beyond_memory': 'audit.web_anchors_beyond_memory',
+  // The witness log's reads (TR-1): a web copy's decisions go on with the heads it read before. Its writes keep their
+  // own names: its stops wait on them.
+  'audit.witness_read_failed': 'audit.web_witness_read_failed',
 } as const satisfies Partial<Record<ProblemEvent, ProblemEvent>>;
 
 /** A web copy's logger: every line says `copy: web`, and a store's failures go by the web copy's names (above). */
@@ -117,7 +128,7 @@ export function webCopyLogger(logger: Logger): Logger {
 function keptIn(
   store: WriteOnceStore,
   epoch: number,
-  { clock, ...services }: StoreServices,
+  { clock, witness, ...services }: StoreServices,
   { cutOver, writes }: { readonly cutOver: boolean; readonly writes: (() => boolean) | undefined },
 ): AnchorsKept {
   const now = (): Date => clock.now();
@@ -146,8 +157,11 @@ function keptIn(
     forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
     // No session is used longer than this past its sign-in (AT13g): so its signed ends needn't be kept past it.
     forgetSessionEndsAfterMs: LONGEST_ABSOLUTE_SECONDS * 1000,
+    witnessed: witness && ((chain, most) => witness.pending(chain, most)),
   });
   kept.digest = digest;
+  // The witness log sets a head aside by the rebases the log read, and lets it go once anchored past (TR-1).
+  witness?.useAnchors(log);
   return { log, digest };
 }
 

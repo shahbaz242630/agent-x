@@ -61,6 +61,33 @@ resource anchorRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   }
 }
 
+// The witness log's role (TR-1): Put Blob of a file that isn't there yet, and
+// Get Blob with List Blobs, which every copy's reading of the others' heads
+// needs; the anchors' two actions on a container of its own. Never
+// `blobs/write`, which would overwrite a head, or `blobs/delete`.
+resource witnessRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(resourceGroup().id, 'audit-witness')
+  properties: {
+    roleName: displayNames.witness
+    description: 'The audit witness log: add a new file to the witness container, and read and list them. Nothing else.'
+    type: 'CustomRole'
+    assignableScopes: [
+      resourceGroup().id
+    ]
+    permissions: [
+      {
+        actions: []
+        notActions: []
+        dataActions: [
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
+        ]
+        notDataActions: []
+      }
+    ]
+  }
+}
+
 // Get Blob and List Blobs (both `blobs/read`), and nothing else: the chain
 // repair (4D2e E10) checks a repair against the anchors and adds none, and
 // production's `web` copies read them and the digest beside them (AT13b). Its

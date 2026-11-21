@@ -61,6 +61,7 @@ module roles 'modules/roles.bicep' = {
       evidenceWriter: 'Agent X evidence writer (${environment} ${nameSuffix})'
       anchors: 'Agent X audit anchors (${environment} ${nameSuffix})'
       anchorsReader: 'Agent X audit anchors reader (${environment} ${nameSuffix})'
+      witness: 'Agent X audit witness (${environment} ${nameSuffix})'
       plansReader: 'Agent X recovery plans reader (${environment} ${nameSuffix})'
       activityDownloads: 'Agent X activity downloads (${environment} ${nameSuffix})'
       release: names.releaseRole

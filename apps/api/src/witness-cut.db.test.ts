@@ -1,0 +1,377 @@
+// TR-1 (S209): a stop written on one copy, the chain cut back below it, read by another. Two copies over one database
+// and one witness store: W (a web copy) suspends the agent, its head witnessed before the answer; the owner, holding no
+// app key, cuts the chain's end off (the suspension's events gone, an earlier sealed head put back, the agent's row as
+// it was). J (the jobs copy) never read the suspension: its own digest holds only the chain's anchor, which the cut
+// keeps. Before TR-1 its Tx A paid (the positive control); held to the heads W witnessed, Tx A, the anchor check's probe
+// and its walk each find the cut. Section 1.8 of the plan: tests (1), (7) and (10); (5)'s walk; (8) and (14) live in
+// month-totals.db.test.ts.
+import { AGENTS } from '@agentx/core/modules/agents';
+import { checkStatesWith, createAuditTrail, holdOrganisation, witnessWith } from '@agentx/core/modules/audit';
+import { createOutbox } from '@agentx/core/modules/notifications';
+import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
+import {
+  type AnchorStore,
+  CHAIN_START,
+  createDigestLog,
+  createMemoryAnchorStore,
+  createWitnessLog,
+  type DigestLog,
+  signAnchor,
+  type WitnessLog,
+  WitnessUnconfirmed,
+} from '@agentx/platform/audit-chain';
+import { createDatabase, type Database } from '@agentx/platform/db';
+import {
+  createFakeWriteOnceStore,
+  createTestDatabase,
+  type FakeWriteOnceStore,
+  FixedClock,
+  LogCapture,
+  type SavedHead,
+  type SavedRow,
+  SequentialIds,
+  tamperAsOwner,
+  type TestDatabase,
+  testLogger,
+} from '@agentx/testing';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+
+import { createAnchorCheck } from './anchor-check.ts';
+import { createHandoff, handoffDatabaseGate } from './handoff.ts';
+import { ALLOWED, handoffWorld, type HandoffWorldTables } from './handoff-world.helper.test.ts';
+import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
+import { keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import { createRailHealth } from './rail-health.ts';
+import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
+import { spendWorld } from './spend-world.helper.test.ts';
+
+const server = inject('postgres');
+let database: TestDatabase;
+let app: Database<HandoffWorldTables>;
+let operator: Database<HandoffWorldTables>;
+
+const ids = new SequentialIds(0x7b1e_0000_0000);
+const chain = createPlatformChain({ keys, ids: new SequentialIds(0x7b1f_0000_0000) });
+
+let clock: FixedClock;
+let capture: LogCapture;
+let registry: MandateRegistry;
+let decisions: SpendRequestDecisions;
+
+const shared = spendWorld({
+  app: () => app,
+  clock: () => clock,
+  ids,
+  name: 'witness-cut',
+  registry: () => registry,
+  decisions: () => decisions,
+});
+const { ask, statusOf, signed } = shared;
+const { ready, paymentOf } = handoffWorld({
+  app: () => app,
+  clock: () => clock,
+  ids,
+  registry: () => registry,
+  shared,
+});
+
+const lines = (event: string) => capture.lines().filter((line) => line.event === event);
+
+beforeAll(async () => {
+  database = await createTestDatabase(server, { schema: 'migrated' });
+  app = createDatabase<HandoffWorldTables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  operator = createDatabase<HandoffWorldTables>(
+    { ...database.connection('operator'), maxConnections: 2 },
+    testLogger(),
+  );
+  // Born paused (ADR-014 §4): resumed, as the operator would once the hand-off is live.
+  await operator
+    .transaction()
+    .execute((tx) =>
+      changeHandoffPause(
+        tx,
+        { chain, keys, logger: testLogger() },
+        { paused: false, reason: 'TEST-TR1C', actor: { type: 'system', id: 'operator' }, release: 'r-test', run: null },
+      ),
+    );
+});
+
+afterAll(async () => {
+  await app.destroy();
+  await operator.destroy();
+  await database.drop();
+});
+
+beforeEach(() => {
+  clock = new FixedClock(new Date());
+  capture = new LogCapture();
+  const logger = testLogger(capture);
+  registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
+  decisions = createSpendRequestDecisions({
+    database: app,
+    outbox: createOutbox({ ids, clock, keys }),
+    keys,
+    ids,
+    clock,
+    logger,
+  });
+});
+
+afterEach(() => {
+  checkStatesWith(undefined);
+  witnessWith(undefined);
+});
+
+/** A copy's witness log over the store every copy shares. */
+const witnessOver = (store: FakeWriteOnceStore, waitMs?: number): WitnessLog =>
+  createWitnessLog({
+    store: store.store,
+    keys,
+    logger: testLogger(capture),
+    now: () => clock.now(),
+    epoch: 1,
+    alertAfterMs: 60_000,
+    mostBytes: 1024 * 1024,
+    ...(waitMs === undefined ? {} : { waitMs }),
+  });
+
+/** The owner's own statements, inside the organisation, the connection ended after. */
+async function asOwner(w: World, run: (owner: Awaited<ReturnType<typeof tamperAsOwner>>) => Promise<void>) {
+  const owner = await tamperAsOwner(database, AGENTS, w.org);
+  try {
+    await run(owner);
+  } finally {
+    await owner.end();
+  }
+}
+
+/**
+ * The jobs copy J as it stands after its anchor check's walk of the chain: its digest covering the chain to its head,
+ * anchored there; held to the heads the store witnessed where `witness` is given (TR-1), else as before TR-1.
+ */
+async function jobsCopy(
+  w: World,
+  witness: WitnessLog | undefined,
+): Promise<{ digest: DigestLog; anchors: AnchorStore }> {
+  const digest = createDigestLog({
+    store: createFakeWriteOnceStore().store,
+    keys,
+    logger: testLogger(capture),
+    now: () => clock.now(),
+    epoch: 1,
+    alertAfterMs: 60_000,
+    mostBytes: 64 * 1024 * 1024,
+    ...(witness === undefined ? {} : { witnessed: (orgChain) => witness.pending(orgChain) }),
+  });
+  const orgChain = { kind: 'organisation', orgId: w.org } as const;
+  const walked = await createAuditTrail({ keys, ids }).checkFromAnchor(app, w.org, CHAIN_START);
+  if (!walked.ok || walked.signed === undefined) throw new Error('The chain should have checked out');
+  await digest.read();
+  digest.record(orgChain, walked.signed, clock.now(), { from: 0n, to: walked });
+  const anchors = createMemoryAnchorStore();
+  anchors.keep(signAnchor(keys, orgChain, walked, clock.now()));
+  witness?.useAnchors({ rebasedAfter: () => false, latest: (each) => anchors.latest(each) });
+  return { digest, anchors };
+}
+
+/**
+ * The attack, up to Tx A: J walked and anchored; the agent suspended on W, its head witnessed there before the answer;
+ * the owner cuts the suspension off. What the owner kept, and the request waiting for its hand-off.
+ */
+async function suspendedOnWThenCut(store: FakeWriteOnceStore, witnessOnJ: boolean) {
+  const { w, acting } = await ready();
+  const request = await ask(acting, w, { amount: ALLOWED() });
+  const jWitness = witnessOnJ ? witnessOver(store) : undefined;
+  const j = await jobsCopy(w, jWitness);
+  let row: SavedRow | undefined;
+  let head: SavedHead | undefined;
+  await asOwner(w, async (owner) => {
+    row = await owner.saveRow(w.agent);
+    head = await owner.saveHead();
+  });
+  // W: its own witness log; its answer waited for the suspension's head to land in the store (`now`).
+  witnessWith(witnessOver(store));
+  await signed(w, (tx, states) =>
+    states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+      actor: OPERATOR,
+      action: 'agent.suspended',
+      details: { reason: 'test' },
+    }),
+  );
+  witnessWith(undefined);
+  expect(store.files.size).toBe(1);
+  await asOwner(w, async (owner) => {
+    if (row === undefined || head === undefined) throw new Error('nothing saved');
+    const [saved, back] = [row, head];
+    await owner.windBack(back);
+    await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+  });
+  // J reads the store as its job does, then holds every signed state it reads to its digest.
+  await jWitness?.refresh();
+  checkStatesWith(j.digest);
+  witnessWith(jWitness);
+  return { w, acting, request, j, jWitness, head };
+}
+
+/** J's hand-off run, every call to the partner counted. */
+async function handOffOnJ(w: World, j: { digest: DigestLog; anchors: AnchorStore }): Promise<number> {
+  let submitted = 0;
+  const rail = {
+    ...w.rail,
+    submitApprovedIntent: (intent: Parameters<typeof w.rail.submitApprovedIntent>[0]) => {
+      submitted += 1;
+      return w.rail.submitApprovedIntent(intent);
+    },
+  };
+  await createHandoff({
+    anchoring: { anchors: j.anchors, anchorFirst: () => Promise.resolve(), digest: j.digest },
+    list: () => Promise.resolve([w.org]),
+    database: app,
+    outbox: createOutbox({ ids, clock, keys }),
+    rail,
+    keys,
+    ids,
+    clock,
+    logger: testLogger(capture),
+    health: createRailHealth({ clock, logger: testLogger(capture) }),
+    databaseGate: handoffDatabaseGate(6),
+  }).run();
+  return submitted;
+}
+
+describe('TR-1 (1): a stop on one copy, the chain cut back below it, and the jobs copy’s Tx A', () => {
+  it('the positive control: J held to its own heads alone (before TR-1) pays the request the stop should have stopped', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, request, j } = await suspendedOnWThenCut(store, false);
+    expect(await handOffOnJ(w, j)).toBe(1);
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('held to the heads W witnessed: no call to the partner, the alarm at the stop’s head, the organisation held', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, request, j, head } = await suspendedOnWThenCut(store, true);
+    expect(await handOffOnJ(w, j)).toBe(0);
+    expect(await paymentOf(w, request.id)).toEqual({ instruction: 'missing' });
+    expect(await statusOf(w, request.id)).not.toBe('HANDED_OFF');
+    const cutAt = lines('audit.integrity_failed').map(({ seq }) => BigInt(String(seq)));
+    expect(cutAt.length).toBeGreaterThan(0);
+    expect(cutAt.every((seq) => seq > BigInt(head?.seq ?? 'x'))).toBe(true);
+    checkStatesWith(undefined);
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
+  });
+});
+
+describe('TR-1 (7), (5): the anchor check held to the heads witnessed', () => {
+  /** J's anchor check over the real trail, its probe and walks held to J's witness log where given. */
+  function anchorCheckOnJ(w: World, j: { anchors: AnchorStore }, witness: WitnessLog | undefined) {
+    const trail = createAuditTrail({ keys, ids });
+    return createAnchorCheck({
+      chains: [],
+      organizations: {
+        list: () => Promise.resolve([w.org]),
+        recorded: () => Promise.resolve([w.org]),
+        probe: (chains, signal, pages) => trail.probeHeads(app, chains, signal, pages),
+        verify: (orgId, anchor) =>
+          trail.checkFromAnchor(
+            app,
+            orgId,
+            anchor ?? CHAIN_START,
+            undefined,
+            witness?.pending({ kind: 'organisation', orgId }),
+          ),
+        hold: (orgId, failure) => holdOrganisation(app, orgId, { keys, ids, logger: testLogger(capture) }, failure),
+      },
+      keys,
+      clock,
+      logger: testLogger(capture),
+      staleAfterMs: 900_000,
+      deadlineMs: 120_000,
+      anchors: j.anchors,
+      witness,
+    });
+  }
+
+  it('the probe finds a chain cut back below a witnessed head: the alarm (`witness`) and the hold; without it, unchanged', async () => {
+    const control = await suspendedOnWThenCut(createFakeWriteOnceStore(), false);
+    await anchorCheckOnJ(control.w, control.j, undefined).run();
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('audit.anchor_check_done').at(-1)).toMatchObject({ unchanged: 1, failed: 0 });
+
+    const { w, j, jWitness } = await suspendedOnWThenCut(createFakeWriteOnceStore(), true);
+    await anchorCheckOnJ(w, j, jWitness).run();
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'witness', reason: 'cut_back', chain: 'organisation' }),
+    );
+    checkStatesWith(undefined);
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
+  });
+
+  it('a chain grown again on the cut: the walk from the anchor refuses to anchor through the head it missed; without it, it anchors', async () => {
+    const { w, j, jWitness, head } = await suspendedOnWThenCut(createFakeWriteOnceStore(), true);
+    // A copy that never saw the stop writes on the cut chain (it goes on from the cut): the chain moved, every link sound.
+    checkStatesWith(undefined);
+    witnessWith(undefined);
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspended',
+        details: { reason: 'a stale copy' },
+      }),
+    );
+    const trail = createAuditTrail({ keys, ids });
+    const anchor = j.anchors.latest({ kind: 'organisation', orgId: w.org });
+    if (anchor === undefined || head === undefined) throw new Error('anchored and saved above');
+    // Row mixing (5): every row the walk reads is sealed and linked; only the hash at the witnessed place tells.
+    expect(await trail.checkFromAnchor(app, w.org, anchor)).toMatchObject({ ok: true });
+    const witnessedHeads = jWitness?.pending({ kind: 'organisation', orgId: w.org }) ?? [];
+    expect(witnessedHeads.length).toBeGreaterThan(0);
+    expect(await trail.checkFromAnchor(app, w.org, anchor, undefined, witnessedHeads)).toEqual({
+      ok: false,
+      problem: { reason: 'cut_back', seq: witnessedHeads[0]?.seq },
+    });
+    await anchorCheckOnJ(w, j, jWitness).run();
+    // Never anchored past the cut: the anchor stays where the walk began.
+    expect(j.anchors.latest({ kind: 'organisation', orgId: w.org })?.seq).toBe(anchor.seq);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'witness', reason: 'cut_back' }),
+    );
+  });
+});
+
+describe('TR-1 (10): a stop whose head can’t be witnessed', () => {
+  it('answers WitnessUnconfirmed (503), its change saved; later requests here for the organisation wait for it; once out, all go on', async () => {
+    const { w } = await ready();
+    const store = createFakeWriteOnceStore();
+    let down = true;
+    store.instead.put = (name, bytes) => (down ? Promise.reject(new Error('store down')) : store.real.put(name, bytes));
+    const witness = witnessOver(store, 100);
+    witnessWith(witness);
+    await expect(
+      signed(w, (tx, states) =>
+        states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+          actor: OPERATOR,
+          action: 'agent.suspended',
+          details: { reason: 'test' },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(WitnessUnconfirmed);
+    // Saved all the same: the change stands, only its answer waited.
+    witnessWith(undefined);
+    expect(
+      await signed(w, (tx) =>
+        tx.selectFrom('agents.agents').select('status').where('id', '=', w.agent).executeTakeFirst(),
+      ),
+    ).toEqual({
+      status: 'SUSPENDED',
+    });
+    witnessWith(witness);
+    // A read for the organisation on this copy waits for the head still queued.
+    await expect(signed(w, (tx, states) => states.holdRecord(tx, w.org))).rejects.toBeInstanceOf(WitnessUnconfirmed);
+    expect(lines('audit.witness_unconfirmed').length).toBeGreaterThan(0);
+    down = false;
+    clock.advanceBy(1_000);
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'clear' });
+    expect(store.files.size).toBe(1);
+  });
+});

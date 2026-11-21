@@ -157,7 +157,7 @@ async function readPause(
   const known = digest?.latest({ kind: 'platform' }, ...PAUSE_SUBJECT);
   const watch = digest?.heads?.({ kind: 'platform' });
   const newest = await platformEventsSigned(tx)
-    .select(platformHeadRead(watch?.seen?.seq))
+    .select(platformHeadRead(watch?.heldTo ?? []))
     .where('e.action', 'in', [HANDOFF_PAUSED, HANDOFF_RESUMED])
     .orderBy('e.seq', 'desc')
     .limit(1)

@@ -31,6 +31,7 @@ import {
   secretSetting,
   startProblems,
 } from './database.ts';
+import { witnessProblems, witnessSettings, type WitnessStoreConfig, witnessStoreOf } from './witness-settings.ts';
 import { BUILT_PARTNER, type Partner, type PartnerDeclaration, partnerFrom, partnerProblems } from './partner.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
 import {
@@ -200,6 +201,8 @@ export interface Config {
    * null for each not set. Nothing reads it yet: anchors stay in memory until E5.
    */
   readonly anchorStore: { readonly directory: string | null; readonly container: BlobContainer | null };
+  /** Where the witness log keeps every copy's chain heads, and the leader's snapshots apart (TR-1). */
+  readonly witnessStore: WitnessStoreConfig;
   /**
    * Where the activity log's background downloads are kept (Phase 3 L5c): a
    * local folder, development and test alone, or the container in the UAE;
@@ -524,6 +527,7 @@ function readSettings(env: Env, location: LocationChecks) {
     anchorsDirectory: setting(env, 'AGENTX_AUDIT_ANCHORS_DIR'),
     anchorsContainer: setting(env, 'AGENTX_AUDIT_ANCHORS_URL'),
     anchorsClientId: setting(env, 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'),
+    ...witnessSettings(env),
     downloadsDirectory: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_DIR'),
     downloadsContainer: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_URL'),
     downloadsClientId: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'),
@@ -591,6 +595,7 @@ function blobStoreProblems(env: Env, checks: Settings): string[] {
   if (!environment.ok) return [];
   return [
     ...anchorStoreRequired(environment.value, checks),
+    ...witnessProblems(env, environment.value, checks, { required: true }),
     ...(downloadsDirectory.ok && downloadsContainer.ok && downloadsClientId.ok
       ? blobContainerProblems(env, environment.value, ACTIVITY_DOWNLOADS, {
           directory: downloadsDirectory.value,
@@ -766,18 +771,21 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
   const checks = readSettings(env, location);
   const { environment } = checks;
 
+  // Each once: stores on one identity say a missing identity setting alike.
   const problems = [
-    ...startProblems(env, 'app', checks),
-    // A rule between settings runs whenever the settings it compares are valid,
-    // so one start reports it alongside any other problem.
-    ...httpRuleProblems(checks),
-    ...rateLimitRuleProblems(checks),
-    ...decisionGateProblems(checks),
-    ...copiesProblems(checks),
-    ...serviceRuleProblems(checks),
-    ...partnerRuleProblems(checks, built),
-    ...blobStoreProblems(env, checks),
-    ...deployedProblems(env, environment, location.tls),
+    ...new Set([
+      ...startProblems(env, 'app', checks),
+      // A rule between settings runs whenever the settings it compares are valid,
+      // so one start reports it alongside any other problem.
+      ...httpRuleProblems(checks),
+      ...rateLimitRuleProblems(checks),
+      ...decisionGateProblems(checks),
+      ...copiesProblems(checks),
+      ...serviceRuleProblems(checks),
+      ...partnerRuleProblems(checks, built),
+      ...blobStoreProblems(env, checks),
+      ...deployedProblems(env, environment, location.tls),
+    ]),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
   if (!allOk(checks) || problems.length > 0) throw new ConfigError(problems);
@@ -865,6 +873,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       directory: checks.anchorsDirectory.value ?? null,
       container: blobContainerOf(env, checks.anchorsContainer.value, checks.anchorsClientId.value),
     }),
+    witnessStore: witnessStoreOf(env, checks),
     activityDownloads: Object.freeze({
       directory: checks.downloadsDirectory.value ?? null,
       container: blobContainerOf(env, checks.downloadsContainer.value, checks.downloadsClientId.value),

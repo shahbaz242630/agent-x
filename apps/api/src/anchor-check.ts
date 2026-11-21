@@ -127,6 +127,14 @@
 // no hold: that is as often the database slow or away as anything done to
 // it, and a hold on every organisation at once, each cleared only by its
 // own admin, would do an attacker's work for them. People look at the alarm.
+//
+// Held to the witness log (TR-1, witness-log.ts): every head any copy wrote above a chain's anchor, asked before each
+// read. The probe reads each one's hash in its statement, and a chain whose head is below one, or that holds another
+// event at one's place, is the chain cut back: the alarm (`check: witness`, `cut_back`) and the hold. A moved chain's
+// walk from its anchor re-hashes every event to the head, and a walk that didn't pass through each head below where it
+// reached refuses to anchor (the trail's checkFromAnchor), so an anchor never stands over a cut. Once anchored, the
+// heads at or below it are let go. After each refresh of the witness log, the jobs copy probes at once the chains that
+// gained a head (`probeWitnessed`): a stop cut back is alarmed and held within the refresh, not the next run.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type Anchor,
@@ -145,6 +153,7 @@ import {
   sameAnchor,
   type SignedSeen,
   signAnchor,
+  type WitnessLog,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -190,6 +199,12 @@ export interface AnchorCheck {
   anchorOrganisation(orgId: string, signal?: AbortSignal): Promise<void>;
   /** Writes what has moved as the API stops, within a few seconds whatever the store does. Never throws. */
   finish(): Promise<void>;
+  /**
+   * The organisations' chains probed now against the heads copies witnessed (TR-1): one cut back below one is the
+   * alarm and the hold, as in a run; anything else waits for the run. Passed over while the run's probe is under way,
+   * which asks the same. Never throws.
+   */
+  probeWitnessed(orgIds: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
 /** Where the organisations' chains come from (B1d-2). */
@@ -205,7 +220,11 @@ export interface OrganisationChains {
    * aborts. None given, every organisation is read in its turn.
    */
   probe?(
-    chains: readonly { readonly orgId: string; readonly from: CheckedPoint }[],
+    chains: readonly {
+      readonly orgId: string;
+      readonly from: CheckedPoint;
+      readonly heldTo?: readonly { readonly seq: bigint; readonly hash: Buffer }[];
+    }[],
     signal: AbortSignal,
     pagesAtOnce: number,
   ): Promise<ReadonlyMap<string, ProbeAnswer>>;
@@ -263,6 +282,8 @@ export interface AnchorCheckOptions {
   readonly sleeps?: boolean;
   /** How many of the probe's pages are read at once, each on a connection of its own: never more than the lanes. */
   readonly probePages?: number;
+  /** The witness log (TR-1): the heads each probe is held to, let go once anchored past. None, held to none. */
+  readonly witness?: Pick<WitnessLog, 'pending' | 'prune'> | undefined;
 }
 
 /** See `stopFlushMs`. */
@@ -352,6 +373,9 @@ const ROTATION = 'rotation';
 /** The in-flight key of the probe: one at a time. */
 const PROBE = 'probe';
 
+/** The in-flight key of the probe after a refresh of the witness log (TR-1): one at a time. */
+const WITNESS_PROBE = 'witness_probe';
+
 /** A chain the run's probe answered for, and the anchor it was compared with. */
 interface Probed {
   readonly anchor: CheckedPoint;
@@ -389,6 +413,7 @@ export function createAnchorCheck({
   rotation: rotatedChecks,
   sleeps = false,
   probePages = PROBE_PAGES,
+  witness,
 }: AnchorCheckOptions): AnchorCheck {
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
@@ -500,7 +525,8 @@ export function createAnchorCheck({
     const held = anchors.latest(chain);
     log.error('audit.integrity_failed', {
       chain: chain.kind,
-      check: 'anchor',
+      // A chain that no longer runs through a head a copy witnessed (TR-1) is the witness log's finding, not the anchor's.
+      check: reason === 'cut_back' ? 'witness' : 'anchor',
       reason,
       ...(seq === undefined ? {} : { seq }),
       ...(held === undefined ? {} : { anchorSeq: held.seq }),
@@ -547,6 +573,8 @@ export function createAnchorCheck({
     if (storeUnread(chain)) return 'unanchored';
     const anchor = signAnchor(keys, chain, report, clock.now(), durable?.epoch);
     anchors.keep(anchor);
+    // The walk to it passed through every head witnessed below it (checkFromAnchor refuses one that didn't): let go.
+    witness?.prune(chain, report.seq);
     // What the walk to it read of each signed object, and the stretch it read whole, kept with it (AT13): facts as true
     // as the anchor, as a decision will hold the database to them. The platform chain's too (AT13c).
     recordWalk(chain, report, last, anchor.at);
@@ -941,8 +969,41 @@ export function createAnchorCheck({
     orgIds.flatMap((orgId) => {
       const chain = { kind: 'organisation', orgId } as const;
       const anchor = durable !== undefined && anchors === durable ? durable.heldAnchor(chain) : anchors.latest(chain);
-      return anchor === undefined ? [] : [{ orgId, from: anchor }];
+      return anchor === undefined ? [] : [{ orgId, from: anchor, heldTo: heldToOf(chain) }];
     });
+
+  /** The heads copies witnessed above the chain's anchor (TR-1), asked before a probe's statement: none without a log. */
+  const heldToOf = (chain: Chain): readonly { readonly seq: bigint; readonly hash: Buffer }[] =>
+    witness?.pending(chain) ?? [];
+
+  /**
+   * The chains that gained a witnessed head, probed now (TR-1): with an anchor, against it; with none, from the chain's
+   * start, as only the heads are judged. One cut back below a head is the alarm and the hold; the rest wait for the run.
+   */
+  const probeWitnessedNow = async (orgIds: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
+    const probe = organizations?.probe?.bind(organizations);
+    if (organizations === undefined || probe === undefined || inFlight.has(PROBE) || storeUnread()) return;
+    const asked = orgIds.flatMap((orgId) => {
+      const chain = { kind: 'organisation', orgId: orgId.toLowerCase() } as const;
+      const heldTo = heldToOf(chain);
+      return heldTo.length === 0 ? [] : [{ orgId: chain.orgId, from: anchors.latest(chain) ?? CHAIN_START, heldTo }];
+    });
+    if (asked.length === 0) return;
+    const stop = signal ?? new AbortController().signal;
+    const answers = await tracked(
+      WITNESS_PROBE,
+      'the last witness probe has not finished',
+      () => probe(asked, stop, 1),
+      signal,
+    );
+    for (const { orgId } of asked) {
+      const answer = answers.get(orgId);
+      if (answer?.kind !== 'failed' || answer.problem.reason !== 'cut_back') continue;
+      const chain = { kind: 'organisation', orgId } as const;
+      alarmed(chain, logger.child({ orgId }), 'cut_back', answer.problem.seq);
+      await settle(organizations, orgId, signal);
+    }
+  };
 
   /** A probe's answers kept for the turns: unmoved or failing as found, read anyway; its misses said in one line. */
   const takeAnswers = (
@@ -1440,6 +1501,15 @@ export function createAnchorCheck({
   };
 
   return Object.freeze({
+    async probeWitnessed(orgIds: readonly string[], signal?: AbortSignal): Promise<void> {
+      try {
+        await probeWitnessedNow(orgIds, signal);
+      } catch (error) {
+        // The run's probe asks the same of every chain: a miss here is a warning, never the alarm.
+        if (!(error instanceof Stopped)) sayProbeMissed(orgIds.length, error);
+      }
+    },
+
     async anchorOrganisation(orgId: string, signal?: AbortSignal): Promise<void> {
       if (organizations === undefined) return;
       // A hand-off may come before the run's first read, and joins it; once the store has failed, the run alone tries again.

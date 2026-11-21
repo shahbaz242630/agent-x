@@ -99,6 +99,12 @@ import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts
 import { createWaitingRequests } from './waiting-requests.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS, waitingRejectionsDue } from './waiting-rejections.ts';
 import { createWebAnchorRead, WEB_ANCHORS_EVERY_MS } from './web-anchors.ts';
+import {
+  createWitnessJob,
+  JOBS_WITNESS_EVERY_MS,
+  WEB_WITNESS_EVERY_MS,
+  WITNESS_FLUSH_EVERY_MS,
+} from './witness-store.ts';
 
 /**
  * How long the anchor check of one chain, or its probe of every head, may hold its
@@ -257,25 +263,39 @@ export function eachProcessJobs({ keys, logger, database }: Booted, { recorder, 
  * started; the digest is given to core at once, read or not: until its first read it holds nothing, and every read goes
  * on as before it. None where no store is named (development, test, Stage G's copy): reads as before the digest.
  */
-export function webCopyJobs({ config, keys, logger }: Booted, { watch }: SharedParts): readonly Job[] {
+export function webCopyJobs({ config, keys, logger }: Booted, { watch, witness }: SharedParts): readonly Job[] {
   // As the anchor check's own stale limit: what a store's reads may fail before that is the alert.
   const alertAfterMs = config.audit.anchorSeconds * 3 * 1000;
-  const kept = anchorsReadOf(config, { keys, logger, clock: systemClock, alertAfterMs });
+  const kept = anchorsReadOf(config, { keys, logger, clock: systemClock, alertAfterMs, witness });
   checkStatesWith(kept?.digest);
-  if (kept === undefined) return [];
   const job = jobsWatchedBy(watch);
-  return [job('anchors_read', createWebAnchorRead({ ...kept, logger }), WEB_ANCHORS_EVERY_MS, QUICK_MS)];
+  // Its own heads out, and the others' read every minute (TR-1), whether or not its anchors are kept.
+  const witnessJob = witness && createWitnessJob({ witness, refreshEveryMs: WEB_WITNESS_EVERY_MS, now: nowMs });
+  return [
+    ...(witnessJob === undefined
+      ? []
+      : [job('witness', witnessJob.work, WITNESS_FLUSH_EVERY_MS, QUICK_MS, undefined, witnessJob.schedule)]),
+    ...(kept === undefined
+      ? []
+      : [job('anchors_read', createWebAnchorRead({ ...kept, logger }), WEB_ANCHORS_EVERY_MS, QUICK_MS)]),
+  ];
 }
+
+/** The clock's time, in milliseconds. */
+const nowMs = (): number => systemClock.now().getTime();
 
 /**
  * The `jobs` side, made but not started. The hand-off and the payment checks
  * come back too, for /health.
  */
 export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts, leadership: Leadership) {
-  const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch } = parts;
+  const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch, witness } =
+    parts;
   const job = jobsWatchedBy(watch, leadership.onlyWhileLeading.bind(leadership));
   // The one job a follower runs, passed over while this process leads (TR-1 A).
   const followerJob = jobsWatchedBy(watch, leadership.onlyWhileNotLeading.bind(leadership));
+  // A job run leading or not: the witness log's (TR-1).
+  const everyCopyJob = jobsWatchedBy(watch);
   const list = () => listedOrganizations(database);
   const organisationJob = { list, database, keys, ids: uuidV7Ids, logger };
   const clocked = { ...organisationJob, clock: systemClock };
@@ -287,7 +307,11 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // A copy that loses the lease forgets nothing its digest holds and goes on answering from it; it only writes nothing
   // until it leads again, and meanwhile reads the store as a web copy does (TR-1 A, `anchors_follow` below).
   const leading = (): boolean => leadership.leading();
-  const kept = anchorsKeptOf(config, { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs }, leading);
+  const kept = anchorsKeptOf(
+    config,
+    { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs, witness },
+    leading,
+  );
   const anchorLog = kept?.log;
   const anchorStore = anchorLog ?? createMemoryAnchorStore();
   // The signed states' digest (AT13): kept beside the anchors, in memory alone where they are. Every signed state this
@@ -304,8 +328,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       writes: leading,
       forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
       forgetSessionEndsAfterMs: LONGEST_ABSOLUTE_SECONDS * 1000,
+      witnessed: witness && ((chain, most) => witness.pending(chain, most)),
     });
   checkStatesWith(digest);
+  // Anchors in memory alone: the witness log lets a head go once anchored past it there too (TR-1).
+  if (anchorLog === undefined)
+    witness?.useAnchors({ rebasedAfter: () => false, latest: (chain) => anchorStore.latest(chain) });
   // The platform chain's walks keep its signed states in the digest too (AT13c): the pause, the sessions' signed ends.
   const platform = createPlatformChain({ keys, ids: uuidV7Ids, subjectOf: platformSubjectOf });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
@@ -315,7 +343,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         chain: { kind: 'platform' },
         // From its anchor, and whole once a day (4D2e E8), or when the digest owes it a walk (AT13c).
         verify: platformChainCheck({
-          fromAnchor: (from) => platform.checkFromAnchor(database, from),
+          // Held to the heads copies witnessed (TR-1), asked before the walk.
+          fromAnchor: (from) =>
+            platform.checkFromAnchor(database, from, undefined, witness?.pending({ kind: 'platform' })),
           whole: (anchor) => platform.verifyAlone(database, anchor),
           clock: systemClock,
           owed: (anchor) => digest.owed({ kind: 'platform' }, anchor.seq),
@@ -332,7 +362,14 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       }),
       // No organisation's chain read whole (4D2e E8): every head probed each run, those moved read from their anchors.
       probe: (chains, signal, pagesAtOnce) => trail.probeHeads(database, chains, signal, pagesAtOnce),
-      verify: (orgId, anchor) => trail.checkFromAnchor(database, orgId, anchor ?? CHAIN_START),
+      verify: (orgId, anchor) =>
+        trail.checkFromAnchor(
+          database,
+          orgId,
+          anchor ?? CHAIN_START,
+          undefined,
+          witness?.pending({ kind: 'organisation', orgId }),
+        ),
       // The run's own logger: the hold's lines name the organisation themselves.
       hold: (orgId, failure) =>
         holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure, JOB_ANSWER_WITHIN_MS),
@@ -352,6 +389,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     rotation: rotatedChecksOf(trail, database),
     // Staging sleeps when unused: a woken process says nothing of a pass late for the time it slept.
     sleeps: config.environment !== 'production',
+    witness,
   });
   // The bank breaker the hand-off holds to, reopened by the bank check's own lookups, and the transactions both share
   // (4D2e Stage F): only where there is a rail, so a small pool with none starts as it did.
@@ -463,6 +501,20 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       undefined,
       scheduleRowSweep,
     );
+  const witnessJob =
+    witness &&
+    createWitnessJob({
+      witness,
+      refreshEveryMs: JOBS_WITNESS_EVERY_MS,
+      now: nowMs,
+      afterRefresh: (gained, signal) =>
+        leadership.leading()
+          ? anchors.probeWitnessed(
+              gained.flatMap((chain) => (chain.kind === 'organisation' ? [chain.orgId] : [])),
+              signal,
+            )
+          : Promise.resolve(),
+    });
   const jobs: readonly Job[] = [
     // The schema has a timer of its own: the chains' run grows with the organisations, and walls rewritten must not
     // wait for it (S168 review). Within its own deadline and ending at once when the API stops, so a database that
@@ -481,6 +533,11 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     ),
     // While another copy leads, the anchors and the digest read as a web copy reads them (TR-1 A): so a rebase still
     // sets this copy's facts and heads aside (AT13b), and the leader's walks reach it. None where they're in memory alone.
+    // The witness log (TR-1), leading or not: its own heads out, the others' read every 10 s, and while it leads, the
+    // chains that gained a head probed at once.
+    ...(witnessJob === undefined
+      ? []
+      : [everyCopyJob('witness', witnessJob.work, WITNESS_FLUSH_EVERY_MS, QUICK_MS, undefined, witnessJob.schedule)]),
     followerJob(
       'anchors_follow',
       kept && createWebAnchorRead({ log: kept.log, digest: kept.digest, logger, copy: 'jobs' }),

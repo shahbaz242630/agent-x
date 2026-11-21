@@ -59,11 +59,14 @@ import {
   countStep,
   edgesIn,
   entryIsSealed,
+  headCutBelow,
   headFields,
-  headHeldTo,
   headIsSealed,
+  type HeadSeen,
   type HeadWatch,
   heldThrough,
+  heldToWitnessed,
+  placesOf,
   raiseWritten,
   LAST_COUNTED,
   operatorSignature,
@@ -74,6 +77,7 @@ import {
   subjectKey,
   verifyChain,
   verifyFromAnchor,
+  watchingPlaces,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
@@ -81,7 +85,7 @@ import { afterCommit, JOB_ANSWER_WITHIN_MS, limitedTransaction } from '@agentx/p
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
-import { statesDigest } from '../../audit/index.ts';
+import { chainWitness, noteCommitted, statesDigest, witnessedWrite, wroteTo } from '../../audit/index.ts';
 import { checkedPlatformEvent, type PlatformEvent, platformEventContent } from '../domain/event.ts';
 import type { PlatformControlsTables } from './tables.ts';
 
@@ -140,6 +144,8 @@ export interface PlatformChain {
     db: Kysely<PlatformControlsTables>,
     from: CheckedPoint,
     most?: number,
+    /** The heads copies witnessed (TR-1), asked before the walk: a step that doesn't pass through each is `cut_back`. */
+    heldTo?: readonly HeadSeen[],
   ): Promise<ChainStep & { readonly signed?: SignedSeen }>;
   /** One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's. */
   passStep(
@@ -238,21 +244,33 @@ export interface PlatformHeadOfRow {
   readonly platform_head_hash: Buffer | null;
   readonly platform_head_mac: Buffer | null;
   readonly platform_head_mac_key_version: number | null;
-  readonly platform_seen_hash: Buffer | null;
+  /** The hash at each place held to, in `heldTo`'s order (TR-1), a null where there is none. */
+  readonly platform_seen_hash: readonly (Buffer | null)[] | null;
 }
 
 /**
- * The platform chain's head, how many heads there are (one, or none is believed), and the hash of the event at `seenAt`
- * (the place the read is held to, by the events' key), as columns of the caller's statement (AT13h), so all come from
- * its snapshot: a few one-row reads, no trip.
+ * The hashes of the platform events at the places of `heads` (TR-1), in their order, a null where there is none, at or
+ * below `upTo` where given: each a seek on the events' key, in the caller's statement. A null array with none to read.
  */
-export function platformHeadRead(seenAt: bigint | undefined) {
+function platformHashesAt(heads: readonly HeadSeen[], upTo?: ReturnType<typeof sql>) {
+  if (heads.length === 0) return sql<readonly (Buffer | null)[] | null>`null::bytea[]`;
+  return sql<readonly (Buffer | null)[] | null>`array(
+    select (select s.hash from platform_controls.audit_events s
+            where s.seq = a.seq ${upTo === undefined ? sql`` : sql`and s.seq <= ${upTo}`} limit 1)
+    from pg_catalog.unnest(${placesOf(heads)}::bigint[]) with ordinality as a (seq, n)
+    order by a.n
+  )`;
+}
+
+/**
+ * The platform chain's head, how many heads there are (one, or none is believed), and the hash of the event at each
+ * place the read is held to (`heldTo`, by the events' key: AT13h, TR-1), as columns of the caller's statement, so all
+ * come from its snapshot: a few one-row reads, no trip.
+ */
+export function platformHeadRead(heldTo: readonly HeadSeen[]) {
   const head = <Column>(column: string) =>
     sql<Column | null>`(select ${sql.ref('h.' + column)} from platform_controls.audit_head h limit 1)`;
-  const seenHash =
-    seenAt === undefined
-      ? sql<Buffer | null>`null::bytea`
-      : sql<Buffer | null>`(select s.hash from platform_controls.audit_events s where s.seq = ${seenAt} limit 1)`;
+  const seenHash = platformHashesAt(heldTo);
   return [
     sql<bigint | null>`(select pg_catalog.count(*) from platform_controls.audit_head)`.as('platform_heads'),
     head<bigint>('seq').as('platform_head_seq'),
@@ -264,17 +282,18 @@ export function platformHeadRead(seenAt: bigint | undefined) {
 }
 
 /** A platform head as a read holds it: its place and hash. */
-type PlatformHead = NonNullable<HeadWatch['seen']>;
+type PlatformHead = HeadSeen;
 
 /**
- * The head `watch` holds the platform chain to, where the chain was cut back below it (AT13h, the header), as
- * platformHeadRead read it in `tx`'s statement: below it, none, two, not sealed, or another event at its place. Else
- * none, and the head is raised to the one read, unless `tx` has gone to record here. Nothing to hold to without a watch.
+ * The head `watch` holds the platform chain to that it was cut back below (AT13h, the header; TR-1, any of `heldTo`), as
+ * platformHeadRead read it in `tx`'s statement: below the highest, none, two, not sealed, or another event at a place.
+ * Else none, and the head is raised to the one read, unless `tx` has gone to record here. Nothing to hold to without a
+ * watch.
  */
 export function platformCutBack(
   keys: KeyProvider,
   tx: object,
-  watch: Pick<HeadWatch, 'seen' | 'saw'> | undefined,
+  watch: Pick<HeadWatch, 'heldTo' | 'saw'> | undefined,
   row: PlatformHeadOfRow,
 ): PlatformHead | undefined {
   if (watch === undefined) return undefined;
@@ -288,8 +307,8 @@ export function platformCutBack(
         })
       : undefined;
   const head = fields !== undefined && headIsSealed(keys, CHAIN, fields) ? fields : undefined;
-  const { seen } = watch;
-  if (seen !== undefined && !headHeldTo(seen, head, row.platform_seen_hash)) return seen;
+  const cut = headCutBelow(watch.heldTo, head, row.platform_seen_hash);
+  if (cut !== undefined) return cut;
   if (head !== undefined && !headsTaken.has(tx)) watch.saw({ seq: head.seq, hash: head.hash });
   return undefined;
 }
@@ -364,8 +383,8 @@ export function platformEventSealed(keys: KeyProvider, row: Readonly<Record<stri
  * through each (heldThrough), which is all its commit raises (raiseWritten).
  */
 interface WriteHold {
-  readonly seen: PlatformHead | undefined;
-  readonly accepted: PlatformHead | undefined;
+  readonly seen: readonly PlatformHead[];
+  readonly accepted: readonly PlatformHead[];
   held: { readonly seen: boolean; readonly accepted: boolean };
 }
 
@@ -377,9 +396,8 @@ function writerFor(
   keys: KeyProvider,
   hold: WriteHold,
 ): ChainWriter {
-  /** The hash of the event at `at`'s place at or below the head locked: in the lock's own statement, no trip. */
-  const hashAt = (at: PlatformHead | undefined) =>
-    sql`(select e.hash from platform_controls.audit_events e where e.seq = ${at?.seq ?? null}::bigint and e.seq <= l.seq)`;
+  /** The hashes of the events at the places held to, at or below the head locked: in the lock's own statement, no trip. */
+  const hashAt = (at: readonly PlatformHead[]) => platformHashesAt(at, sql`l.seq`);
   return {
     async lockHead() {
       // The clock in the outer select, which reads a row only once the inner one has locked it.
@@ -718,13 +736,18 @@ export function createPlatformChain({
     const watch = platformHeadWatch();
     // Nothing raised unless the head's lock shows the chain ran through what this process holds it to.
     const hold: WriteHold = {
-      seen: watch?.seen,
-      accepted: watch?.accepted?.seen,
+      seen: watch?.heldTo ?? [],
+      accepted: watch?.accepted?.heldTo ?? [],
       held: { seen: false, accepted: false },
     };
-    if (watch !== undefined) {
+    // TR-1: every platform write's head goes to the witness log before its answer (witness-class.ts: none waits).
+    const witnessed = chainWitness() !== undefined;
+    if (witnessed) witnessedWrite(tx, CHAIN, 'now');
+    if (watch !== undefined || witnessed) {
       await afterCommit(tx, () => {
-        if (moved.head !== undefined) raiseWritten(watch, moved.head, hold.held);
+        if (moved.head === undefined) return;
+        if (watch !== undefined) raiseWritten(watch, moved.head, hold.held);
+        noteCommitted(tx, CHAIN, moved.head);
       });
     }
     await boundHeadWait(tx);
@@ -733,6 +756,7 @@ export function createPlatformChain({
       content: platformEventContent(event, details),
     });
     moved.head = { seq: sealed.seq, hash: sealed.hash };
+    wroteTo(tx, CHAIN, sealed.seq);
     return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
   };
 
@@ -789,12 +813,22 @@ export function createPlatformChain({
       }
     },
 
-    checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number) {
-      return limitedTransaction(
+    async checkFromAnchor(
+      db: Kysely<PlatformControlsTables>,
+      from: CheckedPoint,
+      most?: number,
+      heldTo: readonly HeadSeen[] = [],
+    ) {
+      const found = new Map<bigint, Buffer>();
+      const step = await limitedTransaction(
         db,
-        (tx) => walking((reader) => verifyFromAnchor(keys, CHAIN, reader, from, most), tx),
+        (tx) =>
+          walking((reader) => verifyFromAnchor(keys, CHAIN, watchingPlaces(reader, heldTo, found), from, most), tx),
         { answeredWithinMs: JOB_ANSWER_WITHIN_MS },
       );
+      // A walk that missed a witnessed head is the chain cut back (TR-1): nothing it read is kept, nothing anchored.
+      const held = heldToWitnessed(step, heldTo, found, from.seq);
+      return held === step ? step : held;
     },
 
     passStep(

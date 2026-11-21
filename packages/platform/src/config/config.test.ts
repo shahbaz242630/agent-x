@@ -24,6 +24,22 @@ const CLIENT_PASS = 'client pass words';
 const KEYS_DIR = '/mnt/secrets';
 /** A well-formed live-money gate reference (ADR-014 §4): production runs live, which needs one. */
 const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
+/** The witness log's stores, as production names them (TR-1). */
+const WITNESS_URL = 'https://stagentxevprd01.blob.core.windows.net/audit-witness';
+const WITNESS: Env = {
+  AGENTX_AUDIT_WITNESS_URL: WITNESS_URL,
+  AGENTX_AUDIT_WITNESS_CLIENT_ID: '1f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+  AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: `${WITNESS_URL}-snapshots`,
+  IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+  IDENTITY_HEADER: 'identity header for these tests',
+};
+/** A witness container as the config reads it, on WITNESS's identity. */
+const witnessContainer = (url: string) => ({
+  url,
+  clientId: WITNESS.AGENTX_AUDIT_WITNESS_CLIENT_ID,
+  identityEndpoint: WITNESS.IDENTITY_ENDPOINT,
+  identityHeader: WITNESS.IDENTITY_HEADER,
+});
 const MINIMAL: Env = {
   AGENTX_ENV: 'production',
   // Runs no job, so needs no anchors' store: the settings under test here are others.
@@ -36,6 +52,8 @@ const MINIMAL: Env = {
   AGENTX_DB_HOST: DB_HOST,
   AGENTX_DB_PASSWORD: DB_LOGIN,
   AGENTX_KEYS_DIR: KEYS_DIR,
+  // Every copy witnesses its chain heads (TR-1): production names the store, with Azure's identity settings.
+  ...WITNESS,
 };
 const DB_DEFAULTS = {
   host: DB_HOST,
@@ -246,6 +264,10 @@ describe('config: a correct config loads', () => {
       payees: { coolingOffHours: 24 },
       audit: { anchorSeconds: 300, anchorEpoch: 1, anchorLanes: 4, mostOrganisations: 100_000 },
       anchorStore: { directory: null, container: null },
+      witnessStore: {
+        heads: { directory: null, container: witnessContainer(WITNESS_URL) },
+        snapshots: { directory: null, container: witnessContainer(`${WITNESS_URL}-snapshots`) },
+      },
       activityDownloads: { directory: null, container: null },
       keys: { directory: KEYS_DIR, current: {} },
     });
@@ -340,6 +362,7 @@ describe('config: a correct config loads', () => {
       payees: { coolingOffHours: 48 },
       audit: { anchorSeconds: 120, anchorEpoch: 1, anchorLanes: 6, mostOrganisations: 200_000 },
       anchorStore: { directory: null, container: null },
+      witnessStore: { heads: { directory: null, container: null }, snapshots: { directory: null, container: null } },
       activityDownloads: { directory: null, container: null },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
     });
@@ -425,6 +448,53 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
   it('refuses a misspelt AGENTX_ variable instead of silently ignoring it', () => {
     expect(problemsWith({ ...MINIMAL, AGENTX_PAYEE_COOLING_OF_HOURS: '48' })).toEqual([
       'AGENTX_PAYEE_COOLING_OF_HOURS is not a setting the app knows; check the spelling and the capitals',
+    ]);
+  });
+
+  it("TR-1 refuses a production start of any role without the witness log's stores; a folder only in development and test", () => {
+    const none = { ...MINIMAL, AGENTX_AUDIT_WITNESS_URL: undefined, AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: undefined };
+    const heads =
+      "AGENTX_AUDIT_WITNESS_URL: is required in production; without it no other copy sees this one's chain heads";
+    const snapshots =
+      'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: is required in production; without it a start reads a day of heads files';
+    // A web copy too: every copy writes chains, and its stops must be seen by the jobs copy.
+    expect(problemsWith({ ...none, AGENTX_AUDIT_WITNESS_CLIENT_ID: undefined })).toEqual([heads, snapshots]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: undefined })).toEqual([snapshots]);
+    // Staging says so at start instead, as the anchors' store does: a refusal would take it down before its hand deploy.
+    expect(
+      problemsWith({
+        ...none,
+        AGENTX_AUDIT_WITNESS_CLIENT_ID: undefined,
+        AGENTX_ENV: 'staging',
+        ...partnerFor('staging'),
+      }),
+    ).toEqual([]);
+    const local = { ...LOCAL, AGENTX_ENV: 'test' };
+    expect(
+      loadConfig({ ...local, AGENTX_AUDIT_WITNESS_DIR: '/tmp/w', AGENTX_AUDIT_WITNESS_SNAPSHOTS_DIR: '/tmp/s' })
+        .witnessStore,
+    ).toEqual({ heads: { directory: '/tmp/w', container: null }, snapshots: { directory: '/tmp/s', container: null } });
+    expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_WITNESS_SNAPSHOTS_DIR: '/tmp/s' })).toEqual([
+      "AGENTX_AUDIT_WITNESS_SNAPSHOTS_DIR: is allowed only in development and test; production keeps the witness log's snapshots in their write-once container",
+      'AGENTX_AUDIT_WITNESS_SNAPSHOTS_DIR and AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: set one, the folder or the container',
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_WITNESS_CLIENT_ID: undefined })).toEqual([
+      'AGENTX_AUDIT_WITNESS_URL and AGENTX_AUDIT_WITNESS_CLIENT_ID: set both, or neither',
+      'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL and AGENTX_AUDIT_WITNESS_CLIENT_ID: set both, or neither',
+    ]);
+  });
+
+  it("accepts the witness log's three settings (TR-1), deployed before the app reads them", () => {
+    const url = 'https://stagentxevstg01.blob.core.windows.net/audit-witness';
+    const witness = {
+      AGENTX_AUDIT_WITNESS_URL: url,
+      AGENTX_AUDIT_WITNESS_CLIENT_ID: '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+      AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: `${url}-snapshots`,
+    };
+    expect(problemsWith({ ...MINIMAL, ...witness })).toEqual([]);
+    // The control: a name one letter off is still refused, so the acceptance is the registry's, not a gap.
+    expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_WITNES_URL: url })).toEqual([
+      'AGENTX_AUDIT_WITNES_URL is not a setting the app knows; check the spelling and the capitals',
     ]);
   });
 
@@ -656,6 +726,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       expect.stringMatching(/^AGENTX_TRUSTED_PROXIES: is required in production/),
       expect.stringMatching(/^AGENTX_PARTNER_MODE: is required in production/),
       expect.stringMatching(/^AGENTX_AUDIT_ANCHORS_URL: is required in production/),
+      expect.stringMatching(/^AGENTX_AUDIT_WITNESS_URL: is required in production/),
+      expect.stringMatching(/^AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: is required in production/),
     ]);
   });
 

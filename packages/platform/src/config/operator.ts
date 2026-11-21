@@ -18,6 +18,7 @@ import { ConfigError, type Env, type Environment, LOCAL_ONLY, LOCAL_RELEASE, typ
 import { checkLocation, deployedProblems, secretSetting, startProblems } from './database.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
 import { allOk, type Checked, logLevelProblems, releaseProblems, setting } from './settings.ts';
+import { type StorePlace, witnessProblems, witnessSettings, witnessStoreOf } from './witness-settings.ts';
 
 /**
  * Where Azure names the run of a job a process is part of: Container Apps
@@ -120,6 +121,11 @@ export interface OperatorConfig {
     readonly epoch: number;
     readonly publicKeys: ReadonlyMap<number, string> | null;
   };
+  /**
+   * Where the operator adds the heads its chain writes leave (TR-1): its own folder, under its own key. Not required at
+   * start (most commands write no chain); a command that writes one refuses in production without it.
+   */
+  readonly witness: StorePlace;
 }
 
 /** Reads and checks the operator's command's settings, or throws a ConfigError listing every problem. */
@@ -143,6 +149,7 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
     anchorsClientId: setting(env, 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'),
     anchorEpoch: setting(env, 'AGENTX_ANCHOR_EPOCH'),
     anchorPublicKeys: setting(env, 'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS'),
+    ...witnessSettings(env),
     dbPort: location.port,
     dbName: location.database,
     dbTls: location.tls,
@@ -171,10 +178,12 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
           clientId: anchorsClientId.value,
         })
       : []),
+    ...(environment.ok ? witnessProblems(env, environment.value, checks, { required: false }) : []),
     ...deployedProblems(env, environment, location.tls),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
-  if (!allOk(checks) || problems.length > 0) throw new ConfigError(problems);
+  // Each once: stores on one identity say a missing identity setting alike.
+  if (!allOk(checks) || problems.length > 0) throw new ConfigError([...new Set(problems)]);
 
   return Object.freeze({
     environment: checks.environment.value,
@@ -204,5 +213,6 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
       epoch: checks.anchorEpoch.value,
       publicKeys: checks.anchorPublicKeys.value ?? null,
     }),
+    witness: witnessStoreOf(env, checks).heads,
   });
 }

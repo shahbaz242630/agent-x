@@ -16,6 +16,7 @@ import {
   type Chain,
   type CheckedPoint,
   createAnchorLog,
+  createWitnessLog,
   readRebaseFile,
   rebaseFile,
   signAnchor,
@@ -410,6 +411,74 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
     expect(events).toContain('operator.failed');
     expect(events).not.toContain('operator.done_before');
     expect(line('operator.failed')).toMatchObject({ command: 'create-organization' });
+  });
+});
+
+describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version})`, () => {
+  const folders: string[] = [];
+  afterEach(() => {
+    for (const made of folders.splice(0)) rmSync(made, { recursive: true, force: true });
+  });
+  const folder = (): string => {
+    const made = mkdtempSync(path.join(tmpdir(), 'operator-witness-'));
+    folders.push(made);
+    return made;
+  };
+
+  it('writes every head its command left under its own folder and key, which the API reads; done only once they are out', async () => {
+    const witnessDir = folder();
+    const { code, line } = await run(
+      ['create-organization', '--name', NAME],
+      envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: witnessDir }),
+    );
+    expect(code).toBe(0);
+    expect(readdirSync(path.join(witnessDir, 'e1', 'operator'))).toHaveLength(1);
+    expect(existsSync(path.join(witnessDir, 'e1', 'heads'))).toBe(false);
+    const created = line('operator.organization_created');
+    // The API's witness log takes the operator's file under the operator's public key alone.
+    const reader = createWitnessLog({
+      store: folderWriteOnceStore(witnessDir),
+      keys: auditKeys,
+      logger: quiet(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    await reader.refresh();
+    expect(reader.pending({ kind: 'platform' }).map(({ seq }) => seq)).toEqual([BigInt(String(created?.platformSeq))]);
+    expect(reader.pending({ kind: 'organisation', orgId: String(created?.orgId) }).map(({ seq }) => seq)).toEqual([2n]);
+  });
+
+  it('a command whose heads can’t be written says so and exits 1, its change standing; the same request runs again', async () => {
+    const blocked = path.join(folder(), 'not-a-folder');
+    writeFileSync(blocked, 'x');
+    const before = await counts();
+    const { code, lines } = await run(
+      ['create-organization', '--name', NAME],
+      envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: blocked }),
+    );
+    expect(code).toBe(1);
+    expect(lines('operator.failed')).toEqual([]);
+    expect(lines('operator.not_witnessed')).toEqual([
+      expect.objectContaining({ level: 'error', command: 'create-organization' }),
+    ]);
+    expect(await counts()).toEqual({ orgs: before.orgs + 1, platform: before.platform + 1 });
+  });
+
+  it('in production, refuses a command that writes a chain without the witness store, before it connects', async () => {
+    const env = {
+      ...envFor('operator'),
+      AGENTX_ENV: 'production',
+      AGENTX_DB_TLS: 'verify-full',
+      CONTAINER_APP_JOB_EXECUTION_NAME: 'job-agentx-prd-operator-7x2kq9m',
+    };
+    const { code, line, events } = await run(['create-organization', '--name', NAME], env);
+    expect(code).toBe(1);
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')).toMatchObject({
+      problems: [expect.stringMatching(/^AGENTX_AUDIT_WITNESS_URL is not set: in production every chain write/)],
+    });
   });
 });
 

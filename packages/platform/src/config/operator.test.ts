@@ -60,6 +60,7 @@ describe("the operator's command's config loads", () => {
       keys: { directory: KEYS_DIR, current: {} },
       evidence: { directory: null, container: null },
       anchors: { directory: null, container: null, epoch: 1, publicKeys: null },
+      witness: { directory: null, container: null },
     });
   });
 
@@ -110,6 +111,7 @@ describe("the operator's command's config loads", () => {
           [2, OTHER_KEY],
         ]),
       },
+      witness: { directory: null, container: null },
     });
   });
 
@@ -287,6 +289,32 @@ describe("E10c the operator's write-once container for an audit export", () => {
 });
 
 describe("SEC-AV-03 the operator's command refuses to start on a bad config", () => {
+  it("reads the witness log's heads' store (TR-1), with Azure's identity, or a folder in development and test", () => {
+    const url = 'https://stagentxevstg01.blob.core.windows.net/audit-witness';
+    const witness = {
+      AGENTX_AUDIT_WITNESS_URL: url,
+      AGENTX_AUDIT_WITNESS_CLIENT_ID: '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+      AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: `${url}-snapshots`,
+      IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+      IDENTITY_HEADER: 'identity header for these tests',
+    };
+    expect(problemsWith({ ...LOCAL, ...witness })).toEqual([]);
+    expect(loadOperatorConfig({ ...LOCAL, ...witness }).witness.container?.url).toBe(url);
+    expect(loadOperatorConfig({ ...LOCAL, AGENTX_AUDIT_WITNESS_DIR: '/tmp/witness' }).witness).toEqual({
+      directory: '/tmp/witness',
+      container: null,
+    });
+    // Not required at start: only the commands that write a chain need it, and refuse without it in production.
+    expect(problemsWith(DEPLOYED)).toEqual([]);
+    expect(problemsWith({ ...DEPLOYED, AGENTX_AUDIT_WITNESS_DIR: '/tmp/witness' })).toEqual([
+      "AGENTX_AUDIT_WITNESS_DIR: is allowed only in development and test; production keeps the chains' witnessed heads in their write-once container",
+    ]);
+    // The control: a name one letter off is still refused.
+    expect(problemsWith({ ...LOCAL, AGENTX_AUDIT_WITNESS_CLIENTID: 'x' })).toEqual([
+      'AGENTX_AUDIT_WITNESS_CLIENTID is not a setting the app knows; check the spelling and the capitals',
+    ]);
+  });
+
   it('reports every problem at once, in the same order the app uses', () => {
     expect(
       problemsWith({

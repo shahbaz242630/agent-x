@@ -6,7 +6,16 @@ import { describe, expect, it } from 'vitest';
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import type { Chain } from './chain.ts';
-import { createDigestLog, type DigestAnchors, headHeldTo, heldThrough, raiseWritten } from './digest-log.ts';
+import {
+  createDigestLog,
+  type DigestAnchors,
+  headCutBelow,
+  headHeldTo,
+  heldThrough,
+  MOST_WITNESSED,
+  placesOf,
+  raiseWritten,
+} from './digest-log.ts';
 import { bodyHash } from './shards.ts';
 import { subjectKey } from './state-digest.ts';
 
@@ -1710,10 +1719,14 @@ describe('a chain taken as it stands after a signed answer to its cut (AT13h, S2
   });
 
   it('a write raises only the heads its chain ran through as it wrote (heldThrough, raiseWritten)', async () => {
-    expect(heldThrough(undefined, null)).toBe(true);
-    expect(heldThrough(headAt(4n), Buffer.from(headAt(4n).hash))).toBe(true);
-    expect(heldThrough(headAt(4n), headAt(4n, 9).hash)).toBe(false);
-    expect(heldThrough(headAt(4n), null)).toBe(false);
+    expect(heldThrough([], null)).toBe(true);
+    expect(heldThrough([headAt(4n)], [Buffer.from(headAt(4n).hash)])).toBe(true);
+    expect(heldThrough([headAt(4n)], [headAt(4n, 9).hash])).toBe(false);
+    expect(heldThrough([headAt(4n)], [null])).toBe(false);
+    expect(heldThrough([headAt(4n)], null)).toBe(false);
+    // Every head held to, each at its place (TR-1): one missing is enough.
+    expect(heldThrough([headAt(4n), headAt(6n)], [headAt(4n).hash, headAt(6n).hash])).toBe(true);
+    expect(heldThrough([headAt(4n), headAt(6n)], [headAt(4n).hash, null])).toBe(false);
     const { log } = digestOn();
     await log.read();
     const watch = () => {
@@ -1810,27 +1823,99 @@ const oneEntry = (place: bigint): string => {
   return entry.toString('base64');
 };
 
-describe('a head read held to the head seen (AT13f, AT13h: headHeldTo)', () => {
+describe('a head read held to the heads held to (AT13f, AT13h, TR-1: headHeldTo, headCutBelow)', () => {
   const at = (seq: bigint, byte: number) => ({ seq, hash: Buffer.alloc(32, byte) });
-  const seen = at(5n, 5);
+  const seen = [at(5n, 5)];
 
-  it('nothing seen holds anything, a head or none', () => {
-    expect(headHeldTo(undefined, undefined, null)).toBe(true);
-    expect(headHeldTo(undefined, at(1n, 1), null)).toBe(true);
+  it('nothing held to holds anything, a head or none', () => {
+    expect(headHeldTo([], undefined, null)).toBe(true);
+    expect(headHeldTo([], at(1n, 1), null)).toBe(true);
   });
 
   it('a head at the seen place with its hash, or past it with the same event there, holds', () => {
-    expect(headHeldTo(seen, at(5n, 5), Buffer.alloc(32, 5))).toBe(true);
-    expect(headHeldTo(seen, at(9n, 9), Buffer.alloc(32, 5))).toBe(true);
+    expect(headHeldTo(seen, at(5n, 5), [Buffer.alloc(32, 5)])).toBe(true);
+    expect(headHeldTo(seen, at(9n, 9), [Buffer.alloc(32, 5)])).toBe(true);
   });
 
   it('none, below, another hash at the seen place, or another event there: cut back', () => {
-    expect(headHeldTo(seen, undefined, Buffer.alloc(32, 5))).toBe(false);
-    expect(headHeldTo(seen, at(4n, 4), Buffer.alloc(32, 5))).toBe(false);
-    expect(headHeldTo(seen, at(5n, 6), Buffer.alloc(32, 5))).toBe(false);
-    expect(headHeldTo(seen, at(9n, 9), Buffer.alloc(32, 6))).toBe(false);
+    expect(headHeldTo(seen, undefined, [Buffer.alloc(32, 5)])).toBe(false);
+    expect(headHeldTo(seen, at(4n, 4), [Buffer.alloc(32, 5)])).toBe(false);
+    expect(headHeldTo(seen, at(5n, 6), [Buffer.alloc(32, 5)])).toBe(false);
+    expect(headHeldTo(seen, at(9n, 9), [Buffer.alloc(32, 6)])).toBe(false);
+    expect(headHeldTo(seen, at(9n, 9), [null])).toBe(false);
     expect(headHeldTo(seen, at(9n, 9), null)).toBe(false);
     expect(headHeldTo(seen, at(9n, 9), 'not a hash')).toBe(false);
+  });
+
+  it('two copies’ heads held to apart (TR-1): the honest 105 is not buried by a stale copy’s 106 on a cut branch', () => {
+    const honest = at(105n, 1);
+    const stale = at(106n, 2);
+    const heldTo = [stale, honest];
+    // The owner cut to 100; the stale copy wrote 101'–106'; the original row 105 put back at 105: one row each reads
+    // true, but 105's place holds the stale branch's event (the hash read there is the cut branch's).
+    expect(headCutBelow(heldTo, at(106n, 2), [stale.hash, at(105n, 9).hash])).toEqual(honest);
+    expect(headCutBelow(heldTo, at(106n, 2), [stale.hash, honest.hash])).toBeUndefined();
+    // Highest-only would have held to 106' alone, and passed the first (the control below shows it does).
+    expect(headCutBelow([stale], at(106n, 2), [stale.hash])).toBeUndefined();
+    // Below the highest: cut below it, whatever is at the others' places.
+    expect(headCutBelow(heldTo, at(105n, 1), [null, honest.hash])).toEqual(stale);
+    expect(placesOf(heldTo)).toEqual(['106', '105']);
+  });
+});
+
+describe('the heads a read is held to (TR-1: heldTo, the witnessed heads)', () => {
+  const witnessedHeads = new Map<string, { seq: bigint; hash: Buffer; at: number }[]>();
+  const witnessedLog = (anchors = anchorsWith()) =>
+    createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: () => START,
+      epoch: 1,
+      anchors,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+      witnessed: (chain) => witnessedHeads.get(chain.kind === 'platform' ? 'platform' : chain.orgId) ?? [],
+    });
+
+  it('holds a read to its own head seen and the highest witnessed heads, each once, at most MOST_WITNESSED of them', () => {
+    const log = witnessedLog();
+    const many = Array.from({ length: MOST_WITNESSED + 3 }, (_, at) => ({
+      seq: BigInt(30 - at),
+      hash: Buffer.alloc(32, at + 1),
+      at: START.getTime(),
+    }));
+    witnessedHeads.set(ORG, many);
+    log.heads(CHAIN)?.saw(headAt(4n));
+    const heldTo = log.heads(CHAIN)?.heldTo ?? [];
+    expect(heldTo[0]).toEqual(headAt(4n));
+    expect(heldTo.slice(1).map(({ seq }) => seq)).toEqual(many.slice(0, MOST_WITNESSED).map(({ seq }) => seq));
+    // The head seen stays this process's own: the witnessed heads are held to, never raised into it.
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(4n));
+    // Seen and witnessed alike, it is held to once.
+    witnessedHeads.set(ORG, [{ ...headAt(4n), at: START.getTime() }]);
+    expect(log.heads(CHAIN)?.heldTo).toEqual([headAt(4n)]);
+    witnessedHeads.clear();
+  });
+
+  it('a chain taken as it stands holds its reads to witnessed heads noted after it alone, never those before', () => {
+    const log = witnessedLog();
+    const before = { seq: 9n, hash: Buffer.alloc(32, 9), at: START.getTime() - 1 };
+    const after = { seq: 12n, hash: Buffer.alloc(32, 12), at: START.getTime() + 2 * MINUTE };
+    // Held to a witnessed head alone (no head seen here): the cut found there may still be answered and taken.
+    witnessedHeads.set(ORG, [before]);
+    expect(log.heads(CHAIN)?.seen).toBeUndefined();
+    log.heads(CHAIN)?.accept(headAt(6n));
+    expect(log.heads(CHAIN)?.accepted?.heldTo).toEqual([headAt(6n)]);
+    // A head witnessed after the accept (past the margin) holds the accepted reads; the one before never again.
+    witnessedHeads.set(ORG, [after, before]);
+    expect(log.heads(CHAIN)?.accepted?.heldTo).toEqual([headAt(6n), { seq: after.seq, hash: after.hash }]);
+    // Every other read stays held to everything witnessed.
+    expect(log.heads(CHAIN)?.heldTo.map(({ seq }) => seq)).toEqual([12n, 9n]);
+    witnessedHeads.clear();
+    // Held to nothing at all, a chain is never taken as it stands.
+    const fresh = witnessedLog();
+    fresh.heads(OTHER)?.accept(headAt(6n));
+    expect(fresh.heads(OTHER)?.accepted).toBeUndefined();
   });
 });
 
