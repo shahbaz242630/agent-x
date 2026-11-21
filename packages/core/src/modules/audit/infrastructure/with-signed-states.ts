@@ -183,15 +183,21 @@ const recording = new Map<string, number>();
  * keeps, or the one a `web` copy reads from the same store (AT13b), given at boot (`checkStatesWith`); none in a process
  * with neither, whose reads are as before it.
  */
-let stateDigest: Pick<StateDigest, 'latest'> | undefined;
+let stateDigest: SignedStatesDigest | undefined;
+
+/**
+ * What the signed states read of the digest: each object's newest signed place, and the highest head seen of each chain
+ * (AT13f, audit-trail.ts), which a stand-in that knows only places leaves out.
+ */
+export type SignedStatesDigest = Pick<StateDigest, 'latest'> & Partial<Pick<StateDigest, 'heads'>>;
 
 /** The digest this process's signed states are held to from now on, or (undefined) none: once, at boot. */
-export function checkStatesWith(digest: Pick<StateDigest, 'latest'> | undefined): void {
+export function checkStatesWith(digest: SignedStatesDigest | undefined): void {
   stateDigest = digest;
 }
 
 /** The digest given at boot, if any yet: for reads held to it outside this module (AT13c, the sessions' signed ends). */
-export const statesDigest = (): Pick<StateDigest, 'latest'> | undefined => stateDigest;
+export const statesDigest = (): SignedStatesDigest | undefined => stateDigest;
 
 /** How a hold set marks the hold history's work, in the hold's transaction (the header): none until a process gives it. */
 let markHold: ((tx: Transaction<AuditTables>, orgId: string) => Promise<void>) | undefined;

@@ -9,7 +9,7 @@
 // to it; the holdings check holds it to its reservations; and an organisation
 // made before GM-1a is refused busy until its cutover opens its months from
 // its signed requests.
-import { createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import { checkStatesWith, createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import {
   CUTOVER_ACTION,
   CUTOVER_SUBJECT,
@@ -36,6 +36,7 @@ import {
   voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
+import { createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, type DatabaseTransaction } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -1011,6 +1012,141 @@ describe('a decision racing a total made meanwhile, forced', () => {
     const other = Object.assign(new Error('duplicate key'), { code: '23505', constraint: 'one_reservation_a_request' });
     expect(totalMadeMeanwhile(other)).toBe(other);
     expect(totalMadeMeanwhile(null)).toBeNull();
+  });
+});
+
+describe('AT13f: a month’s total made above the last anchor, cut off with the chain’s end', () => {
+  type SavedHead = Awaited<ReturnType<Owner['saveHead']>>;
+  const headOf = async (w: World): Promise<SavedHead> => {
+    const saved: SavedHead[] = [];
+    await totalTamper(w, async (owner) => {
+      saved.push(await owner.saveHead());
+    });
+    const [head] = saved;
+    if (head === undefined) throw new Error('The owner should have found the head');
+    return head;
+  };
+
+  /**
+   * The owner cuts the chain's end since `saved` off: its events, an earlier sealed head put back, and every row they
+   * named as if never made (the month's total, the payee's windows, the requests and their reservations). Every seal
+   * left is true and no event is missing between the anchor and the head.
+   */
+  const cutBack = (w: World, saved: SavedHead) =>
+    asOwner(w, async (owner) => {
+      const named = await owner.query<{ type: string; id: string }>(
+        'select distinct subject_type as type, subject_id::text as id from audit.events where org_id = $1 and seq > $2::bigint',
+        [w.org, saved.seq],
+      );
+      const of = (type: string) => named.filter((one) => one.type === type).map((one) => one.id);
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query('alter table limit_reservations.payee_windows disable trigger user');
+      await owner.query('alter table spend_requests.requests disable trigger user');
+      await owner.query('delete from limit_reservations.month_totals where org_id = $1 and id = any($2::uuid[])', [
+        w.org,
+        of(MONTH_TOTALS.subject),
+      ]);
+      await owner.query('delete from limit_reservations.payee_windows where org_id = $1 and id = any($2::uuid[])', [
+        w.org,
+        of('payee_window'),
+      ]);
+      await owner.query(
+        'delete from limit_reservations.reservations where org_id = $1 and request_id = any($2::uuid[])',
+        [w.org, of(SPEND_REQUESTS.subject)],
+      );
+      await owner.query('delete from spend_requests.order_claims where org_id = $1 and request_id = any($2::uuid[])', [
+        w.org,
+        of(SPEND_REQUESTS.subject),
+      ]);
+      await owner.query('delete from spend_requests.requests where org_id = $1 and id = any($2::uuid[])', [
+        w.org,
+        of(SPEND_REQUESTS.subject),
+      ]);
+      // The agent's time zone, made with its first reservation, and the months locked under it.
+      await owner.query('alter table limit_reservations.agent_zones disable trigger user');
+      await owner.query(
+        'delete from limit_reservations.agent_periods where org_id = $1 and agent_id = any($2::uuid[])',
+        [w.org, of('agent_zone')],
+      );
+      await owner.query('delete from limit_reservations.agent_zones where org_id = $1 and id = any($2::uuid[])', [
+        w.org,
+        of('agent_zone'),
+      ]);
+      await owner.query('alter table limit_reservations.agent_zones enable trigger user');
+      await owner.windBack(saved);
+      await owner.query('alter table spend_requests.requests enable trigger user');
+      await owner.query('alter table limit_reservations.payee_windows enable trigger user');
+      await owner.query('alter table audit.events enable trigger user');
+    });
+
+  /** A digest as the process that keeps the anchors keeps one, every signed state read here held to it in `work`. */
+  async function heldToADigest<T>(work: (digest: DigestLog) => Promise<T>): Promise<T> {
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 64 * 1024 * 1024,
+    });
+    checkStatesWith(digest);
+    try {
+      return await work(digest);
+    } finally {
+      checkStatesWith(undefined);
+    }
+  }
+
+  it('the positive control: read without the heads seen, the month reads as nothing held and its limit passes again', async () => {
+    const { w, acting, max } = await ready();
+    const saved = await headOf(w);
+    const first = await decisionOf(acting, w, max);
+    await decisionOf(acting, w, max);
+    expect((await decisionOf(acting, w, 1n)).decision).not.toBe('ALLOW');
+    expect(await heldIn(w)).toBe(2n * max);
+    await cutBack(w, saved);
+
+    // The month's total gone with its events: none, read as nothing held, so a third request of the month's limit holds.
+    expect(await heldIn(w)).toBe('none');
+    expect((await decisionOf(acting, w, max)).decision).toBe(first.decision);
+    expect(await heldIn(w)).toBe(max);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('R-15: with the head seen, a decision on the month cut off is refused, the alarm at that head, the organisation held', async () => {
+    const { w, seenAt } = await heldToADigest(async (digest) => {
+      const { w, acting, max } = await ready();
+      const saved = await headOf(w);
+      await decisionOf(acting, w, max);
+      await decisionOf(acting, w, max);
+      // Any read of the chain since (the hand-off's, a list's, the next decision's): the head it read is seen here.
+      expect(await heldIn(w)).toBe(2n * max);
+      const seen = digest.heads({ kind: 'organisation', orgId: w.org })?.seen?.seq;
+      await cutBack(w, saved);
+
+      expect(await ask(acting, w, max)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+      expect(await heldIn(w)).toBe('tampered');
+      return { w, seenAt: seen };
+    });
+    expect(seenAt).toBeDefined();
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'state', reason: 'log', seq: String(seenAt) }),
+    );
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('a month grown honestly under the heads seen decides as ever: its limit refuses, no alarm', async () => {
+    await heldToADigest(async (digest) => {
+      const { w, acting, max } = await ready();
+      await decisionOf(acting, w, max);
+      expect(await heldIn(w)).toBe(max);
+      const seen = digest.heads({ kind: 'organisation', orgId: w.org })?.seen?.seq ?? 0n;
+      await decisionOf(acting, w, max);
+      expect((await decisionOf(acting, w, 1n)).decision).not.toBe('ALLOW');
+      expect(await heldIn(w)).toBe(2n * max);
+      expect(digest.heads({ kind: 'organisation', orgId: w.org })?.seen?.seq).toBeGreaterThan(seen);
+    });
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 });
 

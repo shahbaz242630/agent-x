@@ -644,6 +644,26 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
   });
 });
 
+/** A transaction of its own held open at `begun` until `release`: the order forced, never left to chance. */
+function heldOpen<T>(work: (tx: Transaction<Tables>, begun: () => void, gate: Promise<void>) => Promise<T>) {
+  let release = (): void => undefined;
+  let began = (): void => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const begun = new Promise<void>((resolve) => {
+    began = resolve;
+  });
+  const done = withTenant(app, org, (tx) => work(tx, began, gate));
+  return {
+    begun,
+    release: () => {
+      release();
+    },
+    done,
+  };
+}
+
 describe('AT13: the digest’s edges, as the owner tampers', () => {
   beforeEach(async () => {
     digest = await newDigest();
@@ -738,26 +758,6 @@ describe('AT13: the digest’s edges, as the owner tampers', () => {
     expect(await heldCheck(id, 'share', heldTo(unread))).toMatchObject({ outcome: 'verified', version: 1 });
   });
 
-  /** A transaction of its own held open at `begun` until `release`: the order forced, never left to chance. */
-  function heldOpen<T>(work: (tx: Transaction<Tables>, begun: () => void, gate: Promise<void>) => Promise<T>) {
-    let release = (): void => undefined;
-    let began = (): void => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const begun = new Promise<void>((resolve) => {
-      began = resolve;
-    });
-    const done = withTenant(app, org, (tx) => work(tx, began, gate));
-    return {
-      begun,
-      release: () => {
-        release();
-      },
-      done,
-    };
-  }
-
   it('forced order: a decision whose transaction began before a change, read after the walk kept it, reads the change', async () => {
     const id = await newAgent();
     await walked();
@@ -795,6 +795,251 @@ describe('AT13: the digest’s edges, as the owner tampers', () => {
     await walked(anchor);
     expect(digest.latest({ kind: 'organisation', orgId: org }, 'agent', id)).toBe(2n);
     expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 2 });
+  });
+});
+
+describe('AT13f: the chain cut back past the head this process saw, as the owner tampers', () => {
+  const chainOfOrg = () => ({ kind: 'organisation' as const, orgId: org });
+  /** A trail whose reads are held to `kept`, for the reads signed states don't make (history, log page, one event). */
+  const heldTrail = (kept: DigestLog) => createAuditTrail({ keys, ids: new SequentialIds(0xa00), digest: kept });
+
+  beforeEach(async () => {
+    digest = await newDigest();
+    held = heldTo(digest);
+  });
+
+  /**
+   * An agent made below the anchor, and one made above it, read by a decision (the head it read now seen here). Then the
+   * owner cuts the chain's end off, the second agent's events with it, puts back the earlier sealed head and deletes the
+   * second agent's row: every seal left true, no gap for the next walk.
+   */
+  async function cutOff(kept: DigestLog = digest) {
+    const below = await newAgent();
+    const anchor = await walked(CHAIN_START, kept);
+    const savedHead = await owner.saveHead();
+    const above = await newAgent();
+    expect(await heldCheck(above, 'share', heldTo(kept))).toMatchObject({ outcome: 'verified', version: 1 });
+    const seenAt = kept.heads(chainOfOrg())?.seen?.seq;
+    if (seenAt === undefined || seenAt <= BigInt(savedHead.seq)) throw new Error('The read should have seen the head');
+    const savedRow = await owner.saveRow(above);
+    await owner.windBack(savedHead);
+    await owner.deleteRow(above);
+    return { below, above, anchor, seenAt, savedHead, savedRow };
+  }
+
+  const tamperedAt = (id: string, seq: bigint): unknown =>
+    expect.objectContaining({ event: 'audit.integrity_failed', reason: 'log', objectId: id, seq: String(seq) });
+
+  it('the positive control: read without the heads seen, the agent reads as never made, and the next walk finds nothing', async () => {
+    const { above, below, anchor } = await cutOff();
+    expect(await check(above)).toEqual({ outcome: 'missing' });
+    // A digest of places alone knows nothing of an object signed past the anchor.
+    const placesOnly = createSignedStates({
+      keys,
+      trail: createAuditTrail({
+        keys,
+        ids: new SequentialIds(0xb00),
+        digest: { latest: (...asked) => digest.latest(...asked) },
+      }),
+      logger: testLogger(capture),
+      onTamper: (finding) => found.push(finding),
+      unrecorded: () => undefined,
+    });
+    expect(await heldCheck(above, 'share', placesOnly)).toEqual({ outcome: 'missing' });
+    expect(await heldCheck(below, 'share', placesOnly)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(await trail.checkFromAnchor(app, org, anchor)).toMatchObject({ ok: true });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('refused at decision time: the agent cut off and every other object on the chain, the alarm at the head seen', async () => {
+    const { above, below, seenAt } = await cutOff();
+
+    expect(await heldCheck(above)).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(await heldCheck(below, 'change')).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toEqual([tamperedAt(above, seenAt), tamperedAt(below, seenAt)]);
+    // Never lowered by what it read cut back.
+    expect(digest.heads(chainOfOrg())?.seen?.seq).toBe(seenAt);
+  });
+
+  it('a list read and a gathered read are refused the same way; a history, an event and a log page read broken there', async () => {
+    const { below, seenAt } = await cutOff();
+    const checks = await withTenant(app, org, (tx) => held.verifiedStates(tx, AGENTS, org, [below]));
+    expect(checks.get(below)).toEqual({ outcome: 'tampered', sign: 'log' });
+    const gathered = await withTenant(app, org, async (tx) => {
+      await held.gather(tx, org, [{ table: AGENTS, id: { id: below }, lock: 'share' }]);
+      return held.verifiedState(tx, AGENTS, { orgId: org, id: below }, 'share');
+    });
+    expect(gathered).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toEqual([tamperedAt(below, seenAt), tamperedAt(below, seenAt)]);
+
+    const reads = heldTrail(digest);
+    const broken = { kind: 'broken', seq: seenAt };
+    const about = { subjectTypes: ['agent'], subjectId: below, limit: 10 };
+    await withTenant(app, org, async (tx) => {
+      expect(await reads.recordedEvents(tx, org, about)).toEqual(broken);
+      expect(await reads.recordedHistories(tx, org, [about, about])).toEqual([broken, broken]);
+      expect(await reads.recordedEvent(tx, org, { onlyAbout: { type: 'agent', id: below } })).toEqual(broken);
+      expect(await reads.recordedEvent(tx, org, { onlyAbout: { type: 'agent', id: newId() } })).toEqual(broken);
+      expect(await reads.latestSignedStates(tx, org, 'agent', [below])).toEqual(new Map([[below, broken]]));
+      const page = { from: new Date(0), to: new Date('2100-01-01T00:00:00.000Z'), limit: 10 };
+      expect(await reads.logPage(tx, org, page)).toEqual(broken);
+    });
+  });
+
+  it('the whole chain deleted, its head with it: refused, never read as a chain not yet begun', async () => {
+    const id = await newAgent();
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    const seenAt = digest.heads(chainOfOrg())?.seen?.seq ?? 0n;
+    await owner.query('delete from audit.events where org_id = $1', [org]);
+    await owner.query('delete from audit.heads where org_id = $1', [org]);
+    await owner.deleteRow(id);
+    expect(await check(id)).toEqual({ outcome: 'missing' });
+
+    expect(await heldCheck(id)).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toEqual([tamperedAt(id, seenAt)]);
+  });
+
+  it('a chain grown honestly reads as ever, each read raising the head seen', async () => {
+    const id = await newAgent();
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    const first = digest.heads(chainOfOrg())?.seen?.seq ?? 0n;
+    expect(first).toBeGreaterThan(0n);
+    await changeStatus(id, 'suspend');
+    const other = await newAgent();
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 2 });
+    expect(await heldCheck(other)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(digest.heads(chainOfOrg())?.seen?.seq).toBe(first + 2n);
+    const history = await withTenant(app, org, (tx) =>
+      heldTrail(digest).recordedEvents(tx, org, { subjectTypes: ['agent'], subjectId: id, limit: 10 }),
+    );
+    expect(history).toMatchObject({ kind: 'recorded' });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('cut back and written on past the head seen, as by a copy that never saw the end: another event at its place, refused', async () => {
+    const { below, seenAt } = await cutOff();
+    await withTenant(app, org, async (tx) => {
+      for (let step = 1; step <= 4; step += 1) {
+        await trail.record(tx, org, {
+          actor: { type: 'user', id: USER },
+          action: 'probe.stepped',
+          subject: { type: 'probe', id: USER, version: step },
+          details: { step },
+        });
+      }
+    });
+    expect(BigInt((await owner.saveHead()).seq)).toBeGreaterThan(seenAt);
+
+    expect(await heldCheck(below)).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toEqual([tamperedAt(below, seenAt)]);
+  });
+
+  it('the events cut off put back from a copy (chain-restore puts events back): read again, no further alarm', async () => {
+    const below = await newAgent();
+    await walked();
+    const savedHead = await owner.saveHead();
+    const above = await newAgent();
+    expect(await heldCheck(above)).toMatchObject({ outcome: 'verified', version: 1 });
+    const seenAt = digest.heads(chainOfOrg())?.seen?.seq ?? 0n;
+    const savedRow = await owner.saveRow(above);
+    const headThen = await owner.saveHead();
+    await owner.query(
+      'create temporary table kept_events as select * from audit.events where org_id = $1 and seq > $2::bigint',
+      [org, savedHead.seq],
+    );
+    try {
+      await owner.windBack(savedHead);
+      await owner.deleteRow(above);
+      expect(await heldCheck(below)).toEqual({ outcome: 'tampered', sign: 'log' });
+      // The repair: the events back from the copy, the head as it stood, the row as it was.
+      await owner.query('insert into audit.events select * from kept_events');
+      await owner.query(
+        'update audit.heads set seq = $2::bigint, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1',
+        [org, headThen.seq, headThen.hash, headThen.mac, headThen.macKeyVersion],
+      );
+      await owner.query(
+        'insert into probe.agents select * from pg_catalog.jsonb_populate_record(null::probe.agents, $1::jsonb)',
+        [savedRow.json],
+      );
+      expect(await heldCheck(above)).toMatchObject({ outcome: 'verified', version: 1 });
+      expect(await heldCheck(below)).toMatchObject({ outcome: 'verified', version: 1 });
+      expect(alarms()).toEqual([tamperedAt(below, seenAt)]);
+    } finally {
+      await owner.query('drop table kept_events');
+    }
+  });
+
+  it('forced order: a transaction’s own events never raise the head seen, and a read beside it sees only what committed', async () => {
+    const id = await newAgent();
+    const other = await newAgent();
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    const seen = digest.heads(chainOfOrg())?.seen?.seq;
+    const writing = heldOpen(async (tx, begun, gate) => {
+      await held.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      // Its own read sees its own events: the head they moved, never committed.
+      expect(await held.verifiedState(tx, AGENTS, { orgId: org, id }, 'share')).toMatchObject({ version: 2 });
+      begun();
+      await gate;
+      throw new Error('rolled back');
+    });
+    await writing.begun;
+    expect(digest.heads(chainOfOrg())?.seen?.seq).toBe(seen);
+    // On its own connection meanwhile: the head as committed.
+    expect(await heldCheck(other)).toMatchObject({ outcome: 'verified', version: 1 });
+    writing.release();
+    await expect(writing.done).rejects.toThrow('rolled back');
+
+    expect(digest.heads(chainOfOrg())?.seen?.seq).toBe(seen);
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a rebase of the chain after the head was seen sets it aside: the chain as rebased reads as before the digest', async () => {
+    const rebased = new Map<string, Date>();
+    const anchors: DigestAnchors = {
+      rebasedAfter: (_, at) => (rebased.get(org) ?? new Date(0)) > at,
+      holds: () => true,
+    };
+    const kept = await newDigest(undefined, anchors);
+    const { above, below } = await cutOff(kept);
+    // The operator rebases the chain where it now stands (E11): the head seen before, and the walk's, no longer hold.
+    rebased.set(org, new Date(AT13_AT.getTime() + 1000));
+    expect(await heldCheck(above, 'share', heldTo(kept))).toEqual({ outcome: 'missing' });
+    expect(await heldCheck(below, 'share', heldTo(kept))).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a restart holds the chain to its anchor read back from the store; what it saw above the anchor goes with the process', async () => {
+    const fake = createFakeWriteOnceStore();
+    const kept = await newDigest(fake.store);
+    const first = await newAgent();
+    const belowAnchor = await owner.saveHead();
+    const second = await newAgent();
+    // One more below the anchor, so the anchor's place is not the second agent's own.
+    await newAgent();
+    const anchor = await walked(CHAIN_START, kept);
+    await kept.flush();
+    const atAnchor = await owner.saveHead();
+    const above = await newAgent();
+    expect(await heldCheck(above, 'share', heldTo(kept))).toMatchObject({ outcome: 'verified', version: 1 });
+    const restarted = await newDigest(fake.store);
+    expect(restarted.heads(chainOfOrg())?.seen).toEqual({ seq: anchor.seq, hash: anchor.hash });
+
+    // Cut back to the anchor: the agent above it reads as never made (the limit a restart leaves).
+    await owner.windBack(atAnchor);
+    await owner.deleteRow(above);
+    expect(await heldCheck(above, 'share', heldTo(restarted))).toEqual({ outcome: 'missing' });
+    // The process that saw it still refuses it.
+    expect(await heldCheck(above, 'share', heldTo(kept))).toEqual({ outcome: 'tampered', sign: 'log' });
+
+    // Cut back below the anchor: refused from the anchor read back, even for an object whose own events stand.
+    await owner.windBack(belowAnchor);
+    await owner.deleteRow(second);
+    expect(await heldCheck(first, 'share', heldTo(restarted))).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms().at(-1)).toEqual(tamperedAt(first, anchor.seq));
+    // An object the digest knows itself is named at its own place, not the head's: where its newest event should be.
+    expect(await heldCheck(second, 'share', heldTo(restarted))).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms().at(-1)).toEqual(tamperedAt(second, BigInt(belowAnchor.seq) + 1n));
   });
 });
 

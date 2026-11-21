@@ -1251,3 +1251,180 @@ describe('a request’s facts forgotten past the approval horizon (AT13d)', () =
     expect(held(restarted.log)).toEqual([2n, undefined, 5n, 6n, 7n, 8n]);
   });
 });
+
+/** A head as a read finds it: its place and a hash of its own. */
+const headAt = (seq: bigint, fill = Number(seq % 200n)) => ({ seq, hash: Buffer.alloc(32, fill) });
+
+describe('the highest head each chain was read at (AT13f)', () => {
+  it('holds nothing at first, then each head a read saw where higher, never lower, never a place before the first', async () => {
+    const { log } = digestOn();
+    await log.read();
+    expect(log.heads(CHAIN)?.seen).toBeUndefined();
+    log.heads(CHAIN)?.saw(headAt(0n));
+    expect(log.heads(CHAIN)?.seen).toBeUndefined();
+    log.heads(CHAIN)?.saw(headAt(7n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(7n));
+    log.heads(CHAIN)?.saw(headAt(5n));
+    log.heads(CHAIN)?.saw(headAt(7n, 99));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(7n));
+    log.heads(CHAIN)?.saw(headAt(9n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    // Each chain its own; nothing said of one never read.
+    expect(log.heads(OTHER)?.seen).toBeUndefined();
+  });
+
+  it('keeps what it was given as it was: a hash changed after by its giver changes nothing held', async () => {
+    const { log } = digestOn();
+    await log.read();
+    const found = headAt(4n);
+    log.heads(CHAIN)?.saw(found);
+    found.hash.fill(0);
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(4n));
+  });
+
+  it('a watch holds what was seen when it was asked: a head raised since is the next read’s to hold to', async () => {
+    const { log } = digestOn();
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(3n));
+    const asked = log.heads(CHAIN);
+    log.heads(CHAIN)?.saw(headAt(8n));
+    expect(asked?.seen).toEqual(headAt(3n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(8n));
+  });
+
+  it('a rebase after the read that saw a head sets it aside; a head a read asked before a rebase found is never kept', async () => {
+    const rebases = new Map<string, Date>();
+    const time = clock();
+    const { log } = digestOn(undefined, { time, anchors: anchorsWith(rebases) });
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    const before = log.bytesHeld();
+    const askedBefore = log.heads(CHAIN);
+    time.held.at += MINUTE;
+    rebases.set(ORG, new Date(START.getTime() + 30_000));
+    // Wound back by the operator, then rebased: what was seen before no longer holds.
+    expect(log.heads(CHAIN)?.seen).toBeUndefined();
+    expect(log.bytesHeld()).toBe(before - 200);
+    // A read asked before the rebase may have read the chain as it was: what it found is not kept.
+    askedBefore?.saw(headAt(12n));
+    expect(log.heads(CHAIN)?.seen).toBeUndefined();
+    // One asked after it is.
+    log.heads(CHAIN)?.saw(headAt(4n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(4n));
+    // And a late answer to the read asked before never replaces it: the head seen since the rebase stands.
+    askedBefore?.saw(headAt(12n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(4n));
+    // Another chain's rebase moves nothing here.
+    log.heads(OTHER)?.saw(headAt(6n));
+    rebases.set(ORG, new Date(START.getTime() + 2 * MINUTE));
+    expect(log.heads(OTHER)?.seen).toEqual(headAt(6n));
+  });
+
+  it('says nothing for a chain whose shard is let go, nor in a copy that doesn’t lead, which forgets the heads too', () => {
+    const letGo = new Set<string>([OTHER_ORG]);
+    const leads = { now: true };
+    const log = createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: () => START,
+      epoch: 1,
+      anchors: anchorsWith(new Map(), letGo),
+      leading: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    expect(log.heads(OTHER)).toBeUndefined();
+    const asked = log.heads(CHAIN);
+    asked?.saw(headAt(5n));
+    expect(log.bytesHeld()).toBe(200);
+    leads.now = false;
+    expect(log.heads(CHAIN)).toBeUndefined();
+    // A read asked while it led and answered after: nothing kept by a copy that doesn't.
+    asked?.saw(headAt(6n));
+    leads.now = true;
+    expect(log.heads(CHAIN)?.seen).toBeUndefined();
+    expect(log.bytesHeld()).toBe(0);
+  });
+
+  it('holds to where the digest covers the chain too, a walk’s head under an anchor: the higher of the two', async () => {
+    const { log } = digestOn();
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 6n));
+    expect(log.heads(CHAIN)?.seen).toEqual({ seq: 6n, hash: point(6n).hash });
+    log.heads(CHAIN)?.saw(headAt(4n));
+    expect(log.heads(CHAIN)?.seen).toEqual({ seq: 6n, hash: point(6n).hash });
+    log.heads(CHAIN)?.saw(headAt(10n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(10n));
+    log.record(CHAIN, new Map(), START, stretch(6n, 14n));
+    expect(log.heads(CHAIN)?.seen).toEqual({ seq: 14n, hash: point(14n).hash });
+    // A stretch beyond a gap is no coverage: never held to.
+    log.record(OTHER, new Map(), START, stretch(5n, 9n));
+    expect(log.heads(OTHER)?.seen).toBeUndefined();
+  });
+
+  it('a restart holds the chain to where its walks covered it, read back from the store, and to nothing seen above it', async () => {
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const { log } = digestOn(fake, { time });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 6n));
+    log.heads(CHAIN)?.saw(headAt(11n));
+    await log.flush();
+    time.held.at += MINUTE;
+    const restarted = digestOn(fake, { time });
+    // Until read, nothing covered: nothing to hold to.
+    expect(restarted.log.heads(CHAIN)?.seen).toBeUndefined();
+    await restarted.log.read();
+    expect(restarted.log.heads(CHAIN)?.seen).toEqual({ seq: 6n, hash: point(6n).hash });
+  });
+
+  it('a chain given way whole is held to no coverage: it reads as before the digest', async () => {
+    const { log } = digestOn(undefined, { mostBytes: 12_000 });
+    await log.read();
+    log.record(CHAIN, agents(600), START, stretch(0n, 600n));
+    // Given way whole (all of it authority): Tx A goes on today's checks, and no coverage is held to.
+    expect(log.covers(CHAIN, 600n)).toBe(true);
+    expect(log.latest(CHAIN, 'agent', '0199a0f0-0000-7000-8000-000000010000')).toBeUndefined();
+    expect(log.heads(CHAIN)?.seen).toBeUndefined();
+  });
+
+  it('a chain whose payments gave way keeps its coverage held to; coming back, none until its walk is back', async () => {
+    const time = clock();
+    const { log, fake } = digestOn(undefined, { time, mostBytes: 12_000 });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 4n));
+    log.record(CHAIN, requests(400), START, stretch(4n, 600n));
+    expect(log.latest(CHAIN, 'spend_request', FIRST_REQUEST)).toBeUndefined();
+    expect(log.heads(CHAIN)?.seen).toEqual({ seq: 600n, hash: point(600n).hash });
+    await log.flush();
+    // Restarted with room: still given way its first hour, its coverage held to as before.
+    const restarted = digestOn(fake, { time, mostBytes: 1024 * 1024 });
+    await restarted.log.read();
+    expect(restarted.log.heads(CHAIN)?.seen).toEqual({ seq: 600n, hash: point(600n).hash });
+    // An hour on it comes back, its coverage from nothing, so nothing to hold to meanwhile.
+    time.held.at += HOUR;
+    restarted.log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    expect(restarted.log.owed(CHAIN, 600n)).toBe(true);
+    restarted.log.record(CHAIN, seen(['agent', AGENT, 3n]), time.now(), stretch(0n, 600n));
+    expect(restarted.log.heads(CHAIN)?.seen).toBeUndefined();
+    // Back once asked of the anchor its walk reached: held to its coverage again.
+    expect(restarted.log.owed(CHAIN, 600n)).toBe(false);
+    expect(restarted.log.heads(CHAIN)?.seen).toEqual({ seq: 600n, hash: point(600n).hash });
+  });
+
+  it('takes a tenth of what may be held at most, the head raised longest ago going first, counted as it goes', async () => {
+    // A tenth of 4,000 bytes: two heads of 200.
+    const { log } = digestOn(undefined, { mostBytes: 4000 });
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(1n));
+    log.heads(OTHER)?.saw(headAt(2n));
+    // Raised again: now the latest raised, so the other goes first.
+    log.heads(CHAIN)?.saw(headAt(3n));
+    log.heads(THIRD)?.saw(headAt(4n));
+    expect(log.heads(OTHER)?.seen).toBeUndefined();
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(3n));
+    expect(log.heads(THIRD)?.seen).toEqual(headAt(4n));
+    expect(log.bytesHeld()).toBe(400);
+    expect(log.memoryHeld().bytes).toBe(400);
+  });
+});
