@@ -6,6 +6,7 @@ describe('TR-1 how soon a write’s chain head is witnessed', () => {
   it('the agent’s decision transaction and a payment’s outcome moves go with the next flush', () => {
     expect(witnessClassOf(['spend_request.received', 'spend_request.decided'])).toBe('soon');
     expect(witnessClassOf(['month_total.held', 'payee_window.held', 'order_slot.held'])).toBe('soon');
+    expect(witnessClassOf(['agent_zone.kept', 'spend_request.received', 'spend_request.decided'])).toBe('soon');
     expect(witnessClassOf(['transaction.submitted'])).toBe('soon');
     expect(witnessClassOf(['transaction.lose_track', 'month_total.released'])).toBe('soon');
   });
@@ -27,6 +28,9 @@ describe('TR-1 how soon a write’s chain head is witnessed', () => {
     'transaction.opened',
     'spend_request.made_ready',
     'transaction.fail',
+    // A cutover opens a month or a window from signed requests: rare, and witnessed before it answers.
+    'month_total.opened',
+    'payee_window.opened',
   ])('%s, a stop, an approval or a hand-off’s own, is witnessed before its answer', (action) => {
     expect(witnessClassOf([action])).toBe('now');
   });
@@ -44,7 +48,7 @@ describe('TR-1 how soon a write’s chain head is witnessed', () => {
   it('lists no stop: every listed action is additive, a decision’s or a payment move’s', () => {
     for (const action of WITNESSED_SOON) {
       expect(action).toMatch(
-        /^(spend_request\.(received|decided)|month_total\.|payee_window\.|order_slot\.|transaction\.)/,
+        /^(spend_request\.(received|decided)|agent_zone\.kept|month_total\.(held|released)|payee_window\.(held|released)|order_slot\.held|transaction\.)/,
       );
     }
   });

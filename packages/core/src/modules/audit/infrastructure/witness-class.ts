@@ -15,12 +15,12 @@ import type { WitnessClass } from '@agentx/platform/audit-chain';
  * missing one is `now`, the safe side.
  */
 export const WITNESSED_SOON: ReadonlySet<string> = new Set([
-  // The agent's decision transaction (spend-request-decisions.ts, decisions.ts).
+  // The agent's decision transaction (spend-request-decisions.ts, decisions.ts), the agent's time zone kept with its
+  // first reservation among it (agent-zones.ts).
   'spend_request.received',
   'spend_request.decided',
-  'month_total.opened',
+  'agent_zone.kept',
   'month_total.held',
-  'payee_window.opened',
   'payee_window.held',
   'order_slot.held',
   // A payment's outcome as Tx B and the sweep record it (handoff.ts, outcomes): cut, the payment reads as before the
