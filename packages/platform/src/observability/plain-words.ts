@@ -1344,11 +1344,9 @@ export const PLAIN_WORDS = {
     next: 'It is tried again in about 5 minutes. If it keeps failing, check the integrity alarms for that organisation.',
   },
   'spend_request.capacity_kept': {
-    happened:
-      'A spend request approved (or, while waiting, decided) 7 days and 23 hours ago or more was ended (cancelled, rejected, expired or voided) and kept its amount in its monthly total and payee window, its reservation still held.',
-    broke:
-      "That amount stays counted as used in the agent's month and the supplier's window until the month or window rolls over. Nothing was paid, and no integrity alarm follows: the request's signed ending records it.",
-    next: 'Nothing for one now and then (a request left waiting through a long pause or outage). Many in one organisation may mean someone changed its records past the app: check its integrity alarms.',
+    happened: 'A spend request decided or approved about 8 days ago or more ended without giving its amount back.',
+    broke: 'That amount stays counted as used until its month and payee window roll over. Nothing was paid.',
+    next: 'Nothing for one after a long pause. Many in one organisation may mean tampering: check its alarms.',
   },
   'request_void.failed': {
     happened:
