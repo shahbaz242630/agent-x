@@ -442,7 +442,7 @@ describe('reactivating a suspended agent, with an admin’s step-up (C1-3)', () 
     expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created', 'agent.suspended']);
   });
 
-  it('refuses a step-up asked for another agent, or before the admin signed in again: STEP_UP_FAILED', async () => {
+  it('SEC-HA-02 refuses a step-up asked for another agent, or before the admin signed in again: STEP_UP_FAILED', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const agent = await agentOf(org, admin);
@@ -698,7 +698,7 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
     expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
   });
 
-  it('refuses a step-up asked for another new owner, another agent, or a reactivation: STEP_UP_FAILED', async () => {
+  it('SEC-HA-02 refuses a step-up asked for another new owner, another agent, or a reactivation: STEP_UP_FAILED', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const next = await member(org, 'developer');

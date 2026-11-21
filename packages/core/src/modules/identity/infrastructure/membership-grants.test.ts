@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { SignedStateFailed } from '../../audit/index.ts';
 import { tamperThrown } from './membership-grants.ts';
 
-describe('tamperThrown (OR1c)', () => {
+describe('SEC-DB-19 tamperThrown (OR1c)', () => {
   it('is true for a tamper sign alone', () => {
     expect(tamperThrown(new SignedStateFailed('tampered', 'a summary out of step'))).toBe(true);
   });

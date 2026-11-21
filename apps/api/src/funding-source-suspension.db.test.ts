@@ -393,7 +393,7 @@ describe(`reactivating a suspended source, with an admin’s passkey step-up (D2
     expect((await eventsAbout(org, theirs.id)).at(-1)?.action).toBe('funding_source.suspended');
   });
 
-  it('refuses a step-up asked for another source, or before the admin signed in again', async () => {
+  it('SEC-HA-02 refuses a step-up asked for another source, or before the admin signed in again', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const source = await linked(admin);

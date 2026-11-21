@@ -743,7 +743,7 @@ describe('refused, changing nothing', () => {
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
   });
 
-  it('SEC-DP-11 a step-up signed in with an app code: STEP_UP_FAILED, to propose and to confirm', async () => {
+  it('SEC-HA-02, SEC-DP-11 a step-up signed in with an app code: STEP_UP_FAILED, to propose and to confirm', async () => {
     const { w, request, transaction, first, second } = await markable();
 
     expect(await proposed(first, transaction.id, APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
@@ -753,7 +753,7 @@ describe('refused, changing nothing', () => {
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
   });
 
-  it('SEC-DP-11 a step-up asked for another payment or another reference: STEP_UP_FAILED', async () => {
+  it('SEC-HA-02, SEC-DP-11 a step-up asked for another payment or another reference: STEP_UP_FAILED', async () => {
     const { w, acting, transaction } = await handedOff(REJECTED_UNPROVEN);
     // The other payment handed off beside it, before the members' fortnight: asked once the clock had moved on two
     // weeks, its approval (sealed by the database's clock) would read past the 7-day horizon, never handed off (AT13d).
@@ -775,6 +775,22 @@ describe('refused, changing nothing', () => {
     expect(await confirmingProposal(admin, transaction.id, challengeId, 'BANK-NACK-00000')).toEqual(
       refused(403, 'STEP_UP_FAILED'),
     );
+  });
+
+  // S208: the withdrawal's own step-up, the one of the three a refusal test didn't cover.
+  it('SEC-HA-02 a withdrawal confirmed before signing in again, or with an app code: STEP_UP_FAILED, still open; the same step-up, signed in again with a passkey, withdraws it', async () => {
+    const { w, transaction, first, second } = await markable();
+    await proposed(first, transaction.id);
+    const challengeId = askedFor(await withdrawing(second, transaction.id));
+
+    expect(await confirmingWithdrawal(second, transaction.id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    const withAppCode = askedFor(await withdrawing(second, transaction.id));
+    await stepUp(second, withAppCode, APP_CODE);
+    expect(await confirmingWithdrawal(second, transaction.id, withAppCode)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect((await proposalEventsOf(w)).map(({ action }) => action)).not.toContain('failure_proposal.withdrawn');
+
+    await stepUp(second, challengeId);
+    expect(await confirmingWithdrawal(second, transaction.id, challengeId)).toMatchObject({ outcome: 'withdrawn' });
   });
 
   it('a confirm asked for a proposal since withdrawn and made again: STEP_UP_FAILED', async () => {

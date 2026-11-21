@@ -220,7 +220,7 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
 // S206 V8 (0106): anyone can start a sign-in with an anonymous GET, so its flows are held to a cap, every network's
 // together and each network's own, as the OAuth flows are. A step-up's flow is never counted. Each test at a time of
 // its own, after every other test's flows have ended, so each count is its own.
-describe(`the sign-ins under way, held to their caps (S206 V8, Postgres ${server.version})`, () => {
+describe(`SEC-HA-14 the sign-ins under way, held to their caps (S206 V8, Postgres ${server.version})`, () => {
   const openFrom = (network: string) =>
     app
       .selectFrom('identity.login_flows')

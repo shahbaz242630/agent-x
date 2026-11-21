@@ -1628,7 +1628,7 @@ describe('deploy foundation', () => {
     },
   );
 
-  describe("the database server's generation: never a new, empty server in the live one's place (AZ25)", () => {
+  describe("SEC-AV-10 the database server's generation: never a new, empty server in the live one's place (AZ25)", () => {
     const disk = (gb: number) => ({ storage: { storageSizeGb: gb } });
     const foundation = (generation: number, options: AzAnswers, flags: readonly string[] = []) => {
       const admin = aPaste();
@@ -2431,7 +2431,7 @@ const CLIENT_ID = 'stand-in-client-id';
 describe('deploy apps', () => {
   const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID];
 
-  describe("secrets and apps follow the database server's generation, never lead it (AZ25)", () => {
+  describe("SEC-AV-10 secrets and apps follow the database server's generation, never lead it (AZ25)", () => {
     const part = (command: 'secrets' | 'apps', generation: number, options: AzAnswers, flags: string[] = []) =>
       command === 'apps'
         ? run(['apps', ...flags], { answers, images: recordingImages(), az: new RecordingAz(options), generation })

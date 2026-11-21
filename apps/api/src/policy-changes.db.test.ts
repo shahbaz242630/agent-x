@@ -342,7 +342,7 @@ describe('the organisation’s policy (C3, decision 5)', () => {
     );
   });
 
-  it('refuses a step-up asked before the policy changed: STEP_UP_FAILED, for the policy as it stood', async () => {
+  it('SEC-HA-02 refuses a step-up asked before the policy changed: STEP_UP_FAILED, for the policy as it stood', async () => {
     const w = await world();
     const challengeId = askedFor(await ask(w.admin, ORGANIZATION, rules(1_000n)));
     await stepUp(w.admin, challengeId);
@@ -497,6 +497,20 @@ describe('a mandate’s policy (C3, SEC-LIM-11)', () => {
       id,
       current: { version: 1 },
     });
+  });
+
+  // S208: a mandate's policy's own step-up; the organisation's has its refusal tests above.
+  it('SEC-HA-02 refuses one confirmed before signing in again, or with an app code: none set; the same step-up, signed in again with a passkey, sets it', async () => {
+    const w = await world();
+    const target: PolicyTarget = { scope: 'mandate', mandateId: await shared.inForce(registry, w) };
+    const challengeId = askedFor(await ask(w.admin, target, rules(1_000n)));
+
+    expect(await confirm(w.admin, target, rules(1_000n), challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await changed(w, target, rules(1_000n), APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await policyEvents(w.org)).toEqual([]);
+
+    await stepUp(w.admin, challengeId);
+    expect(changedOf(await confirm(w.admin, target, rules(1_000n), challengeId)).current?.version).toBe(1);
   });
 
   it('sets one on a draft waiting, weighed against the draft', async () => {

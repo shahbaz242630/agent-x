@@ -302,7 +302,7 @@ describe(`confirming an invitation (B4-3b, Postgres ${server.version})`, () => {
     expect(await statusOf(org, id)).toEqual({ status: 'DRAFT' });
   });
 
-  it('refuses before the admin signs in again, leaving the draft, and confirms with the same key after', async () => {
+  it('SEC-HA-02 refuses before the admin signs in again, leaving the draft, and confirms with the same key after', async () => {
     const { org, admin } = await organization();
     const { id, challengeId } = await drafted(admin);
 

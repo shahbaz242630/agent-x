@@ -20,7 +20,7 @@ import { deploymentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
 
 const SUBSCRIPTION = '00000000-0000-0000-0000-000000000001';
 
-describe('database-generation.json (AZ25)', () => {
+describe('SEC-AV-10 database-generation.json (AZ25)', () => {
   it('holds generation 0 for both environments today: the names every deployment has always used', () => {
     expect(readGenerations()).toEqual({ staging: 0, production: 0 });
   });
@@ -46,7 +46,7 @@ describe('database-generation.json (AZ25)', () => {
   });
 });
 
-describe('server names by generation', () => {
+describe('SEC-AV-10 server names by generation', () => {
   it('adds nothing at generation 0 and -r<n> after it, and reads a generation back only from those names', () => {
     expect(serverNameOf('stg', 'abcdef', 0)).toBe('psql-agentx-stg-abcdef');
     expect(serverNameOf('prd', 'abcdef', 12)).toBe('psql-agentx-prd-abcdef-r12');
@@ -158,7 +158,7 @@ function names(dir: string): { server: string; vault: string; host: string } {
   };
 }
 
-describe('what Bicep names from the generation (AZ25)', () => {
+describe('SEC-AV-10 what Bicep names from the generation (AZ25)', () => {
   it("names today's server at generation 0, exactly as before, and the next generation's with -r1, the host with it", () => {
     const today = inCopy((dir) => names(dir));
     const suffix = suffixOfVault(today.vault, 'stg') ?? '';

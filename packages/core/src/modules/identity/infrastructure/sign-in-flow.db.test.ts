@@ -392,7 +392,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(client.started).toBe(0);
   });
 
-  it('S206 V8 refuses to begin one while its network holds its share, as SignInBusy, keeping no flow', async () => {
+  it('SEC-HA-14 S206 V8 refuses to begin one while its network holds its share, as SignInBusy, keeping no flow', async () => {
     // A network of its own, so the file's other sign-ins (NETWORK's) are never held by it.
     const network = '198.51.100.9';
     const kept = () =>

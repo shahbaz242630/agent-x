@@ -306,7 +306,7 @@ describe('what registering refuses, writing nothing', () => {
     expect(await agentsIn(org)).toBe(0);
   });
 
-  it('a confirm before the member signed in again, or from another session: STEP_UP_FAILED', async () => {
+  it('SEC-HA-02 a confirm before the member signed in again, or from another session: STEP_UP_FAILED', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
     const other = await member(org, 'developer');

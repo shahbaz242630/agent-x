@@ -489,7 +489,7 @@ describe(`reactivating a suspended supplier, with an admin’s passkey step-up (
     expect((await eventsAbout(org, theirs)).at(-1)?.action).toBe('supplier.suspend');
   });
 
-  it('refuses a step-up asked for another supplier, in another session, or before the admin signed in again', async () => {
+  it('SEC-HA-02 refuses a step-up asked for another supplier, in another session, or before the admin signed in again', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const id = await added(admin);

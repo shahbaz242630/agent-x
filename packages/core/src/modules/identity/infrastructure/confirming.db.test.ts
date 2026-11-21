@@ -390,7 +390,7 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
     expect(await noticesIn(who.org)).toEqual([]);
   });
 
-  it('refuses before the admin signs in again, leaving the person waiting; the same key confirms after', async () => {
+  it('SEC-HA-02 refuses before the admin signs in again, leaving the person waiting; the same key confirms after', async () => {
     const who = await organization();
     const { id, invitee } = await accepted(who);
     const challengeId = await asked(who.admin, id);
