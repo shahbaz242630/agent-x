@@ -38,14 +38,7 @@ import {
   setPolicy,
 } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
-import {
-  releaseClaim,
-  requestOf,
-  SPEND_REQUESTS,
-  type SpendRequestsTables,
-  totalsWeighed,
-  voidedWith,
-} from '@agentx/core/modules/spend-requests';
+import { requestOf, type SpendRequestsTables, totalsWeighed, voidedWith } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -554,14 +547,11 @@ describe('deciding a spend request and reserving it (D4)', () => {
       reasons: ['POSSIBLE_DUPLICATE_ORDER'],
     });
 
-    await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      states.changeStatus(tx, SPEND_REQUESTS, { orgId: w.org, id: claimed.id }, 'deny', {
-        actor: OPERATOR,
-        action: 'spend_request.denied',
-        details: {},
-      }),
-    );
-    await withTenant(app, w.org, (tx) => releaseClaim(tx, { requestId: claimed.id, releasedAt: clock.now() }));
+    // Ended as the app ends it, its claim released and its order slots let go of (TR-2).
+    await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      await requestOf(tx, states, { orgId: w.org, id: claimed.id }, 'change');
+      await voidedWith(tx, states, keys, { orgId: w.org, id: claimed.id }, ['AGENT_KEY_ENDED'], clock.now());
+    });
     // Its claim released, and the first supplier without the payee's key now, nothing open there looks like PO-7.
     expect(decidedOf(await ask(acting, small('PO-7', first))).decision).toBe('ALLOW');
   });
@@ -1048,7 +1038,9 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .at(-1);
     // Its gather reads the zone as not there, the insert comes after the supplier's lock, and the zone's seal adds trips.
     expect(line?.supplierLockTrip).toBe(6);
-    // Its month has no signed total yet, so one more read of the organisation's log says it holds nothing (GM-1a).
+    // Its month has no signed total yet, so one more read of the organisation's log says it holds nothing (GM-1a). Its
+    // order has no slot yet either: the slots' cutover, gathered ahead with the decision's histories (TR-2), says so
+    // with no trip of its own.
     expect(line?.trips).toBe(24);
     expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(19);
     // The month it added, dated the instant it was asked.

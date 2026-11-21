@@ -37,6 +37,18 @@ import {
   type WindowToWrite,
 } from '../../limit-reservations/index.ts';
 import { claimLooks, type OrderWeighed } from './order-claims.ts';
+import {
+  type OrderSlotCheck,
+  orderSlotGathered,
+  orderSlotId,
+  type OrderSlotKey,
+  orderSlotKeys,
+  orderSlotOf,
+  orderSlotOrder,
+  orderSlotsCutOver,
+  type OrderToSlot,
+  type SlotToWrite,
+} from './order-slots.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 /** Each part read only where it is weighed: 0, or no claim, for one not asked. */
@@ -112,25 +124,61 @@ export type DecisionWindows =
   | { readonly outcome: 'tampered' };
 
 /**
+ * A decision's order slots, read for change with its month's lock (TR-2), in orderSlotKeys' order (none for a request
+ * to no supplier of the organisation's): each with what it is to be written from; `busy` for an organisation not yet
+ * claiming in signed slots; or `tampered`, the alarm raised.
+ */
+export type DecisionSlots =
+  | {
+      readonly outcome: 'read';
+      readonly rows: readonly { readonly key: OrderSlotKey; readonly read: SlotToWrite }[];
+    }
+  | { readonly outcome: 'busy' }
+  | { readonly outcome: 'tampered' };
+
+/**
  * The agent's month locked (agentMonthLocking), then the claims asked read in a statement of their own, then the
- * month's signed total and the payee's signed windows gathered for change (GM-1a, GM-1b; 11a, then 11b in order of
- * ID), all on one trip (4D2e C7), a decision's: its supplier's lock is alone before it. Each read in a statement after
- * the lock, so each sees what the lock's holder committed. The month's total and the split window are the signed
- * ones, never the reservations' sums, which the database's owner could cut (R-15). A wait run out or a deadlock on
- * the lock comes back as itself: the statements behind it fail only after it, unseen. A month with no total, or a
- * payee with no window, makes one more trip, to the organisation's log: nothing held after its cutover.
+ * month's signed total, the payee's signed windows and the order's signed slots gathered for change (GM-1a, GM-1b,
+ * TR-2; 11a, then 11b, then 11c, each in order of ID), all on one trip (4D2e C7), a decision's: its supplier's lock is
+ * alone before it. Each read in a statement after the lock, so each sees what the lock's holder committed. The
+ * month's total, the split window and the order's claims are the signed ones, never the reservations' sums or the
+ * claim rows alone, which the database's owner could cut (R-15). A wait run out or a deadlock on the lock comes back
+ * as itself: the statements behind it fail only after it, unseen. A month with no total, a payee with no window, or
+ * an order with no slot asks the organisation's log whether nothing is then held (its cutover): a decision gathers the
+ * slots' cutover ahead, on a trip it makes anyway, so that is no trip of its own.
  */
 export async function monthLockedAndTotalsWeighed(
   tx: TotalsTransaction,
   states: SignedStates,
-  { orgId, at, payee }: { readonly orgId: string; readonly at: Date; readonly payee: Payee | null },
+  {
+    orgId,
+    at,
+    payee,
+    slotted = null,
+  }: {
+    readonly orgId: string;
+    readonly at: Date;
+    readonly payee: Payee | null;
+    /** The order as its slots are found (TR-2): null for none to look for. */
+    readonly slotted?: OrderToSlot | null;
+  },
   toWeigh: TotalsToWeigh & { readonly month: MonthToSum },
-): Promise<TotalsWeighed & { readonly monthTotal: DecisionMonthTotal; readonly windows: DecisionWindows }> {
+): Promise<
+  TotalsWeighed & {
+    readonly monthTotal: DecisionMonthTotal;
+    readonly windows: DecisionWindows;
+    readonly slots: DecisionSlots;
+  }
+> {
   const { agentId, month, currency } = toWeigh.month;
   const key = { agentId, month, currency };
   const windows = (payee === null ? [] : payeeWindowKeys(payee)).map((windowKey) => ({
     key: windowKey,
     id: payeeWindowId(orgId, windowKey),
+  }));
+  const slots = (slotted === null ? [] : orderSlotKeys(slotted)).map((slotKey) => ({
+    key: slotKey,
+    id: orderSlotId(orgId, slotKey),
   }));
   const others = totalsRead(tx, { ...toWeigh, month: null });
   const {
@@ -145,6 +193,8 @@ export async function monthLockedAndTotalsWeighed(
       ...windows
         .toSorted((a, b) => payeeWindowOrder(a.id, b.id))
         .map((window) => payeeWindowGathered(orgId, window.key, 'change')),
+      // Then each slot, after every window, in order of ID (11c).
+      ...slots.toSorted((a, b) => orderSlotOrder(a.id, b.id)).map((slot) => orderSlotGathered(slot.id, 'change')),
     ],
   );
   if (locked.rows.length !== 1) throw new Error(`the agent's period was not there to lock: ${month}`);
@@ -154,26 +204,40 @@ export async function monthLockedAndTotalsWeighed(
   const reads = [];
   for (const window of windows)
     reads.push({ key: window.key, read: await payeeWindowOf(tx, states, orgId, window.id, 'change') });
+  const slotReads = [];
+  for (const slot of slots)
+    slotReads.push({ key: slot.key, read: await orderSlotOf(tx, states, orgId, slot.id, 'change') });
   const counted = await countedAsRead(
     tx,
     states,
     orgId,
     total,
     reads.map(({ read }) => read),
+    slotReads.map(({ read }) => read),
   );
   return {
     ...weighed,
     monthTotal: decisionTotal(key, total, counted.monthTotals),
     windows: decisionWindows(reads, counted.payeeWindows),
+    slots: decisionSlots(slotReads, counted.orderSlots),
   };
 }
 
 type Counted = 'cut_over' | 'not_yet' | 'tampered';
 
+/** Whether each kind of signed row read is counted: those read whole need no look. */
+interface CountedRead {
+  readonly monthTotals: Counted;
+  readonly payeeWindows: Counted;
+  readonly orderSlots: Counted;
+}
+
 /**
- * Whether the organisation is counted in signed totals and windows, read only for what was found missing: none for a
- * month and payee each read whole. A window missing reads the windows' cutover alone: the job cuts an organisation's
- * windows over only once its totals are, so one cut over says both are (one trip, never two).
+ * Whether the organisation is counted in signed totals, windows and slots, read only for what was found missing: none
+ * for a month, payee and order each read whole. A window missing reads the windows' cutover, which answers for the
+ * month too: the job cuts an organisation's windows over only once its totals are (one look, never two). A slot
+ * missing reads the slots' cutover for the slots alone, never for the totals or windows, so the slots' cutover can't
+ * stand in for either; a decision gathers it ahead, so that look is no trip of its own.
  */
 async function countedAsRead(
   tx: TotalsTransaction,
@@ -181,14 +245,19 @@ async function countedAsRead(
   orgId: string,
   total: MonthTotalCheck,
   windows: readonly { readonly outcome: string }[],
-): Promise<{ readonly monthTotals: Counted; readonly payeeWindows: Counted }> {
+  slots: readonly { readonly outcome: string }[],
+): Promise<CountedRead> {
+  const orderSlots = slots.some(({ outcome }) => outcome === 'none')
+    ? await orderSlotsCutOver(tx, states, orgId)
+    : 'cut_over';
   if (windows.some(({ outcome }) => outcome === 'none')) {
     const windowsCounted = await payeeWindowsCutOver(tx, states, orgId);
-    return { monthTotals: windowsCounted, payeeWindows: windowsCounted };
+    return { monthTotals: windowsCounted, payeeWindows: windowsCounted, orderSlots };
   }
-  if (total.outcome === 'none')
-    return { monthTotals: await monthTotalsCutOver(tx, states, orgId), payeeWindows: 'cut_over' };
-  return { monthTotals: 'cut_over', payeeWindows: 'cut_over' };
+  if (total.outcome === 'none') {
+    return { monthTotals: await monthTotalsCutOver(tx, states, orgId), payeeWindows: 'cut_over', orderSlots };
+  }
+  return { monthTotals: 'cut_over', payeeWindows: 'cut_over', orderSlots };
 }
 
 /** A decision's month total as read: a month with none holds nothing once the organisation is cut over, else busy. */
@@ -220,3 +289,17 @@ function decisionWindows(
 }
 
 const TAMPERED = NOT_COUNTED.tampered;
+
+/** A decision's slots as read: any tampered with refuses them all; one missing is held by no one once cut over, else busy. */
+function decisionSlots(
+  reads: readonly { readonly key: OrderSlotKey; readonly read: OrderSlotCheck }[],
+  counted: Counted,
+): DecisionSlots {
+  const rows: { readonly key: OrderSlotKey; readonly read: SlotToWrite }[] = [];
+  for (const { key, read } of reads) {
+    if (read.outcome === 'tampered') return TAMPERED;
+    rows.push({ key, read });
+  }
+  if (counted !== 'cut_over' && rows.some(({ read }) => read.outcome === 'none')) return NOT_COUNTED[counted];
+  return { outcome: 'read', rows };
+}

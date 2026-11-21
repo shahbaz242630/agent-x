@@ -45,6 +45,41 @@ describe("a decision's windows as the holdings check reads them", () => {
   });
 });
 
+describe("a decision's order slots as the holdings check reads them (TR-2)", () => {
+  it('takes those the cutover named for a decision before TR-2, never over those a decision sealed, and none for neither', async () => {
+    const events = [
+      event(1, 'spend_request', OLD, 'spend_request.decided', HELD),
+      event(2, 'spend_request', NEW, 'spend_request.decided', { ...HELD, orderSlots: `${SEALED},${WINDOW}` }),
+      event(3, 'spend_request', BARE, 'spend_request.decided', {}),
+      event(4, 'spend_request_slots', OLD, 'spend_request.slots_named', { orderSlots: WINDOW }),
+      event(5, 'spend_request_slots', NEW, 'spend_request.slots_named', { orderSlots: WINDOW }),
+      event(6, 'spend_request_slots', NONE, 'spend_request.slots_named', { orderSlots: WINDOW }),
+      // A decision before E1, holding no month, still holds its order: the cutover's naming stands for it.
+      event(7, 'spend_request_slots', BARE, 'spend_request.slots_named', { orderSlots: WINDOW }),
+    ];
+    const states = { historyOf: () => Promise.resolve({ outcome: 'read', events }) } as unknown as SignedStates;
+    const read = await decisionsRead(null as never, states, ORG, [OLD, NEW, NONE, BARE]);
+    if (read === 'tampered') throw new Error('read whole');
+    expect(read.get(OLD)?.slots).toEqual([WINDOW]);
+    expect(read.get(NEW)?.slots).toEqual([SEALED, WINDOW]);
+    expect(read.get(BARE)?.slots).toEqual([WINDOW]);
+    // A naming with no decision read stands for nothing.
+    expect(read.has(NONE)).toBe(false);
+  });
+
+  it('names none for a decision sealing text that is no list of slots, nor one never named', async () => {
+    const events = [
+      event(1, 'spend_request', OLD, 'spend_request.decided', { ...HELD, orderSlots: 'not,slots' }),
+      event(2, 'spend_request', NEW, 'spend_request.decided', HELD),
+    ];
+    const states = { historyOf: () => Promise.resolve({ outcome: 'read', events }) } as unknown as SignedStates;
+    const read = await decisionsRead(null as never, states, ORG, [OLD, NEW]);
+    if (read === 'tampered') throw new Error('read whole');
+    expect(read.get(OLD)?.slots).toBeNull();
+    expect(read.get(NEW)?.slots).toBeNull();
+  });
+});
+
 describe('when a request was approved, as its decision is read (AT13d)', () => {
   const at = (hours: number) => new Date(AT.getTime() + hours * 3_600_000);
   const timed = (seq: number, hours: number, id: string, action: string, subjectType = 'spend_request') => ({
@@ -85,8 +120,9 @@ describe('when a request was approved, as its decision is read (AT13d)', () => {
           'spend_request.cancelled',
           'spend_request.rejected',
           'spend_request.windows_named',
+          'spend_request.slots_named',
         ],
-        limit: 7 * 3,
+        limit: 8 * 3,
       }),
     ]);
   });

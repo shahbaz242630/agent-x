@@ -30,6 +30,8 @@ import {
   rejectRequest,
   requestOf,
   settleCarried,
+  SLOTS_CUTOVER_ACTION,
+  SLOTS_CUTOVER_SUBJECT,
   SPEND_REQUESTS,
   type SpendRequestsTables,
   voidedWith,
@@ -616,7 +618,7 @@ describe('the holdings check', () => {
 describe('an organisation made before GM-1a, until its cutover', () => {
   /**
    * Its cutover event, as the job records it: here so it can decide, then taken away again as before GM-1a. The
-   * payee windows' too (GM-1b), which stays: these tests are the month totals'.
+   * payee windows' too (GM-1b), and the order slots' (TR-2), which stay: these tests are the month totals'.
    */
   const cutOverByHand = (w: World) =>
     withSignedStates(app, w.org, quiet(), async (tx) => {
@@ -624,6 +626,7 @@ describe('an organisation made before GM-1a, until its cutover', () => {
       for (const [action, type] of [
         [CUTOVER_ACTION, CUTOVER_SUBJECT],
         [WINDOWS_CUTOVER_ACTION, WINDOWS_CUTOVER_SUBJECT],
+        [SLOTS_CUTOVER_ACTION, SLOTS_CUTOVER_SUBJECT],
       ] as const) {
         await trail.record(tx, w.org, {
           actor: { type: 'system', id: 'test' },

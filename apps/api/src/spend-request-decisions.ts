@@ -28,10 +28,13 @@
 //   locking one, on the month's lock's trip (4D2d P12, 4D2e C7), with the
 //   month's signed total (11a, GM-1a) and the payee's signed split windows
 //   (11b, GM-1b: what its reservations across agents hold, hour by hour; the
-//   split weighed from them with the mandate's split check on, D5) gathered
+//   split weighed from them with the mandate's split check on, D5) and the
+//   order's signed slots (11c, TR-2: whether it duplicates or looks like an
+//   order held, named by its canonical form, read on the first trip) gathered
 //   for change behind them, though new rows no one else holds come before
 //   them in the order: the request (8); its reservation and claim (11); then
-//   the total's, the windows' and its own signed events, in one step (12).
+//   the total's, the windows', the slots' and its own signed events, in one
+//   step (12).
 //
 // Whatever the organisation can't give (no mandate, another organisation's
 // supplier or source, a suspended agent) is still a request, decided DENY or
@@ -95,11 +98,26 @@ import {
   type PolicyRules,
 } from '@agentx/core/modules/policies';
 import {
+  bankKeyOf,
   claimAnswered,
   claimStatement,
   type DecisionMonthTotal,
+  type DecisionSlots,
   type DecisionWindows,
+  heldBy,
+  type Holders,
   monthLockedAndTotalsWeighed,
+  noHolders,
+  orderHashOf,
+  orderKeyRead,
+  orderSlotId,
+  orderSlotKeys,
+  orderSlotsCutOver,
+  orderSlotsCutOverFind,
+  orderSlotsOf,
+  orderSlotToSend,
+  type OrderToSlot,
+  slotsLook,
   totalsWeighed,
   type HeldAs,
   holdsCapacity,
@@ -483,6 +501,69 @@ export async function payeeWindowsRead(
   return new Map(payees.map((payee) => [payeeText(payee), idsOf(payee).map((id) => known(read.get(id)))]));
 }
 
+/**
+ * Each order's slots (orderSlotKeys' order), with `alsoLocked`, read as asked in one pass in order of ID (11c, TR-2):
+ * each order's slots' holders, in the orders' order, a slot with no row held by no one. INTEGRITY_FAILED for any that
+ * can't be believed; one missing is held by no one once the organisation is cut over (one look at its log for all),
+ * ORGANISATION_BUSY before.
+ */
+export async function orderSlotsRead(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  orders: readonly OrderToSlot[],
+  lock: 'share' | 'change',
+  alsoLocked: readonly string[] = [],
+): Promise<readonly (readonly Holders[])[]> {
+  const keysOf = (order: OrderToSlot) => orderSlotKeys(order).map((key) => ({ key, id: orderSlotId(orgId, key) }));
+  const read = await orderSlotsOf(
+    tx,
+    states,
+    orgId,
+    [...orders.flatMap((order) => keysOf(order).map(({ id }) => id)), ...alsoLocked],
+    lock,
+  );
+  const checks = [...read.values()];
+  if (checks.some(({ outcome }) => outcome === 'tampered')) throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (checks.some(({ outcome }) => outcome === 'none')) {
+    const counted = await orderSlotsCutOver(tx, states, orgId);
+    if (counted === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+    if (counted === 'not_yet') throw new MandateRefused(503, 'ORGANISATION_BUSY');
+  }
+  return orders.map((order) =>
+    keysOf(order).map(({ key, id }) => {
+      const slot = known(read.get(id));
+      return slot.outcome === 'held' ? slot.holders : noHolders(key.kind);
+    }),
+  );
+}
+
+/**
+ * An order weighed again from its signed slots (TR-2): an approval's, whose own request (`except`) holds them and is
+ * never its own duplicate. Read as asked with `alsoLocked` (its own sealed slots, which its reject lets go of: never
+ * locked after these out of order).
+ */
+export async function slotsWeighedAgain(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  {
+    order,
+    orderKey,
+    except,
+  }: {
+    readonly order: Pick<OrderToSlot, 'supplierId' | 'payeeKey'> & { readonly reference: string };
+    readonly orderKey: string;
+    readonly except: readonly string[];
+  },
+  lock: 'share' | 'change',
+  alsoLocked: readonly string[] = [],
+): Promise<{ readonly duplicate: boolean; readonly possible: boolean }> {
+  const slotted = { ...order, orderKey, bankKey: bankKeyOf(order.reference) };
+  const [holders = []] = await orderSlotsRead(tx, states, orgId, [slotted], lock, alsoLocked);
+  return slotsLook(holders, { orderHash: orderHashOf(orderKey), except });
+}
+
 /** A value a read above answers for what it was asked: one missing is something past the app. */
 const known = <Value>(value: Value | undefined): Value => {
   if (value === undefined) throw new MandateRefused(503, 'INTEGRITY_FAILED');
@@ -545,7 +626,10 @@ export async function weigh(
   const toWeigh = totalsToWeigh(read);
   const others = await totalsWeighed(tx, { ...toWeigh, month: null });
   return {
-    inputWith: (spent: bigint, split: bigint) => inputWith(read, { ...others, spent, split }),
+    // `claims`: the order's looks with its signed slots' (an approval's, TR-2); the claim rows' alone if not given.
+    inputWith: (spent: bigint, split: bigint, claims = others.claims) =>
+      inputWith(read, { ...others, claims, spent, split }),
+    claims: others.claims,
     totalOf: month === null ? null : { agentId: agent.id, month, currency: currencyWeighed(read) },
     split: { payee: toWeigh.payee, fromHour: toWeigh.splitFrom },
     mandate,
@@ -565,12 +649,14 @@ const TOTAL_KEYS: ReadonlySet<unknown> = new Set([
   'one_total_a_month',
   'payee_windows_pkey',
   'one_window_a_payee',
+  'order_slots_pkey',
+  'one_slot_an_order',
 ]);
 
 /**
- * A month's total or a payee window made by another while this decision read it empty (its organisation's cutover
- * committing just then, GM-1a review): ORGANISATION_BUSY, so the agent asks again and is weighed against it. Any
- * other error as it was.
+ * A month's total, a payee window or an order slot made by another while this decision read it empty (its
+ * organisation's cutover committing just then, GM-1a review): ORGANISATION_BUSY, so the agent asks again and is
+ * weighed against it. Any other error as it was.
  */
 export function totalMadeMeanwhile(error: unknown): unknown {
   const pg = error as { readonly code?: unknown; readonly constraint?: unknown } | null;
@@ -580,22 +666,35 @@ export function totalMadeMeanwhile(error: unknown): unknown {
 /**
  * What a decision weighs once its supplier is held: its month's lock and the totals on one trip, each its own
  * statement, so the totals see what its holder committed: the month's the signed total (GM-1a) and the split window
- * the payee's signed windows (GM-1b), each locked for the change a capacity held makes to it. Under no mandate, no
- * month: the claims alone, nothing held.
+ * the payee's signed windows (GM-1b), each locked for the change a capacity held makes to it; and the order's signed
+ * slots (TR-2), locked for the claim it makes, which alone say whether it duplicates or looks like an order held (a
+ * claim planted past the app still fails its insert, never pays). Under no mandate, no month: the claims alone,
+ * nothing held.
  */
-async function decisionWeighed(tx: DecisionTx, states: SignedStates, orgId: string, read: ReadToWeigh) {
+async function decisionWeighed(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  read: ReadToWeigh & { readonly orderKey: string | null },
+) {
   const toWeigh = totalsToWeigh(read);
   if (toWeigh.month === null) {
-    return { totals: { ...(await totalsWeighed(tx, toWeigh)), split: 0n }, monthTotal: null, windows: [] };
+    return { totals: { ...(await totalsWeighed(tx, toWeigh)), split: 0n }, monthTotal: null, windows: [], slots: [] };
   }
+  const slotted =
+    read.order === null || read.orderKey === null
+      ? null
+      : { ...read.order, orderKey: read.orderKey, bankKey: bankKeyOf(read.order.reference) };
+  // An order weighed from its slots reads no claim rows: its looks are the slots'.
   const weighed = await monthLockedAndTotalsWeighed(
     tx,
     states,
-    { orgId, at: read.now, payee: toWeigh.payee },
-    { ...toWeigh, month: toWeigh.month },
+    { orgId, at: read.now, payee: toWeigh.payee, slotted },
+    { ...toWeigh, month: toWeigh.month, order: slotted === null ? toWeigh.order : null },
   );
   const monthTotal = monthTotalWeighed(weighed.monthTotal);
   const windows = windowsWeighed(weighed.windows);
+  const slots = slotsWeighed(weighed.slots);
   const split =
     toWeigh.splitFrom === null
       ? 0n
@@ -603,7 +702,27 @@ async function decisionWeighed(tx: DecisionTx, states: SignedStates, orgId: stri
           windows.map(({ read: row }) => row),
           toWeigh.splitFrom,
         );
-  return { totals: { ...weighed, spent: monthTotal.spent, split }, monthTotal, windows };
+  const looks =
+    slotted === null
+      ? { duplicate: false, possible: false }
+      : slotsLook(
+          slots.map(({ key, read: slot }) => (slot.outcome === 'held' ? slot.holders : noHolders(key.kind))),
+          { orderHash: orderHashOf(slotted.orderKey), except: [] },
+        );
+  // The order weighed from its signed slots alone: the claim rows, read before the windows' and slots' waits, could
+  // still show an ending committed during them (the S157 trap), and the owner could cut them (R-15).
+  const claims = slotted === null ? weighed.claims : looks;
+  return { totals: { ...weighed, claims, spent: monthTotal.spent, split }, monthTotal, windows, slots };
+}
+
+/** A decision's order slots as read, each with what it is written from (TR-2). */
+type SlotsWeighed = Extract<DecisionSlots, { readonly outcome: 'read' }>['rows'];
+
+/** A decision's order slots as weighed: refused while any can't be believed, or before its organisation's cutover. */
+function slotsWeighed(slots: DecisionSlots): SlotsWeighed {
+  if (slots.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (slots.outcome === 'busy') throw new MandateRefused(503, 'ORGANISATION_BUSY');
+  return slots.rows;
 }
 
 /** A decision's payee windows as read, each with what it is written from (GM-1b). */
@@ -743,12 +862,12 @@ async function rowsBeforeTheSupplier(
   tx: DecisionTx,
   states: SignedStates,
   acting: AgentActing,
-  asked: SpendWeighed,
+  asked: SpendAskedByAgent,
   now: Date,
 ) {
   const { orgId, agentId } = acting;
   const {
-    ahead: [, , , currency],
+    ahead: [, , , currency, keyed],
   } = await states.gatherBehind(
     tx,
     orgId,
@@ -757,10 +876,14 @@ async function rowsBeforeTheSupplier(
       brakeShared(AGENT_BRAKE, orgId, agentId),
       brakeShared(SOURCE_BRAKE, orgId, asked.fundingSourceId),
       allowedCurrencyRead(tx, asked.amount.currency),
+      // The order's canonical form (0067), which names its slots (TR-2): the database's alone, on this trip.
+      orderKeyRead(tx, asked.orderReference),
     ],
     actingRows(acting),
   );
   if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
+  const orderKey = (keyed.rows[0] as { readonly key?: unknown } | undefined)?.key;
+  if (typeof orderKey !== 'string') throw new Error("An order's canonical form was not read");
   const { agent, keyId } = await actingIn(tx, states, acting, now);
   const found = await timedLock('decisionRowsMs', () => states.gather(tx, orgId, decisionRows(orgId, agentId, asked)));
   const mandateId = found[AT.mandate] ?? null;
@@ -769,8 +892,11 @@ async function rowsBeforeTheSupplier(
   await states.gatherHistories(tx, orgId, [
     ...(mandateId === null || versionId === null ? [] : overLimitHistories(mandateId, versionId)),
     ...(policyVersionId === null ? [] : [choicesHistory(policyVersionId)]),
+    // Under a mandate, whether its order slots are counted (TR-2): asked whenever a slot is new, as most are, so read
+    // here, on a trip made anyway, and answered from it with no trip of its own.
+    ...(mandateId === null ? [] : [orderSlotsCutOverFind(orgId)]),
   ]);
-  return { agent, keyId, mandateId };
+  return { agent, keyId, mandateId, orderKey };
 }
 
 export function createSpendRequestDecisions({
@@ -799,9 +925,10 @@ export function createSpendRequestDecisions({
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
 
   /**
-   * The request inserted with its reservation, order claim and month's total (its amount added, GM-1a), all on one
-   * trip, in this order: each needs the one before it, and a failure in one fails those behind it. What its decision
-   * seals of them, and the total's change to sign with it.
+   * The request inserted with its reservation, order claim, month's total (its amount added, GM-1a), payee windows
+   * (GM-1b) and order slots (TR-2, the request added as a holder), all on one trip, in this order: each needs the one
+   * before it, and a failure in one fails those behind it. What its decision seals of them, and their changes to sign
+   * with it.
    */
   async function capacityHeld(
     tx: DecisionTx,
@@ -811,14 +938,18 @@ export function createSpendRequestDecisions({
       mandateId,
       month,
       order,
+      orderKey,
       monthTotal,
       windows: payeeRows,
+      slots: slotRows,
     }: {
       readonly mandateId: string;
       readonly month: string;
       readonly order: NonNullable<ReadToWeigh['order']>;
+      readonly orderKey: string;
       readonly monthTotal: Extract<DecisionMonthTotal, { readonly outcome: 'held' | 'none' }>;
       readonly windows: WindowsWeighed;
+      readonly slots: SlotsWeighed;
     },
   ): Promise<{ readonly held: HeldAs; readonly alongside: readonly AlongsideChange[] }> {
     const { orgId, id: requestId, amount, createdAt: now } = request;
@@ -848,7 +979,22 @@ export function createSpendRequestDecisions({
         now,
       ),
     );
-    const changes = [total, ...windows];
+    // The request added as a holder of each of its order's slots (TR-2); a bank slot full lists it never (its look was a
+    // possible duplicate already), so it joins only the others, and seals only those.
+    const orderHash = orderHashOf(orderKey);
+    const joined = slotRows.flatMap(({ key, read }) => {
+      const added = heldBy(read.outcome === 'held' ? read.holders : noHolders(key.kind), { requestId, orderHash });
+      // Held by another, the decision was a duplicate, which holds nothing: not here.
+      if (added.outcome === 'taken') throw new Error(`An order slot held by another was claimed: ${requestId}`);
+      if (added.outcome !== 'held') return [];
+      return [{ key, read, holders: added.holders }];
+    });
+    const slots = joined.map(({ key, read, holders }) => orderSlotToSend(tx, states, orgId, key, read, holders, now));
+    const changes = [total, ...windows, ...slots];
+    const actionOf = (index: number): string => {
+      if (index === 0) return 'month_total.held';
+      return index <= windows.length ? 'payee_window.held' : 'order_slot.held';
+    };
     const [, , claimAnswer, ...changeAnswers] = await sendTogether(tx, [
       insertRequestStatement(tx, request),
       reserveStatement(tx, {
@@ -877,9 +1023,10 @@ export function createSpendRequestDecisions({
       return {
         sent,
         rows: (changeAnswers[at - 1]?.rows ?? []) as readonly Readonly<Record<string, unknown>>[],
+        // `order_slot.held` is one of the decision's own events, recorded in its one step of the chain (TR-2).
         change: {
           actor: { type: 'agent', id: request.agentId },
-          action: index === 0 ? 'month_total.held' : 'payee_window.held',
+          action: actionOf(index),
           details: { requestId: requestId.toLowerCase(), amountMinor: amount.minor.toString() },
         },
       };
@@ -890,6 +1037,7 @@ export function createSpendRequestDecisions({
         reservedAt: now,
         payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }),
         windows: payeeRows.map(({ key }) => payeeWindowId(orgId, key)),
+        slots: joined.map(({ key }) => orderSlotId(orgId, key)),
       },
       alongside,
     };
@@ -907,7 +1055,7 @@ export function createSpendRequestDecisions({
     // Read before the lock waits below (each at most 5 s), so a request can be weighed seconds past a mandate's
     // `endsAt`; the sealed instant is this one, so the evidence shows it as it was weighed.
     const now = clock.now();
-    const { agent, keyId, mandateId } = await rowsBeforeTheSupplier(tx, states, acting, asked, now);
+    const { agent, keyId, mandateId, orderKey } = await rowsBeforeTheSupplier(tx, states, acting, asked, now);
     const { mandate, ...policies } = await authorityIn(tx, states, orgId, agentId, 'inForce', { id: mandateId });
     const source = await sourceIn(tx, states, orgId, asked);
     // Under a mandate: none without one, as no month is then weighed.
@@ -922,7 +1070,7 @@ export function createSpendRequestDecisions({
     // The month named at the instant asked, however long the locks take.
     const month = zone === null ? null : periodOf(now, zone.zone).month;
     const read = { asked, now, agent, mandate, policies, source, supplier, order, month };
-    const { totals, monthTotal, windows } = await decisionWeighed(tx, states, orgId, read);
+    const { totals, monthTotal, windows, slots } = await decisionWeighed(tx, states, orgId, { ...read, orderKey });
     const input = inputWith(read, totals);
     const made = decide(input);
     const requestId = ids.next();
@@ -961,15 +1109,24 @@ export function createSpendRequestDecisions({
     let alongside: readonly AlongsideChange[] = [];
     if (holdsCapacity(made.decision)) {
       // Capacity is held only on a mandate in force, by a supplier of the organisation's (decide's checks).
-      if (mandate === null || month === null || order === null || monthTotal === null || windows.length === 0) {
+      if (
+        mandate === null ||
+        month === null ||
+        order === null ||
+        monthTotal === null ||
+        windows.length === 0 ||
+        slots.length === 0
+      ) {
         throw new Error('capacity held with nothing weighed');
       }
       ({ held, alongside } = await capacityHeld(tx, states, request, {
         mandateId: mandate.id,
         month,
         order,
+        orderKey,
         monthTotal,
         windows,
+        slots,
       }).catch((error: unknown) => {
         throw totalMadeMeanwhile(error);
       }));

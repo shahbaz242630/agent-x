@@ -22,6 +22,7 @@ import { sql, type Transaction } from 'kysely';
 import type {
   AuditTables,
   ChangeToSend,
+  HistoryToRead,
   SignedChange,
   SignedStates,
   StateCheck,
@@ -133,23 +134,32 @@ export const monthTotalsCutOver = (tx: TotalsTransaction, states: SignedStates, 
  * The month totals' (GM-1a) and the payee windows' (GM-1b), each with its own cutover.
  */
 export async function countedSince(
-  tx: TotalsTransaction,
+  tx: Transaction<AuditTables>,
   states: SignedStates,
   orgId: string,
   { subject, action, born }: { readonly subject: string; readonly action: string; readonly born: string },
 ): Promise<CutOver> {
-  const read = await states.historyOf(tx, orgId, {
-    subjectTypes: ['organization', subject],
-    subjectId: orgId,
-    actions: ['organization.created', action],
-    limit: 1,
-    newest: true,
-  });
+  const read = await states.historyOf(tx, orgId, countedFind(orgId, { subject, action }));
   if (read.outcome === 'tampered') return 'tampered';
   const [newest] = read.events;
   if (newest === undefined) return 'not_yet';
   return newest.event.action === action || newest.event.details[born] === BORN_SIGNED ? 'cut_over' : 'not_yet';
 }
+
+/**
+ * The history countedSince reads for one kind's cutover: the same find every time, so a caller may gather it ahead on a
+ * trip made anyway (gatherHistories, TR-2's decision), and countedSince then answers from it with no trip.
+ */
+export const countedFind = (
+  orgId: string,
+  { subject, action }: { readonly subject: string; readonly action: string },
+): HistoryToRead => ({
+  subjectTypes: ['organization', subject],
+  subjectId: orgId,
+  actions: ['organization.created', action],
+  limit: 1,
+  newest: true,
+});
 
 /** The fields of a new total, as it is added and sealed. */
 const newFields = (key: MonthTotalKey, held: bigint, at: Date) => ({

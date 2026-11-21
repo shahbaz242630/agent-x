@@ -35,6 +35,9 @@ import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import {
   cancelRequest,
   cutOverPayeeWindows,
+  ORDER_SLOTS,
+  SLOTS_CUTOVER_ACTION,
+  SLOTS_CUTOVER_SUBJECT,
   expireRequest,
   rejectRequest,
   requestOf,
@@ -920,19 +923,29 @@ describe('the holdings check', () => {
 });
 
 describe('an organisation made before GM-1b, until its cutover', () => {
-  /** Its windows' cutover by hand, so its decisions can be made: then taken away with the windows, as before GM-1b. */
+  /**
+   * Its windows' cutover by hand, and its order slots' after it (TR-2), so its decisions can be made: then taken away
+   * with the windows and the slots, as before GM-1b.
+   */
   const cutOverByHand = (w: World) =>
-    withSignedStates(app, w.org, quiet(), (tx) =>
-      createAuditTrail({ keys, ids }).record(tx, w.org, {
-        actor: OPERATOR,
-        action: WINDOWS_CUTOVER_ACTION,
-        subject: { type: WINDOWS_CUTOVER_SUBJECT, id: w.org, version: 1 },
-        details: {},
-      }),
-    );
+    withSignedStates(app, w.org, quiet(), async (tx) => {
+      const trail = createAuditTrail({ keys, ids });
+      for (const [action, type] of [
+        [WINDOWS_CUTOVER_ACTION, WINDOWS_CUTOVER_SUBJECT],
+        [SLOTS_CUTOVER_ACTION, SLOTS_CUTOVER_SUBJECT],
+      ] as const) {
+        await trail.record(tx, w.org, {
+          actor: OPERATOR,
+          action,
+          subject: { type, id: w.org, version: 1 },
+          details: {},
+        });
+      }
+    });
   /**
    * The organisation as one before GM-1b with capacity held: the windows its decisions filled, their events and the
-   * cutover's taken away by the owner, each request's decision sealed again as before GM-1b (no windows named).
+   * cutover's taken away by the owner, each request's decision sealed again as before GM-1b (no windows named); its
+   * order slots, their events and their cutover taken away alike, as before TR-2.
    */
   const asBeforeGm1b = async (
     w: World,
@@ -977,12 +990,16 @@ describe('an organisation made before GM-1b, until its cutover', () => {
       if (windows === 'delete windows') {
         await owner.query('delete from limit_reservations.payee_windows where org_id = $1', [w.org]);
       }
-      // The windows' own events go with them; kept windows keep theirs, signed.
-      await owner.query('delete from audit.events where org_id = $1 and (subject_type = $2 or action = $3)', [
-        w.org,
-        windows === 'delete windows' ? PAYEE_WINDOWS.subject : 'none',
-        WINDOWS_CUTOVER_ACTION,
-      ]);
+      await owner.query('delete from spend_requests.order_slots where org_id = $1', [w.org]);
+      // The windows' own events go with them; kept windows keep theirs, signed. The slots' go always.
+      await owner.query(
+        'delete from audit.events where org_id = $1 and (subject_type = any($2::text[]) or action = any($3::text[]))',
+        [
+          w.org,
+          [windows === 'delete windows' ? PAYEE_WINDOWS.subject : 'none', ORDER_SLOTS.subject],
+          [WINDOWS_CUTOVER_ACTION, SLOTS_CUTOVER_ACTION],
+        ],
+      );
       await owner.query('alter table audit.events enable trigger user');
       await owner.query('commit');
     } finally {

@@ -48,14 +48,15 @@ describe('an ended request whose signed ending kept its capacity (AT13d)', () =>
   const kept = (status: SpendRequestStatus) => ({ ...request(status), capacityKept: true });
 
   it.each(['DENIED', 'EXPIRED', 'CANCELLED'] as const)(
-    '%s: its one reservation HELD as decided, its claim released',
+    '%s: its one reservation HELD as decided, its claim open as its order slots keep it (TR-2), or released before TR-2',
     (status) => {
+      expect(holdingsMatch(kept(status), [reservation()], [OPEN])).toBe(true);
       expect(holdingsMatch(kept(status), [reservation()], [RELEASED])).toBe(true);
       expect(holdingsMatch(kept(status), [reservation()], [])).toBe(true);
     },
   );
 
-  it('anything else is a mismatch: none held, released, or not as decided; its claim open', () => {
+  it('anything else is a mismatch: none held, released, or not as decided; its open claim not its own', () => {
     const ended = kept('DENIED');
     expect(holdingsMatch(ended, [], [RELEASED])).toBe(false);
     for (const state of ['RELEASED', 'FINALISED', 'BLOCKED_UNKNOWN']) {
@@ -70,7 +71,9 @@ describe('an ended request whose signed ending kept its capacity (AT13d)', () =>
     ]) {
       expect(holdingsMatch(ended, [reservation(changed)], [RELEASED])).toBe(false);
     }
-    expect(holdingsMatch(ended, [reservation()], [OPEN])).toBe(false);
+    expect(holdingsMatch(ended, [reservation()], [{ ...OPEN, itsOwn: false }])).toBe(false);
+    expect(holdingsMatch(ended, [reservation()], [{ ...OPEN, payeeAsSealed: false }])).toBe(false);
+    expect(holdingsMatch(ended, [reservation()], [OPEN, RELEASED])).toBe(false);
     expect(holdingsMatch(ended, [reservation(), reservation()], [RELEASED])).toBe(false);
   });
 

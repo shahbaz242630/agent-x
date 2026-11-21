@@ -70,6 +70,7 @@ export {
   type Voided,
   type VoidingShown,
   voidPendingOf,
+  lockedHoldingsOf,
   lockedTotalOf,
   voidedWith,
   voidRequest,
@@ -102,18 +103,61 @@ export {
   claimsOnEach,
   lockClaimsOf,
   type OrderClaimsSeen,
+  orderKeyRead,
   type OrderOf,
   type OrderWeighed,
   releaseClaim,
 } from './infrastructure/order-claims.ts';
 export {
+  type BankEntry,
+  heldBy,
+  type Holders,
+  MOST_BANK_ENTRIES,
+  noHolders,
+  SLOT_KINDS,
+  type SlotKind,
+  slotsLook,
+} from './domain/order-slots.ts';
+export {
+  checkOrderSlots,
+  keyHashOf,
+  MOST_SLOTS_CHECKED_A_PAGE,
+  ORDER_SLOTS,
+  type OrderSlotCheck,
+  orderHashOf,
+  orderSlotId,
+  type OrderSlotKey,
+  orderSlotKeys,
+  orderSlotOf,
+  orderSlotOrder,
+  orderSlotsCutOver,
+  orderSlotsCutOverFind,
+  orderSlotsOf,
+  orderSlotToSend,
+  type OrderToSlot,
+  recordOrderSlot,
+  SLOTS_CUTOVER_ACTION,
+  SLOTS_CUTOVER_SUBJECT,
+  SLOTS_NAMED_ACTION,
+  SLOTS_NAMED_SUBJECT,
+  type SlotsChecked,
+  heldSlotsLetGo,
+  slotsLetGo,
+  slotsMissing,
+  type SlotTake,
+  slotTakesOf,
+  type SlotToWrite,
+} from './infrastructure/order-slots.ts';
+export {
   type DecisionMonthTotal,
+  type DecisionSlots,
   type DecisionWindows,
   monthLockedAndTotalsWeighed,
   totalsWeighed,
 } from './infrastructure/weighed-totals.ts';
 export { type CutoverDone, cutOverMonthTotals } from './infrastructure/month-totals-cutover.ts';
 export { cutOverPayeeWindows, type WindowsCutoverDone } from './infrastructure/payee-windows-cutover.ts';
+export { cutOverOrderSlots, type SlotsCutoverDone } from './infrastructure/order-slots-cutover.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { requestDueNow, SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';

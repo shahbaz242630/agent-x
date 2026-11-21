@@ -123,3 +123,4 @@ export {
   type VersionsToVerify,
   versionsToVerify,
 } from './infrastructure/verifying.ts';
+export { type PayeeKeysKnown, payeeKeysKnown } from './infrastructure/payee-keys-known.ts';

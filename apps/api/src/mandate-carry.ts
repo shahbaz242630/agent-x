@@ -28,7 +28,7 @@
 // read once, each set in one statement where it can be: the draft and the
 // policies; the sources and suppliers, one read each; the months' signed
 // totals, the payees' signed split windows (GM-1b) in one pass in order of ID,
-// the order claims in one.
+// the order claims in one, the orders' signed slots (TR-2) in one pass.
 // Each request is then weighed in memory by the engine, through the same
 // input a decision builds (inputOf). Only its own signed state is read alone:
 // at the confirm it is locked for the change it is about to make, as a
@@ -66,10 +66,12 @@ import {
   type HeldSealed,
   isPending,
   type OrderClaimsSeen,
+  orderHashOf,
   PENDING_STATUSES,
   requestOf,
   requestsOf,
   settleCarried,
+  slotsLook,
   SPEND_REQUESTS,
   type SpendRequestRecord,
   type SpendRequestStatus,
@@ -88,6 +90,7 @@ import {
   inputOf,
   monthSpentWeighed,
   type MandateWeighed,
+  orderSlotsRead,
   payeeText,
   payeeWindowsRead,
   type PoliciesWeighed,
@@ -265,6 +268,8 @@ export interface HeldAuthority {
   readonly held: ReadonlyMap<string, HeldSealed>;
   /** When each request's decision was sealed, and the wait it sealed: a waiting one's runs from it (E4b, E6). */
   readonly clocks: ReadonlyMap<string, ApprovalClock>;
+  /** The order slots each request holds, as its decision sealed them or the slots' cutover named them (TR-2). */
+  readonly slots: ReadonlyMap<string, readonly string[]>;
 }
 
 /** Levels 5–7 under the mandate read at 4, each read once for every request. */
@@ -293,8 +298,9 @@ export async function heldAuthority(
   const decisions = await decisionsOf(tx, states, orgId, ids);
   const held = new Map(ids.map((id) => [id, known(decisions.get(id.toLowerCase())?.held)]));
   const clocks = new Map(ids.map((id) => [id, known(decisions.get(id.toLowerCase()))]));
+  const slots = new Map(ids.map((id) => [id, decisions.get(id.toLowerCase())?.slots ?? []]));
   if (decides) for (const month of monthsOf(held)) await lockAgentPeriod(tx, { agentId, month });
-  return { mandate, sources, suppliers, held, clocks };
+  return { mandate, sources, suppliers, held, clocks, slots };
 }
 
 /**
@@ -366,7 +372,7 @@ export async function outsideOf(
   tx: CarryTx,
   states: SignedStates,
   { orgId, agentId, now, decides }: WeighScope,
-  { mandate, suppliers, held }: HeldAuthority,
+  { mandate, suppliers, held, slots }: HeldAuthority,
   requests: readonly SpendRequestRecord[],
   leftOut: readonly string[] = requests.map(({ id }) => id),
 ): Promise<HeldOutside> {
@@ -409,7 +415,7 @@ export async function outsideOf(
     lock: decides ? 'change' : 'share',
     alsoLocked: ownLocked.map(({ id }) => id),
   });
-  const orders = await claimsOnEach(
+  const claimed = await claimsOnEach(
     tx,
     requests.map((request) => ({
       supplierId: request.supplierId,
@@ -419,6 +425,30 @@ export async function outsideOf(
     })),
     inPlan,
   );
+  // Then their orders' signed slots (11c, TR-2), after every window, in one pass in order of ID: at a confirm with the
+  // slots the requests weighed hold, which their cancels let go of. Each order named by its canonical form as the claims'
+  // read worked it out (its looks at the claim rows themselves no longer weighed); the plan's own holds left out.
+  const holders = await orderSlotsRead(
+    tx,
+    states,
+    orgId,
+    requests.map((request, at) => ({
+      supplierId: request.supplierId,
+      payeeKey: known(suppliers.get(request.supplierId)).payeeKey,
+      orderKey: known(claimed[at]).key,
+      bankKey: known(claimed[at]).bankKey,
+    })),
+    decides ? 'change' : 'share',
+    decides ? requests.flatMap(({ id }) => slots.get(id) ?? []) : [],
+  );
+  const orders = claimed.map((seen, at) => {
+    const looks = slotsLook(known(holders[at]), {
+      orderHash: orderHashOf(seen.key),
+      except: [...inPlan, known(requests[at]).id],
+    });
+    // Weighed from the signed slots alone, never the claim rows the owner could cut (R-15).
+    return { ...seen, ...looks };
+  });
   return { spent, split, fromHour, orders };
 }
 

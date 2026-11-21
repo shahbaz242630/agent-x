@@ -95,6 +95,19 @@ export interface World {
 
 export const AED = (minor: bigint) => money(minor, 'AED');
 
+/** What an organisation made before one of GM-1a, GM-1b and TR-2 was born counting, as its `organization.created` said. */
+const bornCounting = ({
+  madeBeforeMonthTotals,
+  madeBeforePayeeWindows,
+}: {
+  readonly madeBeforeMonthTotals: boolean;
+  readonly madeBeforePayeeWindows: boolean;
+}): Record<string, string> => {
+  if (madeBeforeMonthTotals) return {};
+  if (madeBeforePayeeWindows) return { monthTotals: 'signed' };
+  return { monthTotals: 'signed', payeeWindows: 'signed' };
+};
+
 export const refused = (status: number, code: string) => ({ outcome: 'refused', status, code });
 
 /** The step-up an ask answered with. */
@@ -199,6 +212,7 @@ export function mandateWorld({
     orgName = 'Acme Trading LLC',
     madeBeforeMonthTotals = false,
     madeBeforePayeeWindows = false,
+    madeBeforeOrderSlots = false,
   }: {
     readonly capChosen?: boolean;
     readonly suppliers?: number;
@@ -209,11 +223,13 @@ export function mandateWorld({
     readonly madeBeforeMonthTotals?: boolean;
     /** Made as one was between GM-1a and GM-1b: born counting month totals, its payee windows waiting for their cutover. */
     readonly madeBeforePayeeWindows?: boolean;
+    /** Made as one was between GM-1b and TR-2: born counting totals and windows, its order slots waiting for their cutover. */
+    readonly madeBeforeOrderSlots?: boolean;
   } = {}): Promise<World> {
     const now = clock().now();
     const org = ids.next();
     await withSignedStates(app(), org, quiet(), async (tx, states) => {
-      if (!madeBeforeMonthTotals && !madeBeforePayeeWindows)
+      if (!madeBeforeMonthTotals && !madeBeforePayeeWindows && !madeBeforeOrderSlots)
         return createOrganization(tx, states, { id: org, name: orgName, actor: OPERATOR });
       await registerOrganization(tx, org);
       await tx
@@ -229,7 +245,7 @@ export function mandateWorld({
         {
           actor: OPERATOR,
           action: 'organization.created',
-          details: madeBeforeMonthTotals ? {} : { monthTotals: 'signed' },
+          details: bornCounting({ madeBeforeMonthTotals, madeBeforePayeeWindows }),
         },
       );
       await states.startIntegrityHold(tx, org, OPERATOR);
