@@ -10,7 +10,8 @@
 // it would lock everyone else behind the same address (an office, a carrier's
 // NAT) out for ten minutes; instead the network's oldest unfinished sign-ins
 // give way to the new one, so a flood must go on without pause to push others
-// out, which the per-address rate limit bounds. A flow that gave way is gone:
+// out, which the per-address rate limit slows (per /64 for IPv6, while the
+// share counts a /48). A flow that gave way is gone:
 // its callback finds no flow, a plain refusal to start again. Every network's
 // together are held too, but never as a lockout (the review of S206 V8): once MOST_OPEN_SIGN_INS
 // are under way, a network holding fewer than QUIET_NETWORK_SIGN_INS is still
