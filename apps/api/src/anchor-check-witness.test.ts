@@ -47,9 +47,17 @@ interface Answering {
   readonly stepped?: (cursor: CheckedPoint, target: CheckedPoint, watch?: WatchedPlaces) => ChainStep;
   readonly answers?: Readonly<Record<string, ProbeAnswer>>;
   readonly probeFails?: boolean;
+  /** The platform chain's probe between runs (TR-3): none, the run checks no platform chain. */
+  readonly platformProbe?: (heldTo: readonly { seq: bigint }[]) => Promise<{ seq: bigint; hash: Buffer } | undefined>;
 }
 
-function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false, stepped }: Answering = {}) {
+function withWitness({
+  verified = () => ok(1n),
+  answers = {},
+  probeFails = false,
+  stepped,
+  platformProbe,
+}: Answering = {}) {
   const steps: string[] = [];
   const asked: { orgId: string; from: bigint; heldTo: bigint[] }[] = [];
   const pending = new Map<string, ReturnType<typeof witnessed>[]>();
@@ -59,6 +67,9 @@ function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false
   const lost = new Set<string>();
   // The heads each chain let go for memory, lowest and highest: a walk from below the one to the other sets it aside.
   const marks = new Map<string, { readonly low: bigint; readonly high: bigint }>();
+  // Each chain's fingerprints of heads let go (TR-3), and the fingerprints each walkedPast was told were asked.
+  const prints = new Map<string, { seq: bigint; hash: Buffer }[]>();
+  const toldAsked: bigint[][] = [];
   const clock = new FixedClock(AT);
   const nameOf = (chain: Chain) => (chain.kind === 'platform' ? 'platform' : chain.orgId);
   const organizations: OrganisationChains = {
@@ -92,7 +103,10 @@ function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false
   const capture = new LogCapture();
   const anchors = createMemoryAnchorStore();
   const check = createAnchorCheck({
-    chains: [],
+    chains:
+      platformProbe === undefined
+        ? []
+        : [{ chain: { kind: 'platform' }, verify: () => Promise.resolve(ok(1n)), probe: platformProbe }],
     organizations,
     keys,
     clock,
@@ -114,11 +128,14 @@ function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false
       // A read that began with the run, or one from before it (stale).
       freshAt: () => (reads.fresh ? clock.now() : new Date(AT.getTime() - 1)),
       beyondMemory: (chain) => lost.has(nameOf(chain)),
-      walkedPast: (chain, from, to) => {
+      walkedPast: (chain, from, to, askedOf) => {
+        toldAsked.push(askedOf.map(({ seq }) => seq));
         const mark = marks.get(nameOf(chain));
-        if (mark !== undefined && from < mark.low && to >= mark.high) lost.delete(nameOf(chain));
+        const all = (prints.get(nameOf(chain)) ?? []).every((print) => askedOf.some(({ seq }) => seq === print.seq));
+        if (mark !== undefined && all && from < mark.low && to >= mark.high) lost.delete(nameOf(chain));
         return lost.has(nameOf(chain));
       },
+      fingerprints: (chain) => (lost.has(nameOf(chain)) ? (prints.get(nameOf(chain)) ?? []) : []),
     },
   });
   const alarms = () =>
@@ -126,7 +143,23 @@ function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false
       .lines()
       .filter((line) => line.event === 'audit.integrity_failed')
       .map(({ check: what, reason, seq }) => ({ what, reason, seq }));
-  return { check, steps, asked, pending, pruned, walkedWith, reads, lost, marks, clock, anchors, alarms, capture };
+  return {
+    check,
+    steps,
+    asked,
+    pending,
+    pruned,
+    walkedWith,
+    reads,
+    lost,
+    marks,
+    prints,
+    toldAsked,
+    clock,
+    anchors,
+    alarms,
+    capture,
+  };
 }
 
 describe('TR-1 the anchor check held to the witness log', () => {
@@ -251,6 +284,57 @@ describe('TR-1 the anchor check held to the witness log', () => {
     await run.check.run();
     expect(run.anchors.latest({ kind: 'organisation', orgId: ORG })?.seq).toBe(9n);
     expect(run.lost.has(ORG)).toBe(false);
+  });
+
+  it('TR-3: the walk is held to the fingerprints of heads let go as to heads, and told them, so the mark goes only with them all', async () => {
+    const run = withWitness({ verified: (orgId) => ok(orgId === ORG ? 9n : 1n) });
+    run.lost.add(ORG);
+    run.marks.set(ORG, { low: 3n, high: 6n });
+    run.prints.set(ORG, [
+      { seq: 3n, hash: Buffer.alloc(8, 3) },
+      { seq: 6n, hash: Buffer.alloc(8, 6) },
+    ]);
+    run.pending.set(ORG, [witnessed(8n)]);
+    await run.check.run();
+    expect(run.walkedWith[0]).toEqual([8n, 3n, 6n]);
+    expect(run.toldAsked[0]).toEqual([8n, 3n, 6n]);
+    expect(run.anchors.latest({ kind: 'organisation', orgId: ORG })?.seq).toBe(9n);
+    expect(run.lost.has(ORG)).toBe(false);
+  });
+
+  it('TR-3: the platform chain is probed between runs too: on the chain, all but its highest head let go; cut below one, the alarm; a miss, a warning', async () => {
+    let answer: { seq: bigint; hash: Buffer } | undefined | 'fails';
+    const probed: bigint[][] = [];
+    const run = withWitness({
+      platformProbe: (heldTo) => {
+        probed.push(heldTo.map(({ seq }) => seq));
+        return answer === 'fails' ? Promise.reject(new Error('database away')) : Promise.resolve(answer);
+      },
+    });
+    // Nothing witnessed on it: not asked.
+    await run.check.probeWitnessed([]);
+    expect(probed).toEqual([]);
+    run.pending.set('platform', [witnessed(9n), witnessed(4n)]);
+    await run.check.probeWitnessed([]);
+    expect(probed).toEqual([[9n, 4n]]);
+    expect(run.pruned).toEqual([['platform', [4n]]]);
+    answer = witnessed(9n);
+    await run.check.probeWitnessed([]);
+    expect(run.capture.lines()).toContainEqual(
+      expect.objectContaining({
+        event: 'audit.integrity_failed',
+        chain: 'platform',
+        check: 'witness',
+        reason: 'cut_back',
+        seq: '9',
+      }),
+    );
+    expect(run.pruned).toHaveLength(1);
+    answer = 'fails';
+    await run.check.probeWitnessed([]);
+    expect(run.capture.lines()).toContainEqual(
+      expect.objectContaining({ level: 'warn', event: 'audit.anchor_check_failed', chain: 'platform', check: 'probe' }),
+    );
   });
 
   it('TR-3: after a refresh, a probe that finds every head held on the chain lets go all but the highest; a failed or missed one, none', async () => {

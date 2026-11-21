@@ -149,7 +149,8 @@
 // Between runs (TR-3), the leader's probe after each read of the log (the chains that gained a head, and those holding
 // most) lets go every head it found on the chain but the highest, which stands for those below it: so a burst never
 // fills what the log may hold. A chain that let heads go for memory anyway anchors again once a walk held to every head
-// still held runs from below the lowest let go to at or past the highest (the log's walkedPast), with no rebase.
+// still held and to the fingerprints of those let go (each its place and its hash's first 8 bytes, checked as a head's)
+// runs from below the lowest let go to at or past the highest (the log's walkedPast), with no rebase.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type Anchor,
@@ -285,6 +286,11 @@ export interface CheckedChain {
    * on it. None, and such a head is never confirmed.
    */
   readonly confirm?: (cursor: CheckedPoint, target: CheckedPoint, watch?: WatchedPlaces) => Promise<ChainStep>;
+  /**
+   * The chain's head read against the heads copies witnessed, in one statement (TR-3: the platform chain's probe between
+   * runs): the one it was cut back below, or none. None given, it waits for the run.
+   */
+  readonly probe?: (heldTo: readonly Witnessed[]) => Promise<Witnessed | undefined>;
 }
 
 /** What the probe found of one organisation's chain against its anchor, or that its read failed (the trail's probeHeads). */
@@ -400,7 +406,7 @@ export interface AnchorCheckOptions {
   /** The witness log (TR-1): the heads each probe and walk is held to, let go once confirmed. None, held to none. */
   readonly witness?:
     | (Pick<WitnessLog, 'pending' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> &
-        Partial<Pick<WitnessLog, 'walkedPast'>>)
+        Partial<Pick<WitnessLog, 'walkedPast' | 'fingerprints'>>)
     | undefined;
 }
 
@@ -493,6 +499,7 @@ const PROBE = 'probe';
 
 /** The in-flight key of the probe after a refresh of the witness log (TR-1): one at a time. */
 const WITNESS_PROBE = 'witness_probe';
+const PLATFORM_WITNESS_PROBE = 'witness_probe|platform';
 
 /** A chain the run's probe answered for, and the anchor it was compared with. */
 interface Probed {
@@ -843,9 +850,10 @@ export function createAnchorCheck({
     const from = report.walkedFrom ?? last?.seq ?? 0n;
     const askedOf = (head: Witnessed) => asked.some(({ seq, hash }) => seq === head.seq && hash.equals(head.hash));
     if (witness.pending(chain).some((head) => head.seq <= report.seq && !askedOf(head))) return undefined;
-    // Heads let go for memory (TR-3): a walk held to every head still held, from below the lowest of them to at or past
-    // the highest, passed every place they held; else the chain waits for one that does (or a rebase), said.
-    if (witness.beyondMemory(chain) && witness.walkedPast?.(chain, from, report.seq) !== false) {
+    // Heads let go for memory (TR-3): a walk held to every head still held and every fingerprint of those let go, from
+    // below the lowest of them to at or past the highest, found each place holding the event it did; else the chain
+    // waits for one that does (or a rebase), said. A place holding another was this walk's `cut_back` already.
+    if (witness.beyondMemory(chain) && witness.walkedPast?.(chain, from, report.seq, asked) !== false) {
       log.error('audit.witness_beyond_memory', { chain: chain.kind, anchoring: false });
       return undefined;
     }
@@ -1107,7 +1115,8 @@ export function createAnchorCheck({
       const walkBegan = clock.now();
       // The heads it is held to, asked before its first statement (TR-1): each committed before it began. Its last
       // events' hashes kept, for a head landing after it anchors.
-      const heldTo = witness?.pending(chain) ?? [];
+      // With the fingerprints of heads let go for memory (TR-3): a place holding another event is a fork, as at a head.
+      const heldTo = [...(witness?.pending(chain) ?? []), ...(witness?.fingerprints?.(chain) ?? [])];
       const recent: RecentPlaces = { since: new Date(walkBegan.getTime() - RECENT_MS), found: new Map() };
       const checking = Promise.resolve()
         .then(() => (witness === undefined ? verify(last) : verify(last, heldTo, recent)))
@@ -1298,6 +1307,7 @@ export function createAnchorCheck({
    * start, as only the heads are judged. One cut back below a head is the alarm and the hold; the rest wait for the run.
    */
   const probeWitnessedNow = async (orgIds: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
+    await probeChainsWitnessed(signal);
     const probe = organizations?.probe?.bind(organizations);
     if (organizations === undefined || probe === undefined || inFlight.has(PROBE) || storeUnread()) return;
     const asked = orgIds.flatMap((orgId) => {
@@ -1324,6 +1334,34 @@ export function createAnchorCheck({
       if (answer.problem.reason !== 'cut_back') continue;
       alarmed(chain, logger.child({ orgId }), 'cut_back', answer.problem.seq);
       await settle(organizations, orgId, signal);
+    }
+  };
+
+  /**
+   * The chains the check covers that can be probed (the platform's: TR-3), each against the heads copies witnessed, after
+   * every read of the log as the organisations that gained one are: a cut below one is the alarm, as in a run; all on the
+   * chain, all but the highest let go. A miss is a warning: the run asks the same.
+   */
+  const probeChainsWitnessed = async (signal: AbortSignal | undefined): Promise<void> => {
+    for (const { chain, probe } of chains) {
+      const heldTo = heldToOf(chain);
+      if (probe === undefined || heldTo.length === 0 || inFlight.has(PLATFORM_WITNESS_PROBE) || storeUnread(chain)) {
+        continue;
+      }
+      try {
+        const cut = await tracked(
+          PLATFORM_WITNESS_PROBE,
+          'the last witness probe has not finished',
+          () => probe(heldTo),
+          signal,
+        );
+        if (cut === undefined) letGoBelowHighest(chain, heldTo);
+        else alarmed(chain, logger, 'cut_back', cut.seq);
+      } catch (error) {
+        if (!(error instanceof Stopped)) {
+          logger.warn('audit.anchor_check_failed', { chain: chain.kind, check: 'probe', chains: 1, err: error });
+        }
+      }
     }
   };
 
