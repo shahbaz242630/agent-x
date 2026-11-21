@@ -1153,6 +1153,30 @@ describe('AT13h: the chain cut back below a write this process committed, before
     expect(alarms()).toEqual([]);
   });
 
+  it('events recorded together raise the head to the last of them, the one the chain moved to', async () => {
+    const id = await newAgent();
+    const before = await headNow();
+    const stepped = (step: number) => ({
+      actor: { type: 'user' as const, id: USER },
+      action: 'probe.stepped',
+      subject: { type: 'probe', id: USER, version: step },
+      details: { step },
+    });
+    await withTenant(app, org, (tx) =>
+      createAuditTrail({ keys, ids: new SequentialIds(0xc00), digest }).recordAllAlong(
+        tx,
+        org,
+        [stepped(1), stepped(2), stepped(3)],
+        (_, gate) => sql`select 1 as one where ${gate}`,
+      ),
+    );
+    const written = await headNow();
+    expect(written.seq).toBe(before.seq + 3n);
+    expect(seenNow()).toEqual(written);
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
   it('a write whose transaction rolls back is never raised', async () => {
     const id = await newAgent();
     expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });

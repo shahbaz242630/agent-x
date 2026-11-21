@@ -28,11 +28,12 @@
 // **Its head is held to the highest this process has seen (AT13h).** As an
 // organisation's chain is (audit-trail.ts, AT13f): the newest events not yet
 // anchored deleted, and an earlier sealed head put back, leave every seal true and
-// a session's sign-out reading as never signed. So the reads that judge a session
-// (sessions.ts) read the head, and the hash of the event at the seen place, in
-// their own statement (platformHeadRead), and a head below it, or another event
-// there, is the chain cut back (platformCutBack): that session is refused, with
-// the alarm. Raised by those reads, from a transaction that hasn't gone to record
+// a session's sign-out (or the hand-off pause) reading as never signed. So the
+// reads that judge a session (sessions.ts) and the pause (handoff-pause.ts) read
+// the head, and the hash of the event at the seen place, in their own statement
+// (platformHeadRead), and a head below it, or another event there, is the chain
+// cut back (platformCutBack): that session is refused, the pause read as
+// tampered (paused), with the alarm. Raised by those reads, from a transaction that hasn't gone to record
 // here, and by each event recorded here once its transaction commits, unless
 // anything that could undo part of it was sent after (afterCommit). Kept in the
 // signed states' digest (statesDigest), in memory: no trip and no file.

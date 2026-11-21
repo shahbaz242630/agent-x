@@ -504,3 +504,80 @@ describe('AT13c the pause held to the signed states’ digest (R-15)', () => {
     expect(await pauseNow('share', digest)).toMatchObject({ pause: { outcome: 'paused' }, lines: [] });
   });
 });
+
+describe('AT13h the pause cut off with the platform chain’s end, above the anchor (R-15)', () => {
+  /** The signed states' digest as a process keeps one: here its heads alone matter, no walk recorded. */
+  const newDigest = async (): Promise<DigestLog> => {
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: () => new Date('2026-11-21T09:00:00.000Z'),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    await digest.read();
+    return digest;
+  };
+
+  /** The head row as stored, to put back. */
+  const headRow = async () =>
+    (
+      await database
+        .as('owner')
+        .query<{ seq: string; hash: Buffer; mac: Buffer; mac_key_version: number }>(
+          'select seq, hash, mac, mac_key_version from platform_controls.audit_head',
+        )
+    )[0];
+
+  /**
+   * Resumed, read (the head seen there), then paused and read again: the owner cuts the pause off with the chain's end,
+   * puts back the head from before it and points the row at the resume. Every seal left true, and no walk read either.
+   */
+  async function cutOff(digest: DigestLog) {
+    await change(false);
+    expect(await pauseNow('share', digest)).toMatchObject({ pause: { outcome: 'running' }, lines: [] });
+    const before = await headRow();
+    await change(true);
+    expect(await pauseNow('share', digest)).toMatchObject({ pause: { outcome: 'paused' }, lines: [] });
+    const [resumed, paused] = await pauseEvents();
+    if (before === undefined || resumed === undefined || paused === undefined) throw new Error('two moves');
+    await tamper('delete from platform_controls.operator_signatures where seq > $1', [before.seq]);
+    await tamper('delete from platform_controls.audit_events where seq > $1', [before.seq]);
+    await tamper('update platform_controls.audit_head set seq = $1, hash = $2, mac = $3, mac_key_version = $4', [
+      before.seq,
+      before.hash,
+      before.mac,
+      before.mac_key_version,
+    ]);
+    await tamper('update platform_controls.handoff_pause set paused = false, event_seq = $1, event_id = $2', [
+      resumed.seq,
+      resumed.id,
+    ]);
+    return { seen: paused.seq };
+  }
+
+  it('the positive control: held to places alone, the pause cut off reads running', async () => {
+    const digest = await newDigest();
+    await cutOff(digest);
+    const placesOnly = { latest: digest.latest.bind(digest) } as unknown as DigestLog;
+    expect(await pauseNow('share', placesOnly)).toMatchObject({ pause: { outcome: 'running' }, lines: [] });
+  });
+
+  it('held to the head seen: tampered, read as paused, the alarm at the head seen', async () => {
+    const digest = await newDigest();
+    const { seen } = await cutOff(digest);
+    const { pause, lines } = await pauseNow('share', digest);
+    expect(pause).toEqual({ outcome: 'tampered' });
+    expect(lines).toEqual([expect.objectContaining({ ...ALARM, reason: 'cut_back', seq: seen })]);
+  });
+
+  it('moved honestly, read between each move: as ever, no alarm', async () => {
+    const digest = await newDigest();
+    await change(false);
+    expect(await pauseNow('share', digest)).toMatchObject({ pause: { outcome: 'running' }, lines: [] });
+    await change(true);
+    expect(await pauseNow('share', digest)).toMatchObject({ pause: { outcome: 'paused' }, lines: [] });
+    expect(await pauseNow('change', digest)).toMatchObject({ pause: { outcome: 'paused' }, lines: [] });
+  });
+});
