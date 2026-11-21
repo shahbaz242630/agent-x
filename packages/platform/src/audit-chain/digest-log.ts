@@ -1155,6 +1155,27 @@ export function createDigestLog({
     if (newest !== undefined) deltasFrom = Math.max(deltasFrom ?? newest, newest);
   };
 
+  /** A first read: the newest sound snapshot, then the deltas from just before it. */
+  const readFromSnapshot = async (from: WriteOnceStore): Promise<void> => {
+    const snapshot = await readSnapshot(from);
+    if (snapshot !== undefined) lastSnapshotAt = snapshot;
+    await readDeltas(from, snapshot === undefined ? undefined : snapshot - LAG_MS);
+    // Read whole from the snapshot on: the next read looks back from there even where no delta came after it, never
+    // the whole epoch's deltas again.
+    if (snapshot !== undefined) deltasFrom = Math.max(deltasFrom ?? snapshot, snapshot);
+    state = 'read';
+  };
+
+  /** Names older than any later look back reaches need no remembering. */
+  const namesPastForgotten = (): void => {
+    const keepFrom = (deltasFrom ?? 0) - 2 * LAG_MS;
+    for (const name of namesRead) {
+      if (timeOfName(name.slice(folder('deltas').length, folder('deltas').length + 13)) < keepFrom) {
+        namesRead.delete(name);
+      }
+    }
+  };
+
   // Read whether or not this process leads: a copy following reads what the leader writes, as a web copy does (TR-1 A).
   const readOnce = async (): Promise<void> => {
     if (store === undefined) return;
@@ -1162,24 +1183,9 @@ export function createDigestLog({
     readWhileWriting = false;
     const writingAtStart = writing();
     try {
-      if (state === 'read') {
-        await readDeltas(store, deltasFrom === undefined ? undefined : deltasFrom - LAG_MS);
-      } else {
-        const snapshot = await readSnapshot(store);
-        if (snapshot !== undefined) lastSnapshotAt = snapshot;
-        await readDeltas(store, snapshot === undefined ? undefined : snapshot - LAG_MS);
-        // Read whole from the snapshot on: the next read looks back from there even where no delta came after it, never
-        // the whole epoch's deltas again.
-        if (snapshot !== undefined) deltasFrom = Math.max(deltasFrom ?? snapshot, snapshot);
-        state = 'read';
-      }
-      // Names older than any later look back reaches need no remembering.
-      const keepFrom = (deltasFrom ?? 0) - 2 * LAG_MS;
-      for (const name of namesRead) {
-        if (timeOfName(name.slice(folder('deltas').length, folder('deltas').length + 13)) < keepFrom) {
-          namesRead.delete(name);
-        }
-      }
+      if (state === 'read') await readDeltas(store, deltasFrom === undefined ? undefined : deltasFrom - LAG_MS);
+      else await readFromSnapshot(store);
+      namesPastForgotten();
       readFailingSince = undefined;
       readWhileWriting = writingAtStart && writing();
       // What it took in may be past the horizon already: let go before memory is judged, so nothing gives way for it.
