@@ -49,9 +49,15 @@ import {
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import {
   checkHoldings,
+  checkOrderSlots,
   cutOverMonthTotals,
+  cutOverOrderSlots,
   cutOverPayeeWindows,
   MOST_CHECKED_A_PAGE,
+  MOST_SLOTS_CHECKED_A_PAGE,
+  orderSlotsCutOver,
+  type SlotsChecked,
+  slotsMissing,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
@@ -131,7 +137,7 @@ export function createHoldingsCheck({
   const progress = new Map<string, string>();
   /** When this process's first run started, which it does once it holds the jobs' lease (job-list.ts). */
   let firstRunAt: number | undefined;
-  /** Whether the hold-off has been waited out whole: once, for the month totals' and the payee windows' cutovers alike. */
+  /** Whether the hold-off has been waited out whole: once, for the month totals', payee windows' and slots' cutovers alike. */
   let heldOff = false;
   /** Waits until CUTOVER_HOLD_OFF_MS has passed since the first run started: at once after that. */
   const cutoverHeldOff = async (signal: AbortSignal | undefined): Promise<void> => {
@@ -213,6 +219,62 @@ export function createHoldingsCheck({
   };
 
   /**
+   * The organisation cut over to signed order slots, if it isn't yet (TR-2), once its payee windows are: its own
+   * transaction, after theirs, before its pages. The same hold-off, waited once. A failure is logged and left for the
+   * next run, its decisions refused busy meanwhile.
+   */
+  const cutOverSlotsIn = async (orgId: string, log: Logger, signal: AbortSignal | undefined): Promise<void> => {
+    const stopped = (): boolean => signal?.aborted === true;
+    try {
+      const now = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        orderSlotsCutOver(tx, states, orgId),
+      );
+      if (now === 'cut_over' || stopped()) return;
+      await cutoverHeldOff(signal);
+      if (stopped()) return;
+      const trail = createAuditTrail({ keys, ids });
+      const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        cutOverOrderSlots(tx, states, orgId, {
+          keys,
+          payments: paymentHoldsOf,
+          record: (event) => trail.record(tx, orgId, event),
+          at: clock.now(),
+        }),
+      );
+      if (done.outcome === 'cut_over')
+        log.info('order_slots.cut_over', { opened: done.opened, mismatched: done.mismatched });
+      if (done.outcome === 'tampered') log.warn('order_slots.cutover_held', {});
+    } catch (error) {
+      log.error('order_slots.cutover_failed', { err: error });
+    }
+  };
+
+  /**
+   * The organisation's order slots held to their claims (TR-2), a page a transaction, after its payee windows: each
+   * slot's mismatch alarmed; then any claim of the last month with no slot at all. Counts what it checked.
+   */
+  const checkSlotsIn = async (orgId: string, log: Logger) => {
+    let after: string | null = null;
+    let slots = 0;
+    let mismatched = 0;
+    let tampered = 0;
+    do {
+      const from: string | null = after;
+      const checked: SlotsChecked = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        checkOrderSlots(tx, states, orgId, { after: from, limit: MOST_SLOTS_CHECKED_A_PAGE }),
+      );
+      slots += checked.slots;
+      mismatched += checked.mismatched;
+      tampered += checked.tampered;
+      after = checked.next;
+    } while (after !== null);
+    const missing = await withSignedStates(database, orgId, services(log), (tx, states) =>
+      slotsMissing(tx, states, orgId, clock.now()),
+    );
+    return { slots, slotsMismatched: mismatched, slotsTampered: tampered, slotsMissing: missing };
+  };
+
+  /**
    * The organisation's payee windows held to their reservations (GM-1b), a page a transaction, after its month
    * totals: each window's mismatch alarmed. Counts what it checked.
    */
@@ -270,6 +332,7 @@ export function createHoldingsCheck({
     if (progress.get(orgId) === undefined) {
       await cutOverIn(orgId, log, signal);
       await cutOverWindowsIn(orgId, log, signal);
+      await cutOverSlotsIn(orgId, log, signal);
     }
     let requests = 0;
     let mismatched = 0;
@@ -288,8 +351,9 @@ export function createHoldingsCheck({
           progress.delete(orgId);
           const totals = await checkTotalsIn(orgId, log);
           const windows = await checkWindowsIn(orgId, log);
+          const slots = await checkSlotsIn(orgId, log);
           done(orgId);
-          log.info('holdings_check.passed', { requests, mismatched, tampered, ...totals, ...windows });
+          log.info('holdings_check.passed', { requests, mismatched, tampered, ...totals, ...windows, ...slots });
           return true;
         }
         progress.set(orgId, checked.next);

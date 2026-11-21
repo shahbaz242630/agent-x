@@ -14,8 +14,10 @@
 // and order claim locked (11); its month's signed total read for change (11a,
 // GM-1a: a brake's batch locks each of its totals once, in order of ID);
 // its payee's windows read for change (11b, GM-1b: the windows its decision
-// sealed, each once, in order of ID); then the move, signed, which takes the
-// audit head (12); then its amount given back to the total and the windows,
+// sealed, each once, in order of ID); its order's slots read for change (11c,
+// TR-2: the slots its decision sealed, or its cutover named, in order of ID);
+// then the move, signed, which takes the audit head (12); then its amount
+// given back to the total and the windows, its order let go of in its slots,
 // and the reservation and claim released, which
 // 0040's `held_for_its_request` and 0039's `claim_guard` allow only once the
 // request has ended. So no lock is taken after the head's.
@@ -69,6 +71,7 @@ import { APPROVAL_HORIZON_MS, type AuthorityNow, isPending, PENDING_STATUSES, vo
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
 import { type Decided, decisionOf, decisionsOf, NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
+import { type OrderSlotCheck, orderSlotsOf, type SlotTake, slotsLetGo, slotTakesOf } from './order-slots.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
@@ -464,7 +467,8 @@ export async function voidPendingOf(
   // whose requests share totals take them alike, never crosswise.
   // Those past what the digest remembers keep their capacity (capacityKept): their totals, windows and reservations
   // aren't touched, and their endings say so.
-  const { giving: held, kept } = capacityOf(states, await heldInOf(tx, states, orgId, found), now);
+  const holding = await heldInOf(tx, states, orgId, found);
+  const { giving: held, kept } = capacityOf(states, holding.held, now);
   const keptOf = new Map(kept.map(({ requestId, amount }) => [requestId, amount]));
   const totals = await lockedTotalsOf(tx, states, orgId, held);
   // Then their payee windows (11b, GM-1b), each once, in order of ID, after every total.
@@ -474,6 +478,15 @@ export async function voidPendingOf(
     states,
     orgId,
     takes.map(({ id }) => id),
+    'change',
+  );
+  // Then their order slots (11c, TR-2), each once, in order of ID, after every window: those kept their capacity let
+  // go of their orders all the same, as their claims are released.
+  const slotsRead = await orderSlotsOf(
+    tx,
+    states,
+    orgId,
+    holding.slots.map(({ id }) => id),
     'change',
   );
   for (const id of pending) {
@@ -491,6 +504,8 @@ export async function voidPendingOf(
     at: now,
     change: windowsGivenBackBy({ actor: ACTOR, action: VOIDED, details: {} }),
   });
+  // And one a slot, for every request of the batch it held: two sharing a bank slot let go in one record.
+  await slotsLetGo(tx, states, orgId, slotsRead, holding.slots, { at: now, change: slotsLetGoBy(ACTOR) });
   return pending.length;
 }
 
@@ -628,8 +643,9 @@ async function endHolding(
   await requestHoldingsWhole(tx, states, keys, key.orgId, key.id, NO_PAYMENTS);
   // Its month's total locked for change (11a) before the move takes the head (12), unless the caller holds it (GM-1a).
   // Read for change already by every caller, in this transaction: the same row, verified again.
-  // Its payee windows likewise (11b, GM-1b), after the total.
-  const held = total === 'own' ? await lockedTotalOf(tx, states, key, 'change') : null;
+  // Its payee windows likewise (11b, GM-1b), after the total; then its order slots (11c, TR-2), after the windows.
+  const holding = total === 'own' ? await lockedHoldingsOf(tx, states, key, 'change') : null;
+  const held = holding?.total ?? null;
   const own = held === null ? undefined : capacityOf(states, [held], at);
   const kept = typeof total === 'object' ? total.kept : own?.kept[0]?.amount;
   // Past what the digest remembers its capacity is kept (capacityKept), and its signed ending says so: so its
@@ -642,6 +658,13 @@ async function endHolding(
     await windowsGivenBack(tx, states, key.orgId, held.windowsRead, held.windows, {
       at,
       change: windowsGivenBackBy(change),
+    });
+  }
+  // Its order let go of, kept capacity or not, as its claim is released below: the order may be asked for again.
+  if (holding !== null) {
+    await slotsLetGo(tx, states, key.orgId, holding.slotsRead, holding.slots, {
+      at,
+      change: slotsLetGoBy(change.actor),
     });
   }
   // Kept, its reservation stays HELD: its month total and windows still count it, so they and it agree.
@@ -719,20 +742,25 @@ export function capacityOf(
  * decision sealed no month (decided before E1) has none: no month total or window counts it (the cutovers' rule
  * alike). Its windows are those its decision sealed; one decided before GM-1b sealed none, and is counted in those
  * the windows' cutover named for it, else in its supplier's window alone, as that cutover opened it (windowsHeldOf).
+ * With the order slots each holds (TR-2), on the same read: those its decision sealed, or the slots' cutover named
+ * for it; none for one holding none by its signed facts (a pre-E1 request holds them as any other).
  */
 async function heldInOf(
   tx: EndingsTransaction,
   states: SignedStates,
   orgId: string,
   requests: readonly SpendRequestRecord[],
-): Promise<readonly HeldIn[]> {
+): Promise<{ readonly held: readonly HeldIn[]; readonly slots: readonly SlotTake[] }> {
   const decided = await decisionsOf(
     tx,
     states,
     orgId,
     requests.map(({ id }) => id),
   );
-  return requests.flatMap((request) => heldIn(orgId, request, decided.get(request.id)));
+  return {
+    held: requests.flatMap((request) => heldIn(orgId, request, decided.get(request.id))),
+    slots: requests.flatMap((request) => slotTakesOf(request.id, decided.get(request.id)?.slots ?? null)),
+  };
 }
 
 /** Where the request's capacity is held, by its decision as sealed (heldInOf): none for no decision, or none sealed. */
@@ -777,22 +805,62 @@ export async function lockedTotalOf(
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
   lock: 'share' | 'change',
-): Promise<
-  (HeldIn & { readonly total: MonthTotalCheck; readonly windowsRead: ReadonlyMap<string, PayeeWindowCheck> }) | null
-> {
+): Promise<LockedTotal | null> {
+  return (await lockedHoldingsOf(tx, states, key, lock)).total;
+}
+
+/** A request's month total and payee windows as read for change, with what it gives back to them (lockedTotalOf). */
+type LockedTotal = HeldIn & {
+  readonly total: MonthTotalCheck;
+  readonly windowsRead: ReadonlyMap<string, PayeeWindowCheck>;
+};
+
+/**
+ * lockedTotalOf, then the request's order slots read for change in order of ID (11c, TR-2), after its windows, with the
+ * holds to let go of (those its decision sealed, or the slots' cutover named): on the same read of its decision. No
+ * slots for a request that can't be believed or holds none by its signed facts.
+ */
+export async function lockedHoldingsOf(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  lock: 'share' | 'change',
+): Promise<{
+  readonly total: LockedTotal | null;
+  readonly slots: readonly SlotTake[];
+  readonly slotsRead: ReadonlyMap<string, OrderSlotCheck>;
+}> {
   const read = await requestOf(tx, states, key, lock);
-  const [held] = await heldInOf(tx, states, key.orgId, read.outcome === 'found' ? [read.request] : []);
-  if (held === undefined) return null;
-  const total = await monthTotalOf(tx, states, key.orgId, held.key, 'change');
-  const windowsRead = await payeeWindowsOf(
+  const holding = await heldInOf(tx, states, key.orgId, read.outcome === 'found' ? [read.request] : []);
+  const [held] = holding.held;
+  let total: LockedTotal | null = null;
+  if (held !== undefined) {
+    const monthTotal = await monthTotalOf(tx, states, key.orgId, held.key, 'change');
+    const windowsRead = await payeeWindowsOf(
+      tx,
+      states,
+      key.orgId,
+      held.windows.map(({ id }) => id),
+      'change',
+    );
+    total = { ...held, total: monthTotal, windowsRead };
+  }
+  const slotsRead = await orderSlotsOf(
     tx,
     states,
     key.orgId,
-    held.windows.map(({ id }) => id),
+    holding.slots.map(({ id }) => id),
     'change',
   );
-  return { ...held, total, windowsRead };
+  return { total, slots: holding.slots, slotsRead };
 }
+
+/** The slots' own event for an order let go of by an ending: the ending's actor (slotsLetGo adds the requests). */
+const slotsLetGoBy = (actor: SignedChange['actor']): SignedChange => ({
+  actor,
+  action: 'order_slot.released',
+  details: {},
+});
 
 /** The windows' own event for capacity given back by an ending: the ending's actor (windowsGivenBack adds the requests and amount). */
 const windowsGivenBackBy = (change: SignedChange): SignedChange => ({

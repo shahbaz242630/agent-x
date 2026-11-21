@@ -54,10 +54,12 @@ export interface HeldSealed {
   readonly windows: readonly string[] | null;
 }
 
-/** What a decision that holds capacity seals (signRequest's `held`): always a payee seal and its windows. */
+/** What a decision that holds capacity seals (signRequest's `held`): always a payee seal, its windows and its slots. */
 export interface HeldAs extends Omit<HeldSealed, 'payee' | 'bankKeyed' | 'windows'> {
   readonly payee: PayeeSeal;
   readonly windows: readonly string[];
+  /** The order slots its claim joined (TR-2, 0114), by ID: an ending lets go of these, whatever the claim says. */
+  readonly slots: readonly string[];
 }
 
 /**
@@ -153,6 +155,12 @@ export function windowsOf(sealed: unknown): readonly string[] | null {
   const ids = sealed.split(',');
   return ids.every((id) => WINDOW_ID.test(id)) ? ids : null;
 }
+
+/**
+ * The order slot IDs a decision sealed (`orderSlots`, TR-2), or its slots' cutover named, in the same form as its
+ * windows: null for none.
+ */
+export const slotIdsOf = (sealed: unknown): readonly string[] | null => windowsOf(sealed);
 
 /** The payee seal the details hold: none before E1b; unreadable if either half is there but not whole. */
 function payeeSealOf(details: Readonly<Record<string, unknown>> | undefined): HeldSealed['payee'] {

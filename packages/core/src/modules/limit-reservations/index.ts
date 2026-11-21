@@ -14,6 +14,8 @@ export {
 } from './infrastructure/agent-zones.ts';
 export {
   checkMonthTotals,
+  countedFind,
+  countedSince,
   CUTOVER_ACTION,
   CUTOVER_SUBJECT,
   type CutOver,
@@ -87,3 +89,5 @@ export {
   settleReservationsOf,
 } from './infrastructure/reservations.ts';
 export type { LimitReservationsTables } from './infrastructure/tables.ts';
+// The rule a row's ID is named by (GM-1a), for the spend requests' order slots alike (TR-2).
+export { namedId } from './infrastructure/named-id.ts';

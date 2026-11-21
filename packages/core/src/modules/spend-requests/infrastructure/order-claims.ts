@@ -34,6 +34,13 @@ type ClaimsTransaction = Transaction<SpendRequestsTables>;
 export const orderKeyOf = (reference: Expression<string> | string) =>
   sql<string>`spend_requests.order_key_of(${reference}::text)`;
 
+/**
+ * The reference's canonical form, read alone, not run: a pure function of the reference, so it may ride any trip made
+ * before it is needed (a decision's first, TR-2: its order's slots are named by it).
+ */
+export const orderKeyRead = (tx: ClaimsTransaction, reference: string) =>
+  tx.selectNoFrom(orderKeyOf(reference).as('key'));
+
 /** The order a request asks to pay: to its supplier, under the supplier's payee key when it has one. */
 export interface OrderOf {
   readonly supplierId: string;

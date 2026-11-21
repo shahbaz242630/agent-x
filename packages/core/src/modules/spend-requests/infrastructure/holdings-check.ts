@@ -56,10 +56,12 @@ import {
   holdingsMatch,
   holdsNow,
   type PaymentHolds,
+  slotIdsOf,
   windowsOf,
 } from '../domain/holdings.ts';
 import { requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
+import { SLOTS_NAMED_ACTION, SLOTS_NAMED_SUBJECT } from './order-slots.ts';
 import { payeeAsSealed } from './payee-seal.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -118,7 +120,7 @@ export interface HoldingsChecked {
 }
 
 /** A claim of a request, as its table holds it. */
-interface ClaimRow {
+export interface ClaimRow {
   readonly requestId: string;
   readonly supplierId: string;
   readonly orderKey: string;
@@ -128,7 +130,7 @@ interface ClaimRow {
 }
 
 /** The claims of the requests named, in one statement. */
-async function claimsFor(tx: HoldingsTransaction, requestIds: readonly string[]): Promise<ClaimRow[]> {
+export async function claimsFor(tx: HoldingsTransaction, requestIds: readonly string[]): Promise<ClaimRow[]> {
   if (requestIds.length === 0) return [];
   const rows = await tx
     .selectFrom('spend_requests.order_claims')
@@ -175,7 +177,10 @@ const waitsAsSealed = (waitsUntil: Date | null | undefined, decided: ApprovalClo
   (waitsUntil !== null && waitsUntil.getTime() <= expiresAtOf(decided).getTime() + WAITS_UNTIL_SLACK_MS);
 
 /** Each reference's canonical form, as a request's `order_key` is made (`orderKeyOf`), in one statement. */
-async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[]): Promise<Map<string, string>> {
+export async function orderKeysOf(
+  tx: HoldingsTransaction,
+  references: readonly string[],
+): Promise<Map<string, string>> {
   if (references.length === 0) return new Map();
   const { rows } = await sql<{ reference: string; key: string }>`
     select reference, ${orderKeyOf(sql.ref('reference'))} as key
@@ -204,6 +209,12 @@ export interface Decided extends ApprovalClock {
    * counted in its month total and windows, which kept the amount. Read on the same trip.
    */
   readonly capacityKept: boolean;
+  /**
+   * The order slots it holds (TR-2, 0114), by ID: those its decision sealed (`orderSlots`), or, decided before TR-2,
+   * those the slots' cutover named for it. Null for none: decided before TR-2 and not holding its order at the cutover
+   * (or before it), so an ending lets go of nothing.
+   */
+  readonly slots: readonly string[] | null;
 }
 
 /** The events that end a request before hand-off (endings.ts): one may say it kept its capacity (`capacityKept`). */
@@ -241,13 +252,14 @@ export async function decisionsRead(
   ids: readonly string[],
 ): Promise<Map<string, Decided> | 'tampered'> {
   if (ids.length === 0) return new Map();
-  // With each one the windows' cutover named the windows of (GM-1b), on the same read.
+  // With each one the windows' cutover named the windows of (GM-1b), and the slots' cutover its slots (TR-2), on the
+  // same read.
   const history = await states.historyOf(tx, orgId, {
-    subjectTypes: [SPEND_REQUESTS.subject, WINDOWS_NAMED_SUBJECT],
+    subjectTypes: [SPEND_REQUESTS.subject, WINDOWS_NAMED_SUBJECT, SLOTS_NAMED_SUBJECT],
     subjectIds: ids,
-    actions: [...APPROVING_ACTIONS, ...ENDING_ACTIONS, WINDOWS_NAMED_ACTION],
-    // A person approves a request once at most, and it ends once: an event more each, for each.
-    limit: (MOST_DECIDED_EVENTS + 3) * ids.length,
+    actions: [...APPROVING_ACTIONS, ...ENDING_ACTIONS, WINDOWS_NAMED_ACTION, SLOTS_NAMED_ACTION],
+    // A person approves a request once at most, it ends once, and each cutover names it once: an event more each.
+    limit: (MOST_DECIDED_EVENTS + 4) * ids.length,
   });
   if (history.outcome !== 'read') return 'tampered';
   const named = history.events.filter(({ event }) => event.action === WINDOWS_NAMED_ACTION);
@@ -257,9 +269,10 @@ export async function decisionsRead(
       const held = heldOf(event.details);
       const waitHours = approvalWaitOf(event.details);
       const id = event.subject.id.toLowerCase();
+      const slots = slotIdsOf(event.details.orderSlots);
       return [
         id,
-        { held, decidedAt: recordedAt, waitHours, seq, approvedAt: recordedAt, capacityKept: false },
+        { held, decidedAt: recordedAt, waitHours, seq, approvedAt: recordedAt, capacityKept: false, slots },
       ] as const;
     });
   // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.
@@ -276,6 +289,12 @@ export async function decisionsRead(
     const found = read.get(id);
     if (found?.held?.windows !== null) continue;
     read.set(id, { ...found, held: { ...found.held, windows: windowsOf(event.details.payeeWindows) } });
+  }
+  // A decision before TR-2 sealed no slots: those its cutover named stand for them (the chain's MAC keeps both).
+  for (const { event } of history.events.filter(({ event: named }) => named.action === SLOTS_NAMED_ACTION)) {
+    const found = read.get(event.subject.id.toLowerCase());
+    if (found?.slots !== null) continue;
+    read.set(event.subject.id.toLowerCase(), { ...found, slots: slotIdsOf(event.details.orderSlots) });
   }
   return read;
 }

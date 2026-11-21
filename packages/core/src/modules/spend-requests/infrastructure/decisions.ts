@@ -103,8 +103,8 @@ export const insertRequestStatement = (tx: RequestsTransaction, request: NewRequ
  * seal: `held`). The request as its state was sealed and read back: a fresh
  * decision's answer (4D2d P8). `alongside`: the month's total and the payee's
  * windows its capacity was added to, written on the reservation's trip,
- * recorded in the same step of the chain, first (GM-1a, GM-1b: no trip of
- * their own).
+ * recorded in the same step of the chain, first (GM-1a, GM-1b, and TR-2's
+ * order slots: no trip of their own).
  */
 export async function signRequest(
   tx: RequestsTransaction,
@@ -145,6 +145,8 @@ export async function signRequest(
               payeeSealKeyVersion: held.payee.keyVersion,
               // The payee windows its capacity went into (GM-1b), for its ending to give back to.
               payeeWindows: held.windows.join(','),
+              // The order slots its claim joined (TR-2), for its ending to let go of.
+              orderSlots: held.slots.join(','),
             }),
       },
     },

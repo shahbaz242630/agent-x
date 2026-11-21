@@ -132,6 +132,8 @@ describe('at start-up', () => {
         'limit_reservations.month_totals': ['agent_id', 'month', 'currency', 'created_at'],
         // GM-1b (0112): a payee window's supplier, payee key, currency and when it was made.
         'limit_reservations.payee_windows': ['supplier_id', 'payee_key', 'currency', 'created_at'],
+        // TR-2 (0114): an order slot's kind, supplier, payee key, key hash and when it was made.
+        'spend_requests.order_slots': ['kind', 'supplier_id', 'payee_key', 'key_hash', 'created_at'],
       },
     });
   });

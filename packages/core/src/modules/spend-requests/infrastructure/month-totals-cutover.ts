@@ -47,7 +47,7 @@ import {
 } from '../../limit-reservations/index.ts';
 import { type HeldSealed, holdsNow } from '../domain/holdings.ts';
 import { requestsOf, type SpendRequestRecord } from './decisions.ts';
-import { decisionsRead, type PaymentsOf } from './holdings-check.ts';
+import { type Decided, decisionsRead, type PaymentsOf } from './holdings-check.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
@@ -166,6 +166,23 @@ export async function eachSignedHolding<Tx extends CutoverTransaction>(
   payments: PaymentsOf<Tx>,
   visit: (request: SpendRequestRecord, decision: HeldSealed) => void,
 ): Promise<'read' | 'tampered'> {
+  return eachSignedHolder(tx, states, orgId, payments, (request, decided) => {
+    // Its decision read whole and sealing no month: written before E1, which no total or window counts.
+    if (decided.held !== null) visit(request, decided.held);
+  });
+}
+
+/**
+ * eachSignedHolding with every request still holding, its decision whole as read, a decision sealing no month (before
+ * E1) among them: the order slots' cutover (TR-2), as a request decided before E1 still holds its order.
+ */
+export async function eachSignedHolder<Tx extends CutoverTransaction>(
+  tx: Tx,
+  states: SignedStates,
+  orgId: string,
+  payments: PaymentsOf<Tx>,
+  visit: (request: SpendRequestRecord, decided: Decided) => void,
+): Promise<'read' | 'tampered'> {
   let after: string | null = null;
   do {
     const listed: { readonly ids: readonly string[]; readonly next: string | null } = await states.objectIds(
@@ -210,7 +227,7 @@ async function visitHeld<Tx extends CutoverTransaction>(
   orgId: string,
   payments: PaymentsOf<Tx>,
   holding: readonly SpendRequestRecord[],
-  visit: (request: SpendRequestRecord, decision: HeldSealed) => void,
+  visit: (request: SpendRequestRecord, decided: Decided) => void,
 ): Promise<'added' | 'tampered'> {
   const handedOff = holding.filter(({ status }) => status === 'HANDED_OFF').map(({ id }) => id);
   const paid = await payments(tx, states, orgId, handedOff);
@@ -227,8 +244,7 @@ async function visitHeld<Tx extends CutoverTransaction>(
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
       return 'tampered';
     }
-    // Its decision read whole and sealing no month: written before E1, which no total or window counts.
-    if (decision.held !== null) visit(request, decision.held);
+    visit(request, decision);
   }
   return 'added';
 }

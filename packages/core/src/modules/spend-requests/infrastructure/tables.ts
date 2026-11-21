@@ -1,9 +1,10 @@
 import type { Generated, GeneratedAlways } from 'kysely';
 
-/** The spend_requests schema's tables (db/migrations/0039_spend_requests.sql, 0073_expiry_marks.sql), as Kysely sees them. */
+/** The spend_requests schema's tables (db/migrations/0039_spend_requests.sql, 0073_expiry_marks.sql, 0114_order_slots.sql), as Kysely sees them. */
 export interface SpendRequestsTables {
   'spend_requests.requests': RequestsTable;
   'spend_requests.order_claims': OrderClaimsTable;
+  'spend_requests.order_slots': OrderSlotsTable;
 }
 
 interface RequestsTable {
@@ -68,4 +69,24 @@ interface OrderClaimsTable {
   claimed_at: Date;
   /** When its request or payment ended so the order may be asked for again; open until then. */
   released_at: Date | null;
+}
+
+/** A place an order can be claimed, signed (0114, TR-2): who holds it. */
+interface OrderSlotsTable {
+  org_id: string;
+  /** Named by its organisation, kind, supplier or payee key, and key hash (namedId), so a deleted one reads as deleted. */
+  id: string;
+  /** `supplier_order`, `payee_order`, `supplier_bank` or `payee_bank`. */
+  kind: string;
+  /** A supplier kind's supplier; null for a payee kind. */
+  supplier_id: string | null;
+  /** A payee kind's payee key; null for a supplier kind. */
+  payee_key: string | null;
+  /** The SHA-256 of the order's canonical form (or its bank key), lower-case hex. */
+  key_hash: string;
+  /** An order kind's one request, or ''; a bank kind's `hash16:requestId` entries, in order, comma between. */
+  holders: string;
+  created_at: Date;
+  state_version: Generated<number>;
+  state_event_id: string | null;
 }
