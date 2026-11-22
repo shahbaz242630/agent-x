@@ -1230,7 +1230,7 @@ describe("AT13f a rebase after a repair, held to the repair's own record", () =>
   });
 });
 
-describe('TR-14 a witness writer set aside, typed or from a file (playbook H)', () => {
+describe('SEC-DB-20 TR-14 a witness writer set aside, typed or from a file (playbook H)', () => {
   const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-set-aside-'));
   afterAll(() => {
     rmSync(folder, { recursive: true, force: true });

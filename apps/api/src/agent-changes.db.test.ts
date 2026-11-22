@@ -251,7 +251,7 @@ describe(`suspending an agent: the kill switch (C1-3, Postgres ${server.version}
     ['developer', 'pause'],
     ['admin', 'cancel'],
   ])(
-    'a %s suspends it at once, with no step-up, recorded as theirs with their choice for its requests: %s',
+    'SEC-AG-15 a %s suspends it at once, with no step-up, recorded as theirs with their choice for its requests: %s',
     async (role, choice) => {
       const org = await organization();
       const them = await member(org, role);

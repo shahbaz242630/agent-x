@@ -52,7 +52,7 @@ describe('SEC-OAUTH-02 PKCE: S256 alone, compared in constant time', () => {
   });
 });
 
-describe('SEC-OAUTH-03, -11 redirect addresses: registered exactly, matched exactly', () => {
+describe('SEC-OAUTH-03, SEC-OAUTH-11 redirect addresses: registered exactly, matched exactly', () => {
   it('registers https, and http only to the loopback', () => {
     expect(redirectProblems('https://chatgpt.com/connector/oauth/callback')).toEqual([]);
     expect(redirectProblems('http://127.0.0.1:18789/oauth/mcp/callback')).toEqual([]);

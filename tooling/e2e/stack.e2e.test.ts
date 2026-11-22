@@ -59,7 +59,7 @@ describe('ADR-010 §7 the stack from deploy/compose', () => {
     ]);
   });
 
-  it('writes only JSON lines, with none of the generated logins in them', async () => {
+  it('SEC-OPS-08 writes only JSON lines, with none of the generated logins in them', async () => {
     const { raw, lines } = await apiLog();
     expect(lines.length).toBeGreaterThan(0);
     expect(raw.split('\n').filter((line) => line !== '' && !line.startsWith('{'))).toEqual([]);
@@ -87,7 +87,7 @@ describe('ADR-010 §7 the stack from deploy/compose', () => {
   });
 
   it.each([8080, 8081])(
-    'answers a request for any other host name on port %s with 421 (DNS rebinding)',
+    'SEC-OPS-08 answers a request for any other host name on port %s with 421 (DNS rebinding)',
     async (port) => {
       // Node's fetch won't send a foreign Host header, so a plain request does.
       const status = await new Promise<number>((resolve, reject) => {
@@ -105,7 +105,7 @@ describe('ADR-010 §7 the stack from deploy/compose', () => {
     },
   );
 
-  it("hides Zitadel's own debug and metrics pages behind the edge", async () => {
+  it("SEC-OPS-08 hides Zitadel's own debug and metrics pages behind the edge", async () => {
     expect((await fetch(`${LOGIN_ORIGIN}/debug/metrics`)).status).toBe(404);
     expect((await fetch(`${LOGIN_ORIGIN}/debug/ready`)).status).toBe(404);
   });

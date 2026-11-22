@@ -76,7 +76,7 @@ function device(capture = new LogCapture(), clock = new FixedClock(new Date('202
 const PERSON = '0199a0f0-0000-7000-8000-00000000a801';
 const FLOW = '0199a0f0-0000-7000-8000-00000000a802';
 
-describe('S205: a claimed flow is believed only as its device opened it', () => {
+describe('SEC-OAUTH-15 S205: a claimed flow is believed only as its device opened it', () => {
   it('answers a claimed flow whose seal is not its own as nothing found', async () => {
     claims.answers = [{ outcome: 'claimed', flowId: FLOW }];
     sealed.sound = false;

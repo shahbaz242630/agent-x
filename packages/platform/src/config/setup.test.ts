@@ -112,7 +112,7 @@ describe('the set-up job config loads', () => {
   });
 });
 
-describe('SEC-AV-03 the set-up job refuses a bad config, naming each problem', () => {
+describe('SEC-AV-03, SEC-OPS-10 the set-up job refuses a bad config, naming each problem', () => {
   it('needs the admin and every login', () => {
     expect(problemsWith({ AGENTX_ENV: 'development', AGENTX_DB_HOST: 'db' })).toEqual([
       'AGENTX_DB_ADMIN_USER: is required',

@@ -668,7 +668,7 @@ describe('reasonsShownToAgent (decision 11c)', () => {
 });
 
 describe('decide: properties', () => {
-  it('never allows, or sends for approval, what the mandate does not allow (SEC-LIM-05, -06; decision 23)', () => {
+  it('never allows, or sends for approval, what the mandate does not allow (SEC-LIM-05, SEC-LIM-06; decision 23)', () => {
     fc.assert(
       fc.property(anyInput, (given) => {
         const { decision } = decide(given);

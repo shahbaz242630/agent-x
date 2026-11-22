@@ -54,7 +54,7 @@ const VERIFIED: ChallengeFacts = {
 const holds = (message: Parameters<typeof macHolds>[1], sealedFor = message) =>
   macHolds(keys, message, macOf(keys, sealedFor));
 
-describe('session and step-up MACs (S205)', () => {
+describe('SEC-DB-14 session and step-up MACs (S205)', () => {
   it('holds for the facts it was made over, and for nothing else', () => {
     expect(holds(sessionMessage(SESSION))).toBe(true);
     expect(holds(challengeMessage(CHALLENGE))).toBe(true);

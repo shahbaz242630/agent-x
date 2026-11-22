@@ -252,7 +252,7 @@ beforeEach(() => {
 });
 
 describe('approving a spend request waiting for approval (B4b)', () => {
-  it('an approver approves with a passkey: APPROVED as theirs with the step-up’s evidence, its holdings kept and counted once', async () => {
+  it('SEC-EVD-05 an approver approves with a passkey: APPROVED as theirs with the step-up’s evidence, its holdings kept and counted once', async () => {
     const { w, acting } = await ready();
     const approver = await member(w.org, 'approver');
     const waiting = await ask(acting, w, { orderReference: 'INV-A1' });
