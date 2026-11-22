@@ -751,7 +751,8 @@ describe('SEC-DB-20 the witness log: reading', () => {
     });
     store.instead.list = async (start, most, after) => {
       const page = await store.real.list(start, most, after);
-      await gate;
+      // The heads' list alone: the set-aside list each refresh reads first (TR-14) says nothing of them.
+      if (start.includes('/heads/')) await gate;
       return page;
     };
     const first = log.refresh();
