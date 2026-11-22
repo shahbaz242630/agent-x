@@ -277,6 +277,7 @@ type Ending =
   | 'contacts-other'
   | 'set-aside'
   | 'set-aside-unrecorded'
+  | 'set-aside-unwitnessed'
   | 'set-aside-other'
   | 'person-exported'
   | 'person-exported-sealed'
@@ -836,6 +837,12 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     said({ event: 'operator.witness_writer_recorded', writer }),
     TERMINATED,
   ],
+  'set-aside-unwitnessed': (writer) => [
+    said({ event: 'operator.witness_writer_set_aside', writer }),
+    said({ event: 'operator.witness_writer_recorded', writer }),
+    said({ event: 'operator.not_witnessed', command: 'witness-set-aside' }),
+    TERMINATED,
+  ],
   'set-aside-unrecorded': (writer) => [
     said({ event: 'operator.witness_writer_set_aside', writer }),
     said({ event: 'operator.not_recorded', writer }),
@@ -887,6 +894,7 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'contacts-other',
   'set-aside',
   'set-aside-unrecorded',
+  'set-aside-unwitnessed',
   'set-aside-other',
 ]);
 
@@ -3412,11 +3420,16 @@ describe("TR-14 a witness writer set aside, on the operator's job (playbook H)",
     );
   });
 
-  it('says a set-aside not yet recorded on the platform audit log, which it still is in the store', async () => {
+  it('says a set-aside not yet recorded on the platform audit log, or recorded with its head not yet witnessed', async () => {
     const done = await setAsideRun({ ending: 'set-aside-unrecorded' });
     expect(done.status).toBe(0);
     expect(done.said.at(-1)).toBe(
       "It isn't recorded on the platform audit log yet: once the database answers, run the same command again to record it.",
+    );
+    const unwitnessed = await setAsideRun({ ending: 'set-aside-unwitnessed' });
+    expect(unwitnessed.status).toBe(0);
+    expect(unwitnessed.said.at(-1)).toBe(
+      "It is recorded on the platform audit log, but that record's head isn't yet in the witness store: run the same command again once the store answers.",
     );
   });
 
@@ -3425,13 +3438,13 @@ describe("TR-14 a witness writer set aside, on the operator's job (playbook H)",
       const done = await setAsideRun({ ending });
       expect({ ending, status: done.status }).toEqual({ ending, status: 1 });
       expect(done.said.at(-1)).toBe(
-        "The run's lines don't say what it did: they may not all have arrived. Read the lines above. Run the same command again: a writer set aside twice is set aside once.",
+        "The run's lines don't say what it did: they may not all have arrived. Read the lines above. Run the same command again: it finds a line written before and writes no second one.",
       );
     }
     const empty = await setAsideRun({ ending: 'no-request', states: ['Failed'] });
     expect(empty.status).toBe(1);
     expect(empty.said.at(-1)).toBe(
-      "The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again: a writer set aside twice is set aside once.",
+      "The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again: it finds a line written before and writes no second one.",
     );
   });
 

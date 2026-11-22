@@ -1,6 +1,8 @@
 // TR-14 (threat R-12): the witness log's writers. Every file names its writer, the operator's signed list sets a
 // writer aside (its files passed over by every copy, each said), a file written in a process's own name is the alarm,
 // and the fork alarm names both heads' writers.
+import { gunzipSync } from 'node:zlib';
+
 import { createFakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
@@ -8,7 +10,7 @@ import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import type { Chain } from './chain.ts';
 import { fileName, signedFile, WRITER_ID, writerOfName } from './signed-files.ts';
-import { createWitnessLog, type WitnessSigner } from './witness-log.ts';
+import { createWitnessLog, SNAPSHOT_WRITERS, type WitnessSigner } from './witness-log.ts';
 
 const keys = createKeyProvider(
   byPurpose((purpose) => ({
@@ -35,7 +37,14 @@ function copyOn(
     snapshots,
     leads = false,
     time = { at: AT.getTime() },
-  }: { signer?: WitnessSigner; snapshots?: Store; leads?: boolean; time?: { at: number } } = {},
+    snapshotWriters,
+  }: {
+    signer?: WitnessSigner;
+    snapshots?: Store;
+    leads?: boolean;
+    time?: { at: number };
+    snapshotWriters?: boolean | undefined;
+  } = {},
 ) {
   const capture = new LogCapture();
   const log = createWitnessLog({
@@ -50,6 +59,7 @@ function copyOn(
     alertAfterMs: 60_000,
     mostBytes: 1024 * 1024,
     waitMs: 500,
+    ...(snapshotWriters === undefined ? {} : { snapshotWriters }),
   });
   const alarms = (reason: string) =>
     capture.lines().filter((one) => one.event === 'audit.integrity_failed' && one.reason === reason);
@@ -274,7 +284,8 @@ describe('TR-14 attribution through snapshots', () => {
     const snapshots = createFakeWriteOnceStore();
     const honest = copyOn(store);
     await honest.log.now(CHAIN, head(7n, 1));
-    const leader = copyOn(store, { snapshots, leads: true });
+    // The next release's snapshots, which write each head's writer (SNAPSHOT_WRITERS on).
+    const leader = copyOn(store, { snapshots, leads: true, snapshotWriters: true });
     await leader.log.refresh();
     leader.log.soon(OTHER, head(1n, 1));
     await leader.log.flush();
@@ -381,5 +392,103 @@ describe('TR-14 the set-aside folder read', () => {
     time.at += 20 * MINUTE;
     await reader.log.refresh();
     expect(store.calls.smallGets).toBe(fetched);
+  });
+});
+
+describe('TR-14 review: a writer set aside twice, snapshots this release, a copy set aside rewriting', () => {
+  it("holds a writer's earliest set-aside: a second line for it never passes over more; the command writes no second", async () => {
+    const store = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const honest = copyOn(store, { time });
+    const writer = honest.log.writer();
+    const sign = async (at: number) => {
+      const name = fileName('e1/set-aside/', at);
+      store.files.set(
+        name,
+        await signedFile(keys, { label: 'audit-witness-set-aside', purpose: 'operator-signing' }, name, 1, [
+          JSON.stringify({ w: writer, reason: REASON }),
+        ]),
+      );
+    };
+    await sign(AT.getTime());
+    time.at += MINUTE;
+    // Named between the two set-asides: after the earlier, so read and held.
+    await honest.log.now(CHAIN, head(5n, 5));
+    time.at += MINUTE;
+    await sign(time.at);
+    const reader = copyOn(store, { time });
+    await reader.log.refresh();
+    expect(seqs(reader.log.heldTo(CHAIN))).toEqual([5n]);
+    expect(reader.alarms('set_aside_late')).toHaveLength(1);
+    const operator = copyOn(store, { signer: 'operator', time }).log;
+    await expect(operator.setAside(writer, REASON)).resolves.toBe('before');
+    expect(names(store, 'set-aside')).toHaveLength(2);
+  });
+
+  it('this release writes no writer into a snapshot (SNAPSHOT_WRITERS off); the next release does', async () => {
+    expect(SNAPSHOT_WRITERS).toBe(false);
+    for (const snapshotWriters of [undefined, true]) {
+      const store = createFakeWriteOnceStore();
+      const snapshots = createFakeWriteOnceStore();
+      const leader = copyOn(store, { snapshots, leads: true, snapshotWriters });
+      await leader.log.refresh();
+      leader.log.soon(CHAIN, head(2n, 2));
+      await leader.log.flush();
+      const [name = ''] = names(snapshots, 'snapshots');
+      const text = gunzipSync(snapshots.files.get(name) ?? Buffer.alloc(0)).toString();
+      expect({ snapshotWriters, written: text.includes(`"w":"${leader.log.writer()}"`) }).toEqual({
+        snapshotWriters,
+        written: snapshotWriters === true,
+      });
+    }
+  });
+
+  it('a copy set aside writes again every head it still holds, one in flight across the set-aside too: a fresh reader holds them', async () => {
+    const store = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const copy = copyOn(store, { time });
+    await copy.log.now(CHAIN, head(5n, 5));
+    // A Put named before the set-aside, landing after it.
+    let land: () => void = () => undefined;
+    const landing = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    let named: () => void = () => undefined;
+    const sent = new Promise<void>((resolve) => {
+      named = resolve;
+    });
+    store.instead.put = async (name, bytes) => {
+      if (name.startsWith('e1/heads/')) {
+        named();
+        await landing;
+      }
+      return store.real.put(name, bytes);
+    };
+    const inFlight = copy.log.now(CHAIN, head(6n, 6));
+    await sent;
+    time.at += MINUTE;
+    await copyOn(store, { signer: 'operator', time }).log.setAside(copy.log.writer(), REASON);
+    land();
+    await inFlight;
+    delete store.instead.put;
+    const before = copyOn(store, { time });
+    await before.log.refresh();
+    expect(before.log.heldTo(CHAIN)).toEqual([]);
+    // The copy finds itself set aside, and writes both again under its new ID.
+    time.at += 1000;
+    await copy.log.refresh();
+    await copy.log.flush();
+    const fresh = copyOn(store, { time });
+    await fresh.log.refresh();
+    expect(seqs(fresh.log.heldTo(CHAIN))).toEqual([6n, 5n]);
+    // Held as the new ID's: a set-aside of that one writes them again too.
+    time.at += MINUTE;
+    await copyOn(store, { signer: 'operator', time }).log.setAside(copy.log.writer(), REASON);
+    time.at += 1000;
+    await copy.log.refresh();
+    await copy.log.flush();
+    const third = copyOn(store, { time });
+    await third.log.refresh();
+    expect(seqs(third.log.heldTo(CHAIN))).toEqual([6n, 5n]);
   });
 });

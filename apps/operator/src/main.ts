@@ -831,13 +831,32 @@ async function setWriterAside(
     logger.error('operator.refused', { problems: [NO_SET_ASIDE_STORE] });
     return 1;
   }
+  let done: 'set' | 'before';
   try {
-    await witness.setAside(writer, reason);
+    done = await witness.setAside(writer, reason);
   } catch (error) {
     logger.error('operator.failed', { command: WITNESS_SET_ASIDE, err: error });
     return 1;
   }
-  logger.info('operator.witness_writer_set_aside', { writer });
+  // `before`: a run again (its event not recorded the first time) writes no second line, so the time stands.
+  logger.info('operator.witness_writer_set_aside', { writer, before: done === 'before' });
+  if (!(await recordSetAside(config, keys, { writer, reason }, logger))) return 0;
+  try {
+    await witness.drained();
+  } catch (error) {
+    // Recorded, its head not yet outside the database: the same request run again records it again, witnessed.
+    logger.error('operator.not_witnessed', { command: WITNESS_SET_ASIDE, err: error });
+  }
+  return 0;
+}
+
+/** The set-aside's event on the platform chain: whether it was recorded, `operator.not_recorded` where not. */
+async function recordSetAside(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  { writer, reason }: { readonly writer: string; readonly reason: string },
+  logger: Logger,
+): Promise<boolean> {
   const database = await connect(config, logger);
   try {
     if (database === undefined) throw new Error('the database could not be reached');
@@ -846,14 +865,14 @@ async function setWriterAside(
       action: WRITER_SET_ASIDE,
       details: { writer, reason, release: config.release, run: config.run },
     });
-    await witness.drained();
     logger.info('operator.witness_writer_recorded', { writer });
+    return true;
   } catch (error) {
     logger.error('operator.not_recorded', { command: WITNESS_SET_ASIDE, writer, err: error });
+    return false;
   } finally {
     await database?.destroy();
   }
-  return 0;
 }
 
 /**

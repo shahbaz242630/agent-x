@@ -82,12 +82,15 @@
 // that opens every file name it writes (signed-files.ts: fileName), so the closing line signs it; the API says it once
 // as it starts (witness-store.ts: `audit.witness_writer`), where the platform's own columns on the line
 // (RevisionName, ContainerGroupName: the replica) tell which copy holds it. The fork alarm names the writer of both
-// heads (`writer`, `against`); a snapshot's head line carries its own writer (`w`), so a head read from a snapshot
-// names who wrote it, never the leader that kept it (`snapshot` where the line says none: one written before this).
+// heads (`writer`, `against`); a snapshot's head line may carry its own writer (`w`), so a head read from a snapshot
+// names who wrote it, never the leader that kept it (`snapshot` where the line says none). This release reads `w` and
+// writes none (SNAPSHOT_WRITERS: a build before it would take the snapshot as spoiled); the next release writes it.
+// Released and other compact heads carry no writer, and reach a new copy only through the leader's snapshot.
 // A copy can claim any ID, so a name is never trusted alone: a file named for a process's own ID that it never wrote
 // is the alarm (`impersonated`). The operator signs the set-aside list, `e<epoch>/set-aside/` beside the heads
 // (`operator-signing`, which no copy of the API holds, and the store, which the database's owner can't reach), each
-// line `{w, reason}` a writer and the incident, also recorded on the platform chain. Every copy reads what landed since
+// line `{w, reason}` a writer and the incident, also recorded on the platform chain; a writer's earliest set-aside
+// holds, and the command run again writes no second line. Every copy reads what landed since
 // its last pass first in every refresh (at most a hundred files a pass: a flood is said, `set_aside_flood`), then
 // passes over each heads file and snapshot that writer named at or before the set-aside's own name, each the alarm
 // (`set_aside`, by name; a start's snapshots said once, counted apart from the spoiled, and with no other snapshot it
@@ -106,6 +109,8 @@
 //      over the files it named until then from its next read (a web copy's within a minute), and says each.
 //   4. Restart that replica or deactivate its revision (`set_aside_late` lines mean it still writes), then wait five
 //      minutes (a file named up to the clocks' spread ahead, read before the set-aside, then dates before the rebase).
+//      If that copy led the jobs, wait for the new leader's first snapshot (within the hour) before adding copies:
+//      until then a start passes over the old leader's and reads heads files back from them.
 //   5. Rebase each chain held (chain-rebase). A writer with new IDs each file (no `audit.witness_writer` line for
 //      them) can't be set aside by ID: restart every copy and rotate the `audit-anchor` key before rebasing.
 import { randomBytes } from 'node:crypto';
@@ -257,9 +262,10 @@ export interface WitnessLog extends ChainWitness {
   writer(): string;
   /**
    * The operator's alone (TR-14): every file the writer named until now passed over by every copy from its next read,
-   * for the incident `reason` (EVIDENCE_REFERENCE), signed into the line. Throws as a Put does.
+   * for the incident `reason` (EVIDENCE_REFERENCE), signed into the line; `before` where a sound set-aside of the writer
+   * is in the store already, and nothing is written (a run again never moves its time on). Throws as a list or Put does.
    */
-  setAside(writer: string, reason: string): Promise<void>;
+  setAside(writer: string, reason: string): Promise<'set' | 'before'>;
 }
 
 /** Who writes this copy's heads, and so where and under which key. */
@@ -476,14 +482,21 @@ function lineWriter(w: unknown, h: unknown, fileBy: string, snapshot: boolean): 
   return snapshot && h !== undefined && typeof w === 'string' && WRITER_ID.test(w) ? w : undefined;
 }
 
-/** A snapshot's head line: who wrote it too, where known. */
-const snapshotHeadText = (chain: string, { seq, hash, at, by }: Held): string =>
+/**
+ * Whether snapshots write each head's writer (`w`). Off in this release: a build before TR-14 takes a line with `w` for
+ * no line of ours and the snapshot as spoiled, the alarm on every deploy overlap and rollback. This release reads `w`;
+ * the next turns it on, once no build before this one can start.
+ */
+export const SNAPSHOT_WRITERS = false;
+
+/** A snapshot's head line: who wrote it too, where known and `withWriter` (SNAPSHOT_WRITERS). */
+const snapshotHeadText = (chain: string, { seq, hash, at, by }: Held, withWriter: boolean): string =>
   JSON.stringify({
     c: chain,
     s: seq.toString(),
     h: hash.toString('hex'),
     t: new Date(at).toISOString(),
-    ...(WRITER_ID.test(by) ? { w: by } : {}),
+    ...(withWriter && WRITER_ID.test(by) ? { w: by } : {}),
   });
 
 /** A snapshot's anchor its chain's compact heads went above (`b` its place, `a` its whole hash), and nothing else. */
@@ -599,6 +612,7 @@ export function createWitnessLog({
   mostBytes,
   waitMs = WAIT_MS,
   dropsAtAnchor = false,
+  snapshotWriters = SNAPSHOT_WRITERS,
 }: {
   /** Where every copy adds its heads and reads the others'. */
   readonly store: WriteOnceStore;
@@ -623,6 +637,8 @@ export function createWitnessLog({
    * copy that anchors (jobs) lets a head go only once it confirmed it (`prune`), as an anchor of its own is no proof.
    */
   readonly dropsAtAnchor?: boolean;
+  /** Whether its snapshots write each head's writer: SNAPSHOT_WRITERS, but for a test of the next release's. */
+  readonly snapshotWriters?: boolean;
 }): WitnessLog {
   const folder = (kind: 'heads' | 'operator' | 'snapshots' | 'set-aside'): string => `e${String(epoch)}/${kind}/`;
   const ownFolder = signer === 'operator' ? folder('operator') : folder('heads');
@@ -1315,7 +1331,8 @@ export function createWitnessLog({
     }
     for await (const fields of bodyLines(got)) {
       const { w } = fields as { w: string };
-      setAside.set(w, Math.max(setAside.get(w) ?? file.at, file.at));
+      // The earliest set-aside of a writer holds: a later one (a run again) never passes over more of its files.
+      setAside.set(w, Math.min(setAside.get(w) ?? file.at, file.at));
     }
   };
 
@@ -1368,15 +1385,17 @@ export function createWitnessLog({
     writer = newWriter();
     alarm('own_writer_set_aside', { writer: was, renamedTo: writer });
     for (const [name, list] of held) {
-      for (const { seq, hash, at, by } of list) {
-        if (by !== was) continue;
+      list.forEach(({ seq, hash, at, by }, index) => {
+        if (by !== was) return;
+        // Held as the new ID's from here, so a set-aside of that one writes it again too.
+        list[index] = { seq, hash, at, by: writer };
         writtenHere.delete(writtenKey(name, { seq, hash }));
         let done = (): void => undefined;
         const confirmed = new Promise<void>((resolve) => {
           done = resolve;
         });
         queue.push({ chain: name, head: { seq, hash, at, by: writer }, klass: 'soon', confirmed, done });
-      }
+      });
     }
     void write(true);
   };
@@ -1534,7 +1553,7 @@ export function createWitnessLog({
   const snapshotLines = (at: number): string[] => {
     const lines: string[] = [];
     for (const name of held.keys()) {
-      for (const head of standing(name)) lines.push(snapshotHeadText(name, datedBy(head, at)));
+      for (const head of standing(name)) lines.push(snapshotHeadText(name, datedBy(head, at), snapshotWriters));
     }
     // What was let go for memory, so a start from it still holds those chains as missing heads (never quietly).
     for (const [name, mark] of lost) {
@@ -1705,15 +1724,18 @@ export function createWitnessLog({
     },
     state: () => state,
     writer: () => writer,
-    async setAside(aside: string, reason: string): Promise<void> {
+    async setAside(aside: string, reason: string): Promise<'set' | 'before'> {
       if (signer !== 'operator') throw new Error("only the operator's command sets a witness writer aside");
       if (!WRITER_ID.test(aside)) throw new RangeError("a witness writer's ID is 12 lower-case hex characters");
       if (!EVIDENCE_REFERENCE.test(reason)) throw new RangeError("a set-aside's reason is the incident's reference");
       // Named by the store's clock (askClock), as the copies judge which of the writer's files it covers.
       await askClock();
+      await readSetAside(now().getTime());
+      if (setAside.has(aside)) return 'before';
       const name = fileName(folder('set-aside'), now().getTime(), writer);
       const line = JSON.stringify({ w: aside, reason });
       await putWithin(name, await signedFile(keys, SET_ASIDE_FILE, name, epoch, [line]));
+      return 'set';
     },
   });
 }

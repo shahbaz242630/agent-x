@@ -1259,8 +1259,13 @@ describe('TR-14 a witness writer set aside, typed or from a file (playbook H)', 
         'operator.database_unavailable',
         'operator.not_recorded',
       ]);
-      expect(line('operator.witness_writer_set_aside')).toMatchObject({ writer: WRITER });
+      expect(line('operator.witness_writer_set_aside')).toMatchObject({ writer: WRITER, before: false });
       expect(line('operator.not_recorded')).toMatchObject({ level: 'error', writer: WRITER });
+      expect(readdirSync(path.join(dir, 'e1', 'set-aside'))).toHaveLength(1);
+      // Run again, as `operator.not_recorded` says: its line found, no second one, so the writer's time stands.
+      const again = await run(argv, { ...ENV, AGENTX_AUDIT_WITNESS_DIR: dir });
+      expect(again.code).toBe(0);
+      expect(again.line('operator.witness_writer_set_aside')).toMatchObject({ writer: WRITER, before: true });
       expect(readdirSync(path.join(dir, 'e1', 'set-aside'))).toHaveLength(1);
       // Under the operator's own key, as the API's copies check it: sound, so no alarm.
       const errorsRead = async (): Promise<unknown[]> => {

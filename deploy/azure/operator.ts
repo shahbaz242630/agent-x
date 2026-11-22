@@ -22,7 +22,7 @@
 // the alarm, for every file it named until then. The ID is from the fork
 // alarms (the operator's step in witness-log.ts's header says which); the
 // reason is signed into the line and recorded on the platform chain. Run
-// again, it sets nothing aside twice.
+// again, it finds its line, writes none and records the event again.
 //
 // person-activity-export (CO8b, D2) exports one person's own activity log
 // for a case, as activity-export does an organisation's: recorded on the
@@ -1169,8 +1169,8 @@ export function parseWitnessSetAside(argv: readonly string[]): WitnessSetAsideAr
   return { writer, reason };
 }
 
-/** Said after anything unclear: a writer set aside twice is set aside once. */
-const SET_ASIDE_AGAIN = 'Run the same command again: a writer set aside twice is set aside once.';
+/** Said after anything unclear: a run again finds the writer's line and writes no second one. */
+const SET_ASIDE_AGAIN = 'Run the same command again: it finds a line written before and writes no second one.';
 
 /** What a set-aside's run found, from the command's own line about this writer: 0 once it is in the store. */
 function witnessSetAsideOutcome(steps: JobSteps, lines: readonly LogLine[], writer: string): number {
@@ -1183,6 +1183,10 @@ function witnessSetAsideOutcome(steps: JobSteps, lines: readonly LogLine[], writ
     if (!about('operator.witness_writer_recorded')) {
       steps.say(
         "It isn't recorded on the platform audit log yet: once the database answers, run the same command again to record it.",
+      );
+    } else if (said.some((line) => line.event === 'operator.not_witnessed')) {
+      steps.say(
+        "It is recorded on the platform audit log, but that record's head isn't yet in the witness store: run the same command again once the store answers.",
       );
     }
     return 0;

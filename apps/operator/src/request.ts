@@ -398,7 +398,8 @@ export const countingContactsRequest = (orgId: string): string => JSON.stringify
 
 /**
  * The command word that sets a witness writer aside (TR-14, playbook H): every copy of the API passes over its witness
- * files from its next read. A set-aside is for good, so it needs no ID: run again, it only adds the same line again.
+ * files from its next read. A set-aside is for good, so it needs no ID: run again, it finds its line in the store, writes
+ * none (the writer's earliest set-aside holds), and records its event on the platform chain again.
  */
 export const WITNESS_SET_ASIDE = 'witness-set-aside';
 
