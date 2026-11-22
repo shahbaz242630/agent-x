@@ -51,6 +51,7 @@ import {
   SUPPLIERS,
 } from '@agentx/core/modules/suppliers';
 import { lockHoldingsOf, settleHoldings } from '@agentx/core/modules/outcomes';
+import { DEFAULT_TIME_ZONE, periodOf } from '@agentx/core/shared-kernel';
 import {
   moveTransaction,
   type ProviderFacts,
@@ -1021,6 +1022,7 @@ describe('an approval older than the horizon: denied at the hand-off, its holdin
     await endTakenBack(w, request.id);
     expect(await statusOf(w, request.id)).toBe('APPROVED');
     const [spent, windows] = [await spentOf(w, acting), await windowsReleased(w)];
+    const paidMonth = periodOf(clock.now(), DEFAULT_TIME_ZONE).month;
     clock.advanceBy(PAST_THE_DIGEST);
     const { rail, submitted } = counted(w);
 
@@ -1038,10 +1040,14 @@ describe('an approval older than the horizon: denied at the hand-off, its holdin
     expect(lines('spend_request.capacity_kept')).toEqual([
       expect.objectContaining({ level: 'warn', requestId: request.id }),
     ]);
-    // A new request needing the capacity given back twice (600 paid, 500 more) still meets the cap.
+    // A new request needing the capacity given back twice (600 paid, 500 more) still meets the cap, while it falls in
+    // the paid one's month. The test's clock starts at today's date (the database seals by its own clock), so in the
+    // month's last eight days or so the move lands in the next month, whose cap is fresh: there the month held above
+    // is the proof (S211: this check failed from 22 Nov, 20:00 UTC).
     const next = await ask(acting, w, { amount: AED(50_000n), orderReference: 'INV-NEXT' });
-    expect(next.status).not.toBe('APPROVED');
-    expect(next.reasons).toContain('MANDATE_MONTHLY_LIMIT');
+    const sameMonth = periodOf(clock.now(), DEFAULT_TIME_ZONE).month === paidMonth;
+    expect(next.status === 'APPROVED').toBe(!sameMonth);
+    expect(next.reasons.includes('MANDATE_MONTHLY_LIMIT')).toBe(sameMonth);
   });
 
   it('a waiting request’s end taken back past the digest: expired, its capacity never given back twice', async () => {

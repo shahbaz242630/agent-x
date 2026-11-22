@@ -124,7 +124,9 @@ export interface AgentWork {
   shown(tx: AgentTx, orgId: string, agent: AgentRecord): Promise<AgentShown>;
   /**
    * Refuses a key past the organisation's budget for the day
-   * (MOST_KEYS_ISSUED_A_DAY, first keys included): AGENT_KEYS_SPENT. Counted
+   * (MOST_KEYS_ISSUED_A_DAY: rotations and handovers; registrations' first
+   * keys count towards it but are held by MOST_AGENTS_ADDED_A_DAY, and never
+   * call this): AGENT_KEYS_SPENT. Counted
    * under oneKeyIssueAtATime in a write that issues one; an ask's early
    * check may count without it.
    */

@@ -47,16 +47,20 @@ describe('report', () => {
     expect(bodies()[1]).toEqual({ kind: 'rejection', message: 'No message', page: '/approvals' });
   });
 
-  it.each(['/Approvals', '/v1/statements', '/health', '/internal/zitadel-machine-id', `/${'a'.repeat(200)}`])(
-    'reports %s, not a console page, as the home page',
-    (page) => {
-      window.history.replaceState(null, '', page);
+  it.each([
+    '/Approvals',
+    '/v1/statements',
+    '/health',
+    '/internal/zitadel-machine-id',
+    '/operator/tools',
+    `/${'a'.repeat(200)}`,
+  ])('reports %s, not a console page, as the home page', (page) => {
+    window.history.replaceState(null, '', page);
 
-      report('error', 'oops');
+    report('error', 'oops');
 
-      expect(bodies()[0]?.page).toBe('/');
-    },
-  );
+    expect(bodies()[0]?.page).toBe('/');
+  });
 
   it('sends ten a page load at most', () => {
     for (let count = 0; count < 12; count += 1) report('error', 'again');
