@@ -31,6 +31,8 @@ const keys = createKeyProvider(
 );
 const chain = createPlatformChain({ keys, ids: new SequentialIds(0xc6e0) });
 const ACTOR = { type: 'system', id: 'api' } as const;
+/** A bound on a read position's time far past every time recorded here. */
+const LATER = new Date('2100-01-01T00:00:00.000Z');
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -45,8 +47,8 @@ afterAll(async () => {
 describe(`the platform chain's events by their facts (B6-2b, Postgres ${server.version})`, () => {
   it('finds nothing, and no time, on a chain that holds none of the action', async () => {
     expect(await platformEventWith(app, 'idp.event_copied', { event: 'e-1' })).toBe(false);
-    expect(await latestPlatformTime(app, 'idp.event_copied', 'at', ['t'])).toBeUndefined();
-    expect(await latestPlatformTime(app, 'idp.event_copied', 'at', [])).toBeUndefined();
+    expect(await latestPlatformTime(app, 'idp.event_copied', 'at', ['t'], LATER)).toBeUndefined();
+    expect(await latestPlatformTime(app, 'idp.event_copied', 'at', [], LATER)).toBeUndefined();
   });
 
   it('counts only the action asked for, even when another holds the same facts and a later time', async () => {
@@ -64,7 +66,7 @@ describe(`the platform chain's events by their facts (B6-2b, Postgres ${server.v
     expect(await platformEventWith(app, 'idp.event_copied', { event: 'e-2', org: 'none' })).toBe(false);
     expect(await platformEventWith(app, 'idp.event_copied', { event: 'e-3', org: 'none' })).toBe(true);
     expect(await platformEventWith(app, 'idp.event_copied', { event: 'e-3', org: 'another' })).toBe(false);
-    expect(await latestPlatformTime(app, 'idp.event_copied', 'at', ['t'])).toEqual(
+    expect(await latestPlatformTime(app, 'idp.event_copied', 'at', ['t'], LATER)).toEqual(
       new Date('2026-09-27T08:00:00.000Z'),
     );
   });
@@ -77,12 +79,49 @@ describe(`the platform chain's events by their facts (B6-2b, Postgres ${server.v
     await record('reset', '2026-09-27T09:00:00.000Z');
     await record('change', '2026-09-27T07:00:00.000Z');
 
-    expect(await latestPlatformTime(app, 'kind.typed', 'at', ['change', 'other'])).toEqual(
+    expect(await latestPlatformTime(app, 'kind.typed', 'at', ['change', 'other'], LATER)).toEqual(
       new Date('2026-09-27T08:30:00.000Z'),
     );
-    expect(await latestPlatformTime(app, 'kind.typed', 'at', ['change'])).toEqual(new Date('2026-09-27T08:00:00.000Z'));
-    expect(await latestPlatformTime(app, 'kind.typed', 'at', ['reset'])).toEqual(new Date('2026-09-27T09:00:00.000Z'));
-    expect(await latestPlatformTime(app, 'kind.typed', 'at', ['none'])).toBeUndefined();
+    expect(await latestPlatformTime(app, 'kind.typed', 'at', ['change'], LATER)).toEqual(
+      new Date('2026-09-27T08:00:00.000Z'),
+    );
+    expect(await latestPlatformTime(app, 'kind.typed', 'at', ['reset'], LATER)).toEqual(
+      new Date('2026-09-27T09:00:00.000Z'),
+    );
+    expect(await latestPlatformTime(app, 'kind.typed', 'at', ['none'], LATER)).toBeUndefined();
+    // S210 final: a time past the bound decides nothing, the latest at or before it does.
+    expect(
+      await latestPlatformTime(app, 'kind.typed', 'at', ['reset'], new Date('2026-09-27T08:59:59.999Z')),
+    ).toBeUndefined();
+    expect(
+      await latestPlatformTime(app, 'kind.typed', 'at', ['change', 'other'], new Date('2026-09-27T08:30:00.000Z')),
+    ).toEqual(new Date('2026-09-27T08:30:00.000Z'));
+  });
+
+  it('S210 final: never takes a read position from a row planted past the chain’s head', async () => {
+    await chain.recordAlone(app, {
+      actor: ACTOR,
+      action: 'kind.headed',
+      details: { type: 't', at: '2026-09-27T08:00:00.000Z' },
+    });
+    // As the database's owner can: a row past the head, later in time, in no walk of the chain.
+    await database.as('owner').query(
+      `insert into platform_controls.audit_events
+       select seq + 1000, gen_random_uuid(), recorded_at, actor_type, actor_id, action,
+              '{"type":"t","at":"2026-09-27T09:00:00.000Z"}', prev_hash, hash, mac, mac_key_version
+       from platform_controls.audit_events where action = 'kind.headed'`,
+    );
+    try {
+      expect(await latestPlatformTime(app, 'kind.headed', 'at', ['t'], LATER)).toEqual(
+        new Date('2026-09-27T08:00:00.000Z'),
+      );
+    } finally {
+      await database
+        .as('owner')
+        .query(
+          `delete from platform_controls.audit_events where action = 'kind.headed' and seq > (select seq from platform_controls.audit_head)`,
+        );
+    }
   });
 
   it('fails, rather than passes, on a latest time not written as toISOString writes it', async () => {
@@ -91,10 +130,18 @@ describe(`the platform chain's events by their facts (B6-2b, Postgres ${server.v
       action: 'kind.cursor',
       details: { type: 't', at: '2026-09-28T09:00:00Z' },
     });
-    await chain.recordAlone(app, { actor: ACTOR, action: 'kind.unreadable', details: { type: 't', at: 'not a time' } });
+    await chain.recordAlone(app, {
+      actor: ACTOR,
+      action: 'kind.unreadable',
+      details: { type: 't', at: '2026-13-99T99:99:99.999Z' },
+    });
 
-    await expect(latestPlatformTime(app, 'kind.cursor', 'at', ['t'])).rejects.toThrow(/not a time as toISOString/);
-    await expect(latestPlatformTime(app, 'kind.unreadable', 'at', ['t'])).rejects.toThrow(/not a time as toISOString/);
+    await expect(latestPlatformTime(app, 'kind.cursor', 'at', ['t'], LATER)).rejects.toThrow(
+      /not a time as toISOString/,
+    );
+    await expect(latestPlatformTime(app, 'kind.unreadable', 'at', ['t'], LATER)).rejects.toThrow(
+      /not a time as toISOString/,
+    );
   });
 
   it('binds a fact’s name it doesn’t index as a value, never as SQL', async () => {
@@ -183,12 +230,14 @@ describe(`the copier's and the restriction's reads, from 0084's indexes (SA2, Po
       copied: platformEventWithRead(tx, 'idp.event_copied', { event: 'user:77:1', org: 'none' }),
       copiedAnywhere: platformEventWithRead(tx, 'idp.event_copied', { event: 'user:77:1' }),
       // S210 final: the changes' read position, over every type but the resets', and the resets' own.
-      cursor: latestPlatformTimeRead(tx, 'idp.event_copied', 'at', [
-        'user.human.mfa.otp.removed',
-        'user.human.password.changed',
-        'user.locked',
-      ]),
-      resetsCursor: latestPlatformTimeRead(tx, 'idp.event_copied', 'at', ['user.human.password.code.added']),
+      cursor: latestPlatformTimeRead(
+        tx,
+        'idp.event_copied',
+        'at',
+        ['user.human.mfa.otp.removed', 'user.human.password.changed', 'user.locked'],
+        LATER,
+      ),
+      resetsCursor: latestPlatformTimeRead(tx, 'idp.event_copied', 'at', ['user.human.password.code.added'], LATER),
       restriction: latestPlatformTimeOfRead(tx, 'at', [
         { ...removed, facts: { person: 'p-7' } },
         { action: 'idp.event_copied', facts: { person: 'p-7', counts: 'yes' } },
@@ -241,7 +290,9 @@ describe(`the copier's and the restriction's reads, from 0084's indexes (SA2, Po
     await record('e-9', '2026-09-29T10:00:00.000Z');
     await record('e-10', '2026-09-29T09:59:59.999Z');
 
-    expect(await latestPlatformTime(app, 'kind.indexed', 'at', ['t'])).toEqual(new Date('2026-09-29T10:00:00.000Z'));
+    expect(await latestPlatformTime(app, 'kind.indexed', 'at', ['t'], LATER)).toEqual(
+      new Date('2026-09-29T10:00:00.000Z'),
+    );
     expect(await platformEventWith(app, 'kind.indexed', { event: 'e-10' })).toBe(true);
     expect(await platformEventWith(app, 'kind.indexed', { event: 'e-1' })).toBe(false);
   });

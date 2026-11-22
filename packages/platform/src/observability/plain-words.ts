@@ -1322,6 +1322,16 @@ export const PLAIN_WORDS = {
     broke: 'Changed passwords or second factors are copied late, so their alarms are late too.',
     next: "Look for a flood of changes in the login service's history, and for failures on the job's lines.",
   },
+  'idp_events.position_ahead': {
+    happened: 'The login event copy job is already past a minute ago, so it read nothing this run.',
+    broke: 'Login changes are copied late until the clock passes that point, a few minutes at most.',
+    next: "Check the servers' clocks. If they agree, a row may be planted in the audit chain: see the runbook.",
+  },
+  'idp_events.tied_page_resets': {
+    happened: 'A full page of password reset requests had the same time, so the copy job moved past that moment.',
+    broke: 'Some reset requests from that moment may be missing from the audit trail; no sign-in change is.',
+    next: "Nothing if rare. If it repeats, look for a reset request flood in the login service's history.",
+  },
   'idp_events.tied_page': {
     happened: 'A full page of login service events all had the same time, so the copy job moved past that moment.',
     broke: 'Any more events from that exact moment may not have been copied into the audit trail.',

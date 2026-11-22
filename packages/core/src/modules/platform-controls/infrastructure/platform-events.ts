@@ -37,8 +37,17 @@ type Reader = Kysely<PlatformControlsTables> | Transaction<PlatformControlsTable
 /**
  * The read latestPlatformTime runs (S210 final, 0119): for each value of the `type` fact listed, the greatest `name` by
  * byte order among the action's events of that type, one seek of 0119's index each, and the greatest of those.
+ * Only events at or below the chain's head, and with `name` no later than `notAfter` (AT13h, as `belowHead` and
+ * `notAhead` above): a row the database's owner planted past the head, or dated ahead, decides no read position. The
+ * time is compared as the index keys it, text in byte order, so the seek stays one.
  */
-export const latestPlatformTimeRead = (db: Reader, action: string, name: string, types: readonly string[]) =>
+export const latestPlatformTimeRead = (
+  db: Reader,
+  action: string,
+  name: string,
+  types: readonly string[],
+  notAfter: Date,
+) =>
   db
     .selectFrom(sql<{ type: string }>`(select pg_catalog.unnest(${types}::text[]) as type)`.as('wanted'))
     .innerJoinLateral(
@@ -48,7 +57,8 @@ export const latestPlatformTimeRead = (db: Reader, action: string, name: string,
           .select(sql<string>`${fact(name)} collate "C"`.as('at'))
           .where('action', '=', action)
           .where(sql<boolean>`${fact('type')} = wanted.type`)
-          .where(sql<boolean>`${fact(name)} is not null`)
+          .where(sql<boolean>`${fact(name)} collate "C" <= ${notAfter.toISOString()}`)
+          .where(sql<boolean>`seq <= (select h.seq from platform_controls.audit_head h limit 1)`)
           .orderBy(sql`${fact(name)} collate "C"`, 'desc')
           .limit(1)
           .as('latest'),
@@ -58,18 +68,20 @@ export const latestPlatformTimeRead = (db: Reader, action: string, name: string,
 
 /**
  * The latest time in the details' `name` among the chain's events of
- * `action` whose `type` fact is one of `types`, or undefined when there are
- * none. Every value must be a time as `Date.toISOString` writes it (UTC, 24
- * characters), as the copier's are, so that byte order is time order; the one
- * picked that isn't a time throws.
+ * `action` whose `type` fact is one of `types`, at or below the chain's head
+ * and no later than `notAfter`, or undefined when there are none. Every value
+ * must be a time as `Date.toISOString` writes it (UTC, 24 characters), as the
+ * copier's are, so that byte order is time order; the one picked that isn't a
+ * time throws.
  */
 export async function latestPlatformTime(
   db: Kysely<PlatformControlsTables>,
   action: string,
   name: string,
   types: readonly string[],
+  notAfter: Date,
 ): Promise<Date | undefined> {
-  const row = await latestPlatformTimeRead(db, action, name, types).executeTakeFirst();
+  const row = await latestPlatformTimeRead(db, action, name, types, notAfter).executeTakeFirst();
   if (row?.latest === undefined || row.latest === null) return undefined;
   const latest = new Date(row.latest);
   if (Number.isNaN(latest.getTime()) || latest.toISOString() !== row.latest) {

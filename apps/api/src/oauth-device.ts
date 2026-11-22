@@ -269,7 +269,8 @@ export function createOauthDevice({
           return refused(400, 'invalid_target', 'The resource is not this server’s MCP endpoint.');
         }
         const flow = await opened(client.clientId, scopes, flowSourceOf(ip));
-        await ceilings.flows();
+        // In the background: the alarm's count never holds the request back, and never rejects (oauth-ceilings.ts).
+        void ceilings.flows();
         if (flow.outcome !== 'opened') {
           capNoted(flow.outcome, correlationId);
           return refused(

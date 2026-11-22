@@ -39,10 +39,11 @@ export const oauthTableCounts = (database: Database<OauthTables>): OauthTableCou
   flows: (now, most) => openFlowsHeld(database, now, most),
 });
 
+/** Each never rejects, a failed count said as a warning, so a request may start it and not wait for it. */
 export interface OauthCeilings {
-  /** Counts the day's registrations, at most once a minute, and says when they are past the ceiling. Never throws. */
+  /** Counts the day's registrations, at most once a minute, and says when they are past the ceiling. */
   registrations(): Promise<void>;
-  /** Counts the flows not ended, at most once a minute, and says when they are past the ceiling. Never throws. */
+  /** Counts the flows not ended, at most once a minute, and says when they are past the ceiling. */
   flows(): Promise<void>;
 }
 

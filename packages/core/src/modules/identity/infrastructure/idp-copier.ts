@@ -37,7 +37,11 @@
 // position of its own and within pages of its own, the changes first; so a
 // flood of resets, which anyone can send, never holds a real change back. The
 // changes' feed left more than two runs behind is an error
-// (`idp_events.changes_late`): real changes, and their alarms, are late.
+// (`idp_events.changes_late`): real changes, and their alarms, are late. A
+// position is read only from copies at or below the platform chain's head and
+// dated no more than two minutes ahead (a row the database's owner planted
+// decides nothing); one still past a minute ago reads nothing that run, said
+// (`idp_events.position_ahead`).
 // Where each got to is the latest time the platform chain holds for a copied
 // event of its types (0119's index): each run reads from a millisecond before
 // it to a minute before now (an event written late, by an older clock, is
@@ -158,6 +162,12 @@ const OVERLAP_MS = 1;
  * flood of them, which anyone can send, never spends the changes' pages.
  */
 const MOST_PAGES: Readonly<Record<IdpFeedPart, number>> = { changes: 10, resets: 5 };
+
+/**
+ * How far ahead of the app's clock a copy's time may be and still count toward a read position (AT13h's two minutes):
+ * the clocks of two copiers may differ by that much; a row past it, which only the database's owner can plant, never.
+ */
+const POSITION_AHEAD_MS = 2 * 60_000;
 
 /** How far behind a minute ago the changes' feed may be left by a run before it is an error: two of the API's 5-minute runs. */
 const LATE_AFTER_MS = 2 * 5 * 60_000;
@@ -462,6 +472,30 @@ export function createIdpEventCopier({
     alsoAsked: number;
   }
 
+  /** Where one feed's run reads from: just before where it got to, or a day back; undefined, said, when that is ahead. */
+  const startOf = async (part: IdpFeedPart, until: Date): Promise<Date | undefined> => {
+    const notAfter = new Date(clock.now().getTime() + POSITION_AHEAD_MS);
+    const latest = await latestPlatformTime(database, IDP_EVENT_COPIED, 'at', FEED_TYPES[part], notAfter);
+    if (latest === undefined) return new Date(clock.now().getTime() - FIRST_RUN_BACK_MS);
+    const since = new Date(latest.getTime() - OVERLAP_MS);
+    if (since.getTime() < until.getTime()) return since;
+    // Where it got to is past a minute ago: a copy by a copier whose clock runs ahead, or a row planted ahead by the
+    // database's owner (one past POSITION_AHEAD_MS decides nothing). Nothing is read until the time passes it, which
+    // takes minutes at most; said, as nothing is copied meanwhile.
+    logger.error('idp_events.position_ahead', { feed: part, position: latest.toISOString() });
+    return undefined;
+  };
+
+  /**
+   * A full page all within one millisecond, passed: moving on leaves out any more at that time. On the resets' feed
+   * only resets asked for can be missed, which change no credential: words of their own, outside the SEV-1 alert.
+   */
+  const tiedPage = (part: IdpFeedPart, last: IdpEvent, events: number): void => {
+    const facts = { at: last.createdAt.toISOString(), events };
+    if (part === 'resets') logger.error('idp_events.tied_page_resets', facts);
+    else logger.error('idp_events.tied_page', facts);
+  };
+
   /**
    * Reads and copies one feed's pages, from its own read position, until none is left, its MOST_PAGES are read, or the
    * signal is aborted; where the next run will read it from when its pages ran out first, else undefined.
@@ -473,11 +507,8 @@ export function createIdpEventCopier({
     copied: Copied,
     signal: AbortSignal | undefined,
   ): Promise<Date | undefined> => {
-    const latest = await latestPlatformTime(database, IDP_EVENT_COPIED, 'at', FEED_TYPES[part]);
-    let since =
-      latest === undefined
-        ? new Date(clock.now().getTime() - FIRST_RUN_BACK_MS)
-        : new Date(latest.getTime() - OVERLAP_MS);
+    let since = await startOf(part, until);
+    if (since === undefined) return undefined;
     for (let page = 0; page < MOST_PAGES[part]; page += 1) {
       if (since.getTime() >= until.getTime()) return undefined;
       const found = await feed.eventsBetween(since, until, PAGE, part);
@@ -492,8 +523,7 @@ export function createIdpEventCopier({
       if (found.length < PAGE || last === undefined) return undefined;
       const next = new Date(last.createdAt.getTime() - OVERLAP_MS);
       if (next.getTime() <= since.getTime()) {
-        // The whole page within a millisecond: moving on leaves out any more at that time.
-        logger.error('idp_events.tied_page', { at: last.createdAt.toISOString(), events: found.length });
+        tiedPage(part, last, found.length);
         since = last.createdAt;
       } else {
         since = next;

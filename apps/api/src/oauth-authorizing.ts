@@ -248,7 +248,8 @@ export function createOauthAuthorizing({
       const checked = checkRegistration(asked);
       if (checked.outcome === 'invalid') return checked;
       const registered = await registerClient(database, keys, checked.client, clock.now(), clientNetwork(ip));
-      await ceilings.registrations();
+      // In the background: the alarm's count never holds the request back, and never rejects (oauth-ceilings.ts).
+      void ceilings.registrations();
       if (registered.outcome === 'registered') return registered;
       if (registered.cap === 'server') registrationsCapped();
       else networkRegistrationsCapped();
@@ -311,7 +312,7 @@ export function createOauthAuthorizing({
       },
       from,
     );
-    await ceilings.flows();
+    void ceilings.flows();
     const why = notOpened(opened);
     return why === undefined ? { outcome: 'opened', flowId, cookie: browser } : refused('temporarily_unavailable', why);
   }

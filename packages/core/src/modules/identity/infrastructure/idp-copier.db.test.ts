@@ -627,6 +627,76 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     await copierWith(feed).run();
 
     expect(asked).toEqual([]);
+    // Said (S210 final): a copier whose clock runs behind another's, or a row planted ahead, copies nothing meanwhile.
+    expect(lines('idp_events.position_ahead')).toEqual([
+      expect.objectContaining({ level: 'error', feed: 'changes', position: recent.createdAt.toISOString() }),
+    ]);
+  });
+
+  // A row planted past the chain's head decides no position either (platform-events.db.test.ts); here it can't be
+  // planted, as no copy can be appended to a chain with a row past its head.
+  it('SEC-OPS-02 S210 final: a copy planted ahead never stops a feed unsaid', async () => {
+    const who = await person();
+    const org = await organization(who.userId);
+    const first = event('user.locked', who.subject);
+    // Another copy after it, so the copy changed below is not the head, which every append checks.
+    const after = event('user.unlocked', zitadelId(), { createdAt: new Date(first.createdAt.getTime() + 1000) });
+    const events = [first, after];
+    const { feed, asked } = feedOf(() => events);
+    await copierWith(feed).run();
+    // As the database's owner can: the first copy's time changed in place, its details kept to put back after.
+    const owner = database.as('owner');
+    const copied = [IDP_EVENT_COPIED, `user:${who.subject}:${first.sequence}`];
+    const [kept] = await owner.query<{ details: string }>(
+      "select details from platform_controls.audit_events where action = $1 and details::jsonb ->> 'event' = $2",
+      copied,
+    );
+    const plantAt = (at: Date) =>
+      owner.query(
+        `update platform_controls.audit_events set details = (details::jsonb || jsonb_build_object('at', $3::text))::text
+         where action = $1 and details::jsonb ->> 'event' = $2`,
+        [...copied, at.toISOString()],
+      );
+    try {
+      // Its copy's time moved a day ahead, past the two minutes clocks may differ by: it decides nothing either.
+      await plantAt(new Date(clock.now().getTime() + DAY_MS));
+      asked.length = 0;
+      events.push(event('user.unlocked', who.subject, { createdAt: new Date(clock.now().getTime() - 2 * 60_000) }));
+      await copierWith(feed).run();
+      expect(asked).not.toEqual([]);
+      expect(await orgRecords(org)).toHaveLength(2);
+      expect(lines('idp_events.position_ahead')).toEqual([]);
+
+      // A minute ahead, within the two minutes: the feed waits for the time to pass it, and says so.
+      await plantAt(new Date(clock.now().getTime() + 60_000));
+      asked.length = 0;
+      await copierWith(feed).run();
+      expect(asked).toEqual([]);
+      expect(lines('idp_events.position_ahead')).toEqual([
+        expect.objectContaining({ level: 'error', feed: 'changes' }),
+      ]);
+    } finally {
+      await owner.query(
+        "update platform_controls.audit_events set details = $3 where action = $1 and details::jsonb ->> 'event' = $2",
+        [...copied, kept?.details],
+      );
+    }
+  });
+
+  it('S210 final: says a tied page of resets asked for in words of its own, outside the login service alert', async () => {
+    const who = await person();
+    await organization(who.userId);
+    const at = new Date(clock.now().getTime() - 10 * 60_000);
+    const same = Array.from({ length: 100 }, () =>
+      event('user.human.password.code.added', who.subject, { createdAt: at }),
+    );
+    await copierWith(feedOf(() => same).feed).run();
+
+    expect(lines('idp_events.tied_page')).toEqual([]);
+    expect(lines('idp_events.tied_page_resets')).toEqual([
+      expect.objectContaining({ level: 'error', at: at.toISOString(), events: 100 }),
+    ]);
+    expect(LOGIN_SERVICE_ALERT_EVENTS).not.toContain('idp_events.tied_page_resets');
   });
 });
 
