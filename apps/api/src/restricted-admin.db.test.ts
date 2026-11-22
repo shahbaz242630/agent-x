@@ -290,11 +290,7 @@ beforeAll(async () => {
   const services = { database: app, keys, ids, clock, logger };
   const clients = createOauthClients({ database: app, keys, clock, logger, metadata: undefined });
   authorizing = createOauthAuthorizing({ database: app, keys, clock, ids, logger, capabilities, clients });
-  const registered = await authorizing.register(
-    { redirect_uris: [REDIRECT], client_name: 'ChatGPT' },
-    CORRELATION,
-    fresh(),
-  );
+  const registered = await authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, fresh());
   if (registered.outcome !== 'registered') throw new Error('registered');
   clientId = registered.client.clientId;
   const http = {

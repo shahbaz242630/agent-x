@@ -622,8 +622,9 @@ export const PLAIN_WORDS = {
     next: 'It stops by itself 15 minutes after a key rotation. If not, restore the retired key version.',
   },
   'oauth.registrations_capped': {
-    happened: 'MCP apps registered more times today than Agent X allows in all, so this one was refused.',
-    broke: 'No new app can register until the day rolls on; registered apps still connect.',
+    happened:
+      "Today's MCP app registrations passed Agent X's total, so a network that had registered a few was refused.",
+    broke: "Only busy networks wait; a network's first few apps still register, and registered apps still connect.",
     next: 'Look for many networks registering over and over: a spread-out attack.',
   },
   'oauth.flows_capped': {

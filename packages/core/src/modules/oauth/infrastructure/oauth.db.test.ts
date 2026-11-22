@@ -26,6 +26,7 @@ import {
   clientSeen,
   MOST_REGISTRATIONS_A_DAY,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
+  QUIET_NETWORK_REGISTRATIONS,
   registerClient,
   sweepClientNetworks,
   sweepClients,
@@ -165,24 +166,42 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     await expect(sweepClients(app, NOW, 0)).rejects.toBeInstanceOf(RangeError);
   });
 
-  it(`refuses a registration past ${String(MOST_REGISTRATIONS_A_DAY)} in 24 hours, and takes one again a day on`, async () => {
+  it(`SEC-OAUTH-13 past ${String(MOST_REGISTRATIONS_A_DAY)} in 24 hours, refuses only a busy network and still takes a quiet one: no lockout (S210 TR-7)`, async () => {
     const day = new Date('2026-12-01T09:00:00Z');
     const admin = database.as('admin');
+    // The day's cap filled from 14 networks, each under its own share (about 143 of 150): a spread-out crowd.
     await admin.query(
-      `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at)
-       select 'axcl_' || lpad(to_hex(n), 32, '0'), 'Filler', array['https://a.example/cb'], 'web', array['authorization_code'], $1
+      `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at, network)
+       select 'axcl_' || lpad(to_hex(n), 32, '0'), 'Filler', array['https://a.example/cb'], 'web', array['authorization_code'], $1,
+         'tr7-net-' || (n % 14)
        from generate_series(1, $2::int) as n`,
       [day, MOST_REGISTRATIONS_A_DAY],
     );
-    expect(await registerClient(app, keys, registration(), new Date(day.getTime() + 1000), fresh())).toEqual({
-      outcome: 'capped',
-      cap: 'server',
-    });
-    expect(
-      await registerClient(app, keys, registration(), new Date(day.getTime() + DAY_MS + 1), fresh()),
-    ).toMatchObject({
-      outcome: 'registered',
-    });
+    try {
+      const at = new Date(day.getTime() + 1000);
+      // A network of the crowd is refused, the server's cap,
+      expect(await registerClient(app, keys, registration(), at, 'tr7-net-1')).toEqual({
+        outcome: 'capped',
+        cap: 'server',
+      });
+      // while a network that has registered fewer than its few today still registers, up to them, and only then is refused.
+      const quiet = fresh();
+      for (let made = 0; made < QUIET_NETWORK_REGISTRATIONS; made += 1) {
+        expect(await registerClient(app, keys, registration(), at, quiet)).toMatchObject({ outcome: 'registered' });
+      }
+      expect(await registerClient(app, keys, registration(), at, quiet)).toEqual({ outcome: 'capped', cap: 'server' });
+      // Another fresh network is let in all the same.
+      expect(await registerClient(app, keys, registration(), at, fresh())).toMatchObject({ outcome: 'registered' });
+      // A day on, the crowd's network registers again.
+      expect(
+        await registerClient(app, keys, registration(), new Date(day.getTime() + DAY_MS + 1), 'tr7-net-1'),
+      ).toMatchObject({
+        outcome: 'registered',
+      });
+    } finally {
+      // Its crowd's networks would be left for the sweep below to clear.
+      await admin.query("delete from oauth.clients where name = 'Filler'");
+    }
   });
 
   it(`6F1 G4: refuses a network past ${String(MOST_REGISTRATIONS_A_NETWORK_A_DAY)} in 24 hours; another network not`, async () => {

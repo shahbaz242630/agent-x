@@ -71,6 +71,7 @@ export {
   clientSeen,
   MOST_REGISTRATIONS_A_DAY,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
+  QUIET_NETWORK_REGISTRATIONS,
   type Registered,
   registerClient,
   sweepClientNetworks,

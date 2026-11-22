@@ -31,6 +31,7 @@ import {
   MOST_OPEN_FLOWS,
   MOST_OPEN_FLOWS_A_NETWORK,
   MOST_OPEN_FLOWS_A_SOURCE,
+  MOST_REGISTRATIONS_A_DAY,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   openCodeFlow,
   PKCE_METHOD,
@@ -80,7 +81,7 @@ export type RegistrationAnswer =
 /** `ip`: the client's address as the trust rule reads it, undefined when it can't be read (rate-limit.ts). */
 export interface OauthAuthorizing {
   authorize(asked: AuthorizeAsked, cookie: string | undefined, ip: string | undefined): Promise<AuthorizeAnswer>;
-  register(asked: RegistrationAsked, correlationId: string, ip: string | undefined): Promise<RegistrationAnswer>;
+  register(asked: RegistrationAsked, ip: string | undefined): Promise<RegistrationAnswer>;
 }
 
 /**
@@ -172,6 +173,10 @@ export function createOauthAuthorizing({
     per: 'network',
     most: MOST_OPEN_FLOWS_A_NETWORK,
   });
+  // S210 TR-7: past the day's cap only a busy network is refused (a quiet one still registers), said once a minute.
+  const registrationsCapped = capWarning(logger, clock, 'oauth.registrations_capped', {
+    most: MOST_REGISTRATIONS_A_DAY,
+  });
   const networkRegistrationsCapped = capWarning(logger, clock, 'oauth.source_capped', {
     kind: 'registration',
     most: MOST_REGISTRATIONS_A_NETWORK_A_DAY,
@@ -208,12 +213,12 @@ export function createOauthAuthorizing({
       return orBusy(back, () => authorized(asked, cookie, flowSourceOf(ip), back));
     },
 
-    async register(asked, correlationId, ip) {
+    async register(asked, ip) {
       const checked = checkRegistration(asked);
       if (checked.outcome === 'invalid') return checked;
       const registered = await registerClient(database, keys, checked.client, clock.now(), clientNetwork(ip));
       if (registered.outcome === 'registered') return registered;
-      if (registered.cap === 'server') logger.child({ correlationId }).warn('oauth.registrations_capped');
+      if (registered.cap === 'server') registrationsCapped();
       else networkRegistrationsCapped();
       return { outcome: 'capped' };
     },
