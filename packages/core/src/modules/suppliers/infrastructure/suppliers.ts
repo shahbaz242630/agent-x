@@ -85,6 +85,17 @@ export const SUPPLIERS = {
     { column: 'payee_key_version', type: 'integer' },
   ],
   rules: SUPPLIER,
+  // The actions a request's authority reads from its history (state-trail.ts, TR-3 residual 75): CANCEL_BRAKES,
+  // PAUSE_EVENTS and the rest in apps/api, held to these by its tracked-actions test.
+  tracks: [
+    'supplier.suspend',
+    'supplier.unverify',
+    'supplier.pending_requests_chosen',
+    'supplier.reactivate',
+    'supplier.reactivate_verified',
+    'supplier.details_changed',
+    'supplier.payee_change_confirmed',
+  ],
   // VERIFIED only on the version verified, with nothing pending (0032): CI's A3c allows this one check over the status with other columns.
   statusConditions: {
     verified_rests_on_its_version:

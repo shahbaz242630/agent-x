@@ -30,6 +30,8 @@ const SIGNED = {
   recordedAt: new Date('2026-11-10T08:00:00Z'),
   version: 1,
   seal: { fingerprint: Buffer.alloc(32), keyVersion: 1 },
+  action: 'thing.made',
+  tracked: undefined,
 };
 
 describe('PL-29 follow-up: judgeSignedRow, a row read with no lock', () => {

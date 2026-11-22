@@ -14,7 +14,13 @@ import type { DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 
 import type { AgentsTables } from '../../agents/index.ts';
-import type { AuditTables, LogEvent, LogPageToRead, SignedStates } from '../../audit/index.ts';
+import {
+  type AuditTables,
+  type LogEvent,
+  type LogPageToRead,
+  type SignedStates,
+  TRACKED_BEFORE,
+} from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import type { IdentityTables } from '../../identity/index.ts';
 
@@ -23,8 +29,8 @@ import { type ActorName, type ActorsHeld, actorsHeld, nameOf } from './actor-nam
 /** The tables a batch of the log reads: its events, and what names their actors. */
 export type LogReadTables = AuditTables & IdentityTables & DirectoryTables & AgentsTables;
 
-/** The details a signed state's event carries that are the platform's seal, not the organisation's record. */
-const SEALS_NOT_SHOWN: ReadonlySet<string> = new Set(['stateFingerprint', 'stateKeyVersion']);
+/** The details a signed state's event carries that are the platform's seal, not the organisation's record: its names of earlier events too (TR-3 residual 75). */
+const SEALS_NOT_SHOWN: ReadonlySet<string> = new Set(['stateFingerprint', 'stateKeyVersion', TRACKED_BEFORE]);
 
 /** An event's facts as an organisation is shown them, page or download: the platform's own seals left out. */
 export const factsShown = (details: LogEvent['event']['details']) =>

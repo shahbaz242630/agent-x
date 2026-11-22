@@ -105,6 +105,14 @@ import {
   TooManyEventsToRead,
 } from './audit-trail.ts';
 import { type FrontierStart, judgeWitnessed, type WalkedWithin } from './chain-frontier.ts';
+import {
+  type StateTrail,
+  type TrackedBefore,
+  type TrailEvent,
+  trailGap,
+  type TrailStart,
+  withTracked,
+} from './state-trail.ts';
 
 /**
  * Where a row and its signed state part:
@@ -205,6 +213,8 @@ export interface VerifiedState {
   readonly recordedAt: Date;
   /** The authority fields, by column, exactly as sealed: canonical text, or null. */
   readonly fields: ReadonlyMap<string, string | null>;
+  /** That event's place, action and the earlier events it names (state-trail.ts): what a history read is held to. */
+  readonly trail?: StateTrail;
 }
 
 /**
@@ -776,6 +786,13 @@ export interface SignedStates {
    * transaction ends (withSignedStates).
    */
   mismatch(subjectType: string, key: SignedRowKey): void;
+  /**
+   * Whether a history read holds every event the states it rests on name (state-trail.ts, TR-3 residual 75): each
+   * object's newest of each of `actions` its table tracks, and each one named by an event got, wherever it falls
+   * after `after` (the read covering all of them past it). One missing raises the alarm for its object, as a log
+   * that can't be believed (the organisation held once the transaction ends): the caller then refuses.
+   */
+  historyHeld(orgId: string, events: readonly TrailEvent[], rests: HistoryRests): boolean;
   /** The transaction's own logger: for a decision's line of its own (AT13d: capacity kept at a request's end). */
   readonly logger: Logger;
   /**
@@ -808,6 +825,13 @@ export interface HoldingSignedStates extends SignedStates {
   holdNames(tx: AuditTransaction, finding: TamperFinding): Promise<boolean>;
 }
 
+/** What a history read rests on (historyHeld): the objects' verified states, the actions read, from where it covers all. */
+export interface HistoryRests {
+  readonly on: readonly { readonly table: SignedStateTable; readonly id: string; readonly state: VerifiedState }[];
+  readonly actions: readonly string[];
+  readonly after: bigint | undefined;
+}
+
 type FoundRow = Extract<SignedRow, { outcome: 'found' }>;
 
 /** The row matched with the log's latest signed event for it: the state, or the tamper sign it shows. */
@@ -835,6 +859,7 @@ function judgeFound(
     eventId,
     recordedAt: latest.recordedAt,
     fields: new Map(row.fields),
+    trail: Object.freeze({ seq: latest.seq, action: latest.action, tracked: latest.tracked }),
   });
 }
 
@@ -1477,16 +1502,27 @@ export function createSignedStates({
     }
   };
 
-  /** The event of a change that leaves the row as `row`, its state sealed. */
-  const sealedEvent = (table: SignedStateTable, key: SignedRowKey, row: FoundRow, change: SignedChange): AuditEvent => {
+  /**
+   * The event of a change that leaves the row as `row`, its state sealed, naming its object's earlier events from
+   * the state it moves on from (`start`, state-trail.ts) when its table tracks any.
+   */
+  const sealedEvent = (
+    table: SignedStateTable,
+    key: SignedRowKey,
+    row: FoundRow,
+    change: SignedChange,
+    start: TrailStart,
+  ): { readonly event: AuditEvent; readonly tracked: TrackedBefore | undefined } => {
     const subject = { type: table.subject, id: key.id, version: row.version };
     const seal = sealState(keys, { orgId: key.orgId, subject, fields: row.fields });
-    return signedEvent({
+    const { details, tracked } = withTracked(table, start, change.details);
+    const event = signedEvent({
       actor: change.actor,
       action: change.action,
       subject,
-      details: { ...change.details, ...stateSealDetails(seal) },
+      details: { ...details, ...stateSealDetails(seal) },
     });
+    return { event, tracked };
   };
 
   /**
@@ -1503,6 +1539,7 @@ export function createSignedStates({
     row: FoundRow,
     recorded: RecordedAuditEvent,
     along: readonly Readonly<Record<string, unknown>>[] | undefined,
+    made: { readonly action: string; readonly tracked: TrackedBefore | undefined },
   ): VerifiedState => {
     // None that read as rows is none taken: the row is then not as sealed, and the change fails with the alarm.
     const pointed = signedRowPointed(table, along ?? []);
@@ -1521,6 +1558,7 @@ export function createSignedStates({
       eventId: recorded.id.toLowerCase(),
       recordedAt: recorded.recordedAt,
       fields: sealed,
+      trail: Object.freeze({ seq: recorded.seq, action: made.action, tracked: made.tracked }),
     });
     heldIn(tx).set(rowName(table, key), { lock: 'change', wrote: { table, state } });
     return state;
@@ -1564,10 +1602,11 @@ export function createSignedStates({
     noSealGiven(change);
     const row = await written(tx, table, key, from, set);
     // The row pointed at its event in the event's own write (4D2d P8).
-    const recorded = await trail.recordAlong(tx, key.orgId, sealedEvent(table, key, row, change), (eventId, gate) =>
+    const { event, tracked } = sealedEvent(table, key, row, change, from);
+    const recorded = await trail.recordAlong(tx, key.orgId, event, (eventId, gate) =>
       signedRowPointing(table, key, { version: row.version, eventId }, gate),
     );
-    pointedState(tx, table, key, row, recorded, recorded.along);
+    pointedState(tx, table, key, row, recorded, recorded.along, { action: change.action, tracked });
     // An organisation's own row, created as its chain's first event: its hold may start here (startIntegrityHold).
     if (from === 'new' && key.id.toLowerCase() === key.orgId.toLowerCase() && recorded.seq === 1n) {
       created.set(tx, (created.get(tx) ?? new Set<string>()).add(key.orgId.toLowerCase()));
@@ -1877,6 +1916,14 @@ export function createSignedStates({
       alarm(subjectType, key, 'holding');
     },
 
+    historyHeld(orgId: string, events: readonly TrailEvent[], { on, actions, after }: HistoryRests): boolean {
+      const objects = on.map(({ table, id, state }) => ({ table, id, version: state.version, trail: state.trail }));
+      const gap = trailGap(events, objects, actions, after);
+      if (gap === undefined) return true;
+      alarm(gap.table.subject, { orgId, id: gap.id }, 'log');
+      return false;
+    },
+
     movedBack(subjectType: string, key: SignedRowKey): void {
       alarm(subjectType, key, 'moved_back');
     },
@@ -2027,13 +2074,21 @@ export function createSignedStates({
         { [STATUS]: moved.to },
       );
       // The other rows' events go first, in order, each one's pointer in the same statement as this row's (`also`).
+      const othersSealed = others.map((other) =>
+        sealedEvent(other.table, other.key, other.row, other.change, other.from),
+      );
+      const movedChange = withMove(moveChange, moved);
+      // The move names the row's first event, recorded just before it in the same step (its seq not known yet).
+      const lastSealed = sealedEvent(table, key, row, movedChange, {
+        adjacent: { version: first.version, action: change.action },
+      });
       const { recorded, along, alsoAlong } = await trail.recordAllAlong(
         tx,
         key.orgId,
         [
-          ...others.map((other) => sealedEvent(other.table, other.key, other.row, other.change)),
-          sealedEvent(table, key, first, change),
-          sealedEvent(table, key, row, withMove(moveChange, moved)),
+          ...othersSealed.map(({ event: each }) => each),
+          sealedEvent(table, key, first, change, 'new').event,
+          lastSealed.event,
         ],
         (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
         others.length === 0
@@ -2055,10 +2110,16 @@ export function createSignedStates({
       others.forEach((other, at) => {
         const otherRecorded = recorded[at];
         if (otherRecorded !== undefined) {
-          pointedState(tx, other.table, other.key, other.row, otherRecorded, alsoAlong[at]);
+          pointedState(tx, other.table, other.key, other.row, otherRecorded, alsoAlong[at], {
+            action: other.change.action,
+            tracked: othersSealed[at]?.tracked,
+          });
         }
       });
-      const state = pointedState(tx, table, key, row, last, along);
+      const state = pointedState(tx, table, key, row, last, along, {
+        action: movedChange.action,
+        tracked: lastSealed.tracked,
+      });
       return Object.freeze({
         outcome: 'changed',
         from: moved.from,

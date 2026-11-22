@@ -162,6 +162,7 @@ import {
 } from '../domain/event.ts';
 import { HISTORY_CHECK_SUBJECT, HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
+import { type TrackedBefore, trackedBeforeIn } from './state-trail.ts';
 import { witnessClassOf } from './witness-class.ts';
 import { type EventSeen, MOST_WALKED_WITHIN, type ReadAhead, walkWithin, type WithinWalk } from './chain-frontier.ts';
 import { chainWitness, noteCommitted, witnessedWrite, wroteTo } from './witnessing.ts';
@@ -204,6 +205,9 @@ export type LatestSignedState =
       readonly recordedAt: Date;
       readonly version: number;
       readonly seal: StateSeal;
+      /** Its action, and the earlier events it names (state-trail.ts): none for one recorded before the names. */
+      readonly action: string;
+      readonly tracked: TrackedBefore | undefined;
     }
   | BrokenRead;
 
@@ -1890,14 +1894,18 @@ export function createAuditTrail({
     );
     const details = detailsObject(newestSigned.details);
     const seal = details === undefined ? undefined : stateSealIn(details);
+    const tracked = details === undefined ? undefined : trackedBeforeIn(details);
     const signed = read[0]?.sealed;
     const version = newestSigned.subject_version;
+    const action = newestSigned.action;
     if (
       bad !== undefined ||
       signed === undefined ||
       typeof version !== 'number' ||
+      typeof action !== 'string' ||
       seal === undefined ||
-      seal === 'malformed'
+      seal === 'malformed' ||
+      tracked === 'malformed'
     ) {
       return brokenAt((bad ?? read[0])?.row.seq);
     }
@@ -1909,6 +1917,8 @@ export function createAuditTrail({
       recordedAt: signed.recordedAt,
       version,
       seal,
+      action,
+      tracked,
     });
   };
 

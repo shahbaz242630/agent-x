@@ -267,6 +267,8 @@ describe('ADR-012 §2 an authority row recorded and verified against the log', (
         ['status', 'ACTIVE'],
         ['role', 'reader'],
       ]),
+      // Its event's place and action; a table tracking nothing names no earlier events (state-trail.ts).
+      trail: { seq: 1n, action: 'agent.created', tracked: undefined },
     });
     expect(alarms()).toEqual([]);
   });

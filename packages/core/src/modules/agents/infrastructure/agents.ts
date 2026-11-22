@@ -38,6 +38,9 @@ export const AGENTS = {
     { column: 'scopes', type: 'text' },
   ],
   rules: AGENT,
+  // The actions a request's authority reads from its history (state-trail.ts, TR-3 residual 75): CANCEL_BRAKES,
+  // PAUSE_EVENTS and the rest in apps/api, held to these by its tracked-actions test.
+  tracks: ['agent.suspended'],
 } as const satisfies SignedStateTable & { readonly rules: typeof AGENT };
 
 /** A transaction on the tables agents and their keys are added and read in, opened by withSignedStates for their organisation. */

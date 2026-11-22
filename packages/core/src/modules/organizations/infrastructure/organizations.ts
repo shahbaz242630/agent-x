@@ -32,6 +32,9 @@ export const ORGANIZATIONS = {
   subject: 'organization',
   fields: [{ column: 'status', type: 'text' }],
   rules: ORGANIZATION,
+  // The actions a request's authority reads from its history (state-trail.ts, TR-3 residual 75): CANCEL_BRAKES,
+  // PAUSE_EVENTS and the rest in apps/api, held to these by its tracked-actions test.
+  tracks: ['organization.freeze', 'organization.unfreeze'],
 } as const satisfies SignedStateTable & { readonly rules: typeof ORGANIZATION };
 
 /** A transaction on the tables an organisation is created in, opened by withTenant for it. */
