@@ -229,6 +229,12 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     firstLine: () => 'The email address of the login of a person in one of your Agent X organisations was changed.',
     check: SIGN_IN_CHECK,
   },
+  sign_in_phone_changed: {
+    subject: () => "Agent X: the phone number of a person's login was changed",
+    firstLine: () =>
+      'The phone number of the login of a person in one of your Agent X organisations was changed: codes sent by SMS go to the new number.',
+    check: SIGN_IN_CHECK,
+  },
   sign_in_blocked: {
     subject: () => "Agent X: a person's login was locked, deactivated or removed",
     firstLine: () =>

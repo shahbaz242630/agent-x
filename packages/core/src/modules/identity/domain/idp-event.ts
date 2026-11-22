@@ -8,7 +8,8 @@
 //   admins: a second factor removed (an authenticator app, a security key, a
 //   passkey, recovery codes) or added (once ready to use: an app or a key
 //   verified, an SMS or email code added; the S68 audit), a password changed, the
-//   login's email changed, the login locked, deactivated or removed, or it
+//   login's email or phone changed (the phone: where SMS codes go, S210), the
+//   login locked, deactivated or removed, or it
 //   unlocked or reactivated;
 // - a reset of a person's password asked for (S210 R2-2): told to the person
 //   alone, at most once an hour, never to the admins, and no session ended, as
@@ -29,6 +30,7 @@ export type IdpEventClass =
   | 'password_changed'
   | 'password_reset_asked'
   | 'sign_in_email_changed'
+  | 'sign_in_phone_changed'
   | 'sign_in_blocked'
   | 'sign_in_restored'
   | 'token_issued'
@@ -59,6 +61,8 @@ const BY_CLASS: Readonly<Record<IdpEventClass, readonly string[]>> = {
   // "forgot password", knowing only the login's name. No credential changes until the code is used.
   password_reset_asked: ['user.human.password.code.added'],
   sign_in_email_changed: ['user.human.email.changed'],
+  // Read from the pinned image's own binary (v4.20.5, S210): a new number takes the SMS codes from then on.
+  sign_in_phone_changed: ['user.human.phone.changed'],
   sign_in_blocked: ['user.locked', 'user.deactivated', 'user.removed'],
   sign_in_restored: ['user.unlocked', 'user.reactivated'],
   token_issued: ['user.token.added'],
@@ -87,7 +91,7 @@ export const PASSKEY_ADDED_EVENTS: readonly string[] = [
 /**
  * Whether a change of this class ends every Agent X session the person has
  * (the S68 audit): a second factor added or removed, the password or the
- * login's email changed, or the login blocked. A session opened before the
+ * login's email or phone changed, or the login blocked. A session opened before the
  * change never outlives it, whoever holds it.
  */
 export const endsSessions = (eventClass: IdpEventClass): boolean =>
@@ -95,6 +99,7 @@ export const endsSessions = (eventClass: IdpEventClass): boolean =>
   eventClass === 'second_factor_added' ||
   eventClass === 'password_changed' ||
   eventClass === 'sign_in_email_changed' ||
+  eventClass === 'sign_in_phone_changed' ||
   eventClass === 'sign_in_blocked';
 
 /** Every event type copied, and what it means. */

@@ -845,6 +845,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     'user.human.mfa.otp.removed',
     'user.human.password.changed',
     'user.human.email.changed',
+    'user.human.phone.changed',
     'user.locked',
   ])('ends every Agent X session of the person on %s, once, whatever organisations they belong to', async (type) => {
     const who = await person();

@@ -30,6 +30,7 @@ describe('the login service’s events we copy (B6-2b)', () => {
     ['user.human.password.changed', 'password_changed'],
     ['user.human.password.code.added', 'password_reset_asked'],
     ['user.human.email.changed', 'sign_in_email_changed'],
+    ['user.human.phone.changed', 'sign_in_phone_changed'],
     ['user.locked', 'sign_in_blocked'],
     ['user.removed', 'sign_in_blocked'],
     ['user.reactivated', 'sign_in_restored'],
@@ -63,6 +64,7 @@ describe('the login service’s events we copy (B6-2b)', () => {
       'second_factor_removed',
       'sign_in_blocked',
       'sign_in_email_changed',
+      'sign_in_phone_changed',
     ]);
   });
 
@@ -78,6 +80,7 @@ describe('the login service’s events we copy (B6-2b)', () => {
       'second_factor_removed',
       'sign_in_blocked',
       'sign_in_email_changed',
+      'sign_in_phone_changed',
       'sign_in_restored',
     ]);
   });
