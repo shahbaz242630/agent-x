@@ -31,7 +31,7 @@ export const PLATFORM_GROWTH_BRAKE = (MOST_WALKED_WITHIN * 4) / 5;
 export const BRAKE_READ_EVERY_MS = 30_000;
 
 /** The anchors a process holds, as far as the brake reads them. */
-export interface AnchorsHeld {
+interface AnchorsHeld {
   latest(chain: Chain): { readonly seq: bigint } | undefined;
 }
 
@@ -59,7 +59,7 @@ export function createPlatformGrowthBrake({
 
   const headSeq = async (): Promise<bigint | undefined> => {
     const row = await database.selectFrom('platform_controls.audit_head').select('seq').limit(1).executeTakeFirst();
-    return row === undefined ? undefined : BigInt(row.seq);
+    return row?.seq;
   };
 
   const read = async (): Promise<boolean> => {

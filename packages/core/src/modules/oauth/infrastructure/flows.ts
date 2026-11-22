@@ -74,7 +74,7 @@ export const MOST_OPEN_FLOWS_A_NETWORK = 100;
  * full 100, each past half.
  */
 export const BUSY_SOURCE_FLOWS = MOST_OPEN_FLOWS_A_SOURCE / 2;
-export const BUSY_NETWORK_FLOWS = MOST_OPEN_FLOWS_A_NETWORK / 2;
+const BUSY_NETWORK_FLOWS = MOST_OPEN_FLOWS_A_NETWORK / 2;
 
 /** Where a flow comes from (6F1 G4, AG8): its source as the rate limit keys it, and that source's network. */
 export interface FlowSource {
