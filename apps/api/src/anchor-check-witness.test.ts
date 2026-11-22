@@ -62,6 +62,8 @@ function withWitness({
   const asked: { orgId: string; from: bigint; heldTo: bigint[] }[] = [];
   const pending = new Map<string, ReturnType<typeof witnessed>[]>();
   const pruned: [string, bigint[]][] = [];
+  // The heads each probe released (TR-3): compact, held to by later walks, never let go outright.
+  const released: [string, bigint[]][] = [];
   const walkedWith: bigint[][] = [];
   const reads = { fresh: true, refreshed: 0 };
   const lost = new Set<string>();
@@ -70,6 +72,8 @@ function withWitness({
   // Each chain's fingerprints of heads let go (TR-3), and the fingerprints each walkedPast was told were asked.
   const prints = new Map<string, { seq: bigint; hash: Buffer }[]>();
   const toldAsked: bigint[][] = [];
+  // Each chain's heads released on a probe's finding, as the log hands them to a walk.
+  const releasedHeads = new Map<string, { seq: bigint; hash: Buffer }[]>();
   const clock = new FixedClock(AT);
   const nameOf = (chain: Chain) => (chain.kind === 'platform' ? 'platform' : chain.orgId);
   const organizations: OrganisationChains = {
@@ -118,6 +122,9 @@ function withWitness({
     lanes: 1,
     witness: {
       pending: (chain) => pending.get(nameOf(chain)) ?? [],
+      release: (chain, heads) => {
+        released.push([nameOf(chain), heads.map(({ seq }) => seq)]);
+      },
       prune: (chain, heads) => {
         pruned.push([nameOf(chain), heads.map(({ seq }) => seq)]);
       },
@@ -135,7 +142,10 @@ function withWitness({
         if (mark !== undefined && all && from < mark.low && to >= mark.high) lost.delete(nameOf(chain));
         return lost.has(nameOf(chain));
       },
-      fingerprints: (chain) => (lost.has(nameOf(chain)) ? (prints.get(nameOf(chain)) ?? []) : []),
+      fingerprints: (chain) => [
+        ...(lost.has(nameOf(chain)) ? (prints.get(nameOf(chain)) ?? []) : []),
+        ...(releasedHeads.get(nameOf(chain)) ?? []),
+      ],
     },
   });
   const alarms = () =>
@@ -155,6 +165,8 @@ function withWitness({
     marks,
     prints,
     toldAsked,
+    released,
+    releasedHeads,
     clock,
     anchors,
     alarms,
@@ -300,6 +312,13 @@ describe('TR-1 the anchor check held to the witness log', () => {
     expect(run.toldAsked[0]).toEqual([8n, 3n, 6n]);
     expect(run.anchors.latest({ kind: 'organisation', orgId: ORG })?.seq).toBe(9n);
     expect(run.lost.has(ORG)).toBe(false);
+    // Released heads alone (nothing let go for memory): the walk is held to them and told them too, so it lets them go.
+    const released = withWitness({ verified: (orgId) => ok(orgId === ORG ? 9n : 1n) });
+    released.releasedHeads.set(ORG, [{ seq: 4n, hash: Buffer.alloc(16, 4) }]);
+    await released.check.run();
+    expect(released.walkedWith[0]).toEqual([4n]);
+    expect(released.toldAsked[0]).toEqual([4n]);
+    expect(released.anchors.latest({ kind: 'organisation', orgId: ORG })?.seq).toBe(9n);
   });
 
   it('TR-3: the platform chain is probed between runs too: on the chain, all but its highest head let go; cut below one, the alarm; a miss, a warning', async () => {
@@ -317,7 +336,8 @@ describe('TR-1 the anchor check held to the witness log', () => {
     run.pending.set('platform', [witnessed(9n), witnessed(4n)]);
     await run.check.probeWitnessed([]);
     expect(probed).toEqual([[9n, 4n]]);
-    expect(run.pruned).toEqual([['platform', [4n]]]);
+    expect(run.released).toEqual([['platform', [4n]]]);
+    expect(run.pruned).toEqual([]);
     answer = witnessed(9n);
     await run.check.probeWitnessed([]);
     expect(run.capture.lines()).toContainEqual(
@@ -329,7 +349,7 @@ describe('TR-1 the anchor check held to the witness log', () => {
         seq: '9',
       }),
     );
-    expect(run.pruned).toHaveLength(1);
+    expect(run.released).toHaveLength(1);
     answer = 'fails';
     await run.check.probeWitnessed([]);
     expect(run.capture.lines()).toContainEqual(
@@ -347,17 +367,24 @@ describe('TR-1 the anchor check held to the witness log', () => {
     run.pending.set(ORG, [witnessed(9n), witnessed(4n), witnessed(2n)]);
     run.pending.set(OTHER_ORG, [witnessed(5n), witnessed(2n)]);
     await run.check.probeWitnessed([ORG, OTHER_ORG]);
-    expect(run.pruned).toEqual([[ORG, [4n, 2n]]]);
+    expect(run.released).toEqual([[ORG, [4n, 2n]]]);
+    expect(run.pruned).toEqual([]);
     // A chain the probe didn't answer for: nothing let go.
     const missed = withWitness({ answers: { [ORG]: { kind: 'missed', error: new Error('away') } } });
     missed.pending.set(ORG, [witnessed(9n), witnessed(4n)]);
     await missed.check.probeWitnessed([ORG]);
-    expect(missed.pruned).toEqual([]);
+    expect(missed.released).toEqual([]);
+    // Heads at or below the anchor wait for their own linked walk: never released on a probe.
+    const anchored = withWitness({ answers: { [ORG]: { kind: 'moved' } } });
+    anchored.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(5n), AT));
+    anchored.pending.set(ORG, [witnessed(9n), witnessed(7n), witnessed(4n), witnessed(3n)]);
+    await anchored.check.probeWitnessed([ORG]);
+    expect(anchored.released).toEqual([[ORG, [7n]]]);
     // One head alone: kept, as it stands for the chain's length.
     const one = withWitness({ answers: { [ORG]: { kind: 'same' } } });
     one.pending.set(ORG, [witnessed(9n)]);
     await one.check.probeWitnessed([ORG]);
-    expect(one.pruned).toEqual([]);
+    expect(one.released).toEqual([]);
   });
 
   /** ORG walked to 5 and anchored here, its walk keeping the hashes of 4 and 5 (recorded within its window). */

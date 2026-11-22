@@ -147,7 +147,8 @@
 // On the chain, it is let go; a fork is the alarm and the hold; one that can't be walked is kept, said
 // (`audit.witness_head_unconfirmed`), and the chain anchored no more until it is: never let go unseen.
 // Between runs (TR-3), the leader's probe after each read of the log (the chains that gained a head, and those holding
-// most) lets go every head it found on the chain but the highest, which stands for those below it: so a burst never
+// most) releases every head above the anchor it found on the chain but the highest, compact, the next walk from the
+// anchor held to them until it passes them (never let go on the probe alone, as it reads no link): so a burst never
 // fills what the log may hold. A chain that let heads go for memory anyway anchors again once a walk held to every head
 // still held and to the fingerprints of those let go (each its place and its hash's first 8 bytes, checked as a head's)
 // runs from below the lowest let go to at or past the highest (the log's walkedPast), with no rebase.
@@ -406,7 +407,7 @@ export interface AnchorCheckOptions {
   /** The witness log (TR-1): the heads each probe and walk is held to, let go once confirmed. None, held to none. */
   readonly witness?:
     | (Pick<WitnessLog, 'pending' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> &
-        Partial<Pick<WitnessLog, 'walkedPast' | 'fingerprints'>>)
+        Partial<Pick<WitnessLog, 'walkedPast' | 'fingerprints' | 'release'>>)
     | undefined;
 }
 
@@ -850,10 +851,11 @@ export function createAnchorCheck({
     const from = report.walkedFrom ?? last?.seq ?? 0n;
     const askedOf = (head: Witnessed) => asked.some(({ seq, hash }) => seq === head.seq && hash.equals(head.hash));
     if (witness.pending(chain).some((head) => head.seq <= report.seq && !askedOf(head))) return undefined;
-    // Heads let go for memory (TR-3): a walk held to every head still held and every fingerprint of those let go, from
-    // below the lowest of them to at or past the highest, found each place holding the event it did; else the chain
-    // waits for one that does (or a rebase), said. A place holding another was this walk's `cut_back` already.
-    if (witness.beyondMemory(chain) && witness.walkedPast?.(chain, from, report.seq, asked) !== false) {
+    // The compact heads it was held to (TR-3), told: released ones it passed, linked from the anchor, let go; heads let go
+    // for memory set aside once it passed every fingerprint, from below the lowest to at or past the highest; else the
+    // chain waits for a walk that does (or a rebase), said. A place holding another event was this walk's `cut_back`.
+    const beyond = witness.walkedPast?.(chain, from, report.seq, asked) ?? witness.beyondMemory(chain);
+    if (beyond) {
       log.error('audit.witness_beyond_memory', { chain: chain.kind, anchoring: false });
       return undefined;
     }
@@ -1366,13 +1368,18 @@ export function createAnchorCheck({
   };
 
   /**
-   * The heads a probe found on the chain, each its event's hash at its place in the probe's one statement (TR-3), let go
-   * but the highest: on a hash-linked chain it stands for every one below it (a cut below any is below it too, and a
-   * walk from the anchor re-hashes the links between), so a burst between anchor runs never fills what may be held.
+   * The heads above the chain's anchor a probe found on the chain, each its event's hash at its place in the probe's one
+   * statement (TR-3), released but the highest: compact, and every later walk held to them until one from the anchor
+   * passes them (the log's release), so a burst between anchor runs never fills what may be held. Never let go outright:
+   * the probe reads no link between them, so rows put back beside a cut branch for its statement alone would pass it.
+   * Those at or below the anchor wait for their own linked walk (lateHeadsHold).
    */
   const letGoBelowHighest = (chain: Chain, heldTo: readonly Witnessed[]): void => {
-    const [, ...below] = heldTo.toSorted((one, other) => (one.seq > other.seq ? -1 : 1));
-    if (below.length > 0) witness?.prune(chain, below);
+    const anchored = anchors.latest(chain)?.seq ?? -1n;
+    const [, ...below] = heldTo
+      .filter(({ seq }) => seq > anchored)
+      .toSorted((one, other) => (one.seq > other.seq ? -1 : 1));
+    if (below.length > 0) witness?.release?.(chain, below);
   };
 
   /** A probe's answers kept for the turns: unmoved or failing as found, read anyway; its misses said in one line. */
