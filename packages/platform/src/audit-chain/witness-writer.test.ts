@@ -25,6 +25,7 @@ const CHAIN: Chain = { kind: 'organisation', orgId: ORG };
 const OTHER: Chain = { kind: 'organisation', orgId: OTHER_ORG };
 const AT = new Date('2026-11-21T10:00:00.000Z');
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 const REASON = 'INC-2026-11-21';
 
 type Store = ReturnType<typeof createFakeWriteOnceStore>;
@@ -315,59 +316,241 @@ describe('TR-14 attribution through snapshots', () => {
   });
 });
 
-describe('TR-14 set-aside snapshots at a start', () => {
-  it("goes back past more than a day's of a set-aside leader's snapshots to an older one, its state whole", async () => {
+describe('TR-7 review: a start under a set-aside flood', () => {
+  it('fetches a bounded number, takes no snapshot past them, holds a stop from the day’s heads files, and says so', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const leader = copyOn(store, { snapshots, leads: true, time });
+    await leader.log.refresh();
+    leader.log.soon(OTHER, head(1n, 1));
+    await leader.log.flush();
+    // A stop named before the leader's snapshot, left out of it.
+    const honest = copyOn(store, { time });
+    time.at -= 10 * MINUTE;
+    await honest.log.now(CHAIN, head(7n, 7));
+    time.at += 11 * MINUTE;
+    for (let one = 0; one < 1500; one += 1) {
+      const name = fileName('e1/set-aside/', time.at - 1500 + one);
+      store.files.set(name, Buffer.from('junk'));
+      store.created.set(name, time.at - 1500 + one);
+    }
+    time.at += 1000;
+    const real = await setAsideFile(store, leader.log.writer(), time.at);
+    store.created.set(real, time.at);
+    const before = { ...store.calls };
+    const starting = copyOn(store, { snapshots, time });
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(starting.log.state()).toBe('read');
+    // The set-asides fetched at most the start's share, and the day's few heads files.
+    expect(store.calls.smallGets - before.smallGets).toBeLessThanOrEqual(1000 + 5);
+    expect(snapshots.calls.smallGets).toBe(0);
+    expect(seqs(starting.log.pending(CHAIN))).toEqual([7n]);
+    // Said once a pass, never once a junk file.
+    expect(starting.alarms('spoiled')).toEqual([expect.objectContaining({ folder: 'e1/set-aside/', files: 1000 })]);
+    expect(starting.alarms('set_aside_flood')).toHaveLength(1);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+  });
+});
+
+describe('TR-7 review: a start reading set-asides further back for an old snapshot', () => {
+  it('takes no snapshot that a set-aside it left unfetched could pass over', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const old = AT.getTime() - 48 * HOUR;
+    await plant(snapshots, 'snapshots', SNAPSHOT, [headLine(4n, 4, old)], old);
+    for (let one = 0; one < 1001; one += 1) {
+      const name = fileName('e1/set-aside/', old + one);
+      store.files.set(name, Buffer.from('junk'));
+      store.created.set(name, old + one);
+    }
+    const starting = copyOn(store, { snapshots });
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(snapshots.calls.smallGets).toBe(0);
+    expect(starting.log.pending(CHAIN)).toEqual([]);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+  });
+});
+
+describe('TR-7 re-review: a start’s set-aside reads, failed or flooded', () => {
+  it('a fetch that fails mid-way leaves the reach where it was: the retry still finds the set-aside, the snapshot passed over', async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
     const LEADER = '0123456789ab';
-    await plant(
-      snapshots,
-      'snapshots',
-      SNAPSHOT,
-      [headLine(4n, 4, AT.getTime() - 40 * 60 * MINUTE)],
-      AT.getTime() - 40 * 60 * MINUTE,
-    );
-    for (let hour = 30; hour > 0; hour -= 1) {
-      await plant(snapshots, 'snapshots', SNAPSHOT, [], AT.getTime() - hour * 60 * MINUTE, LEADER);
+    const old = AT.getTime() - 48 * HOUR;
+    await plant(snapshots, 'snapshots', SNAPSHOT, [headLine(4n, 4, old)], old, LEADER);
+    const real = await setAsideFile(store, LEADER, old + MINUTE);
+    store.created.set(real, old + MINUTE);
+    let failOnce = true;
+    store.instead.getAtMost = (name, most) => {
+      if (name === real && failOnce) {
+        failOnce = false;
+        return Promise.reject(new Error('the store answered 503'));
+      }
+      return store.real.getAtMost(name, most);
+    };
+    const starting = copyOn(store, { snapshots });
+    expect(await starting.log.refreshWhole()).toBe(false);
+    expect(await starting.log.refreshWhole()).toBe(true);
+    // Its writer known set aside, the old snapshot is past the walk's reach: not taken, said.
+    expect(starting.log.pending(CHAIN)).toEqual([]);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+  });
+
+  it('a hundred thousand junk names in the start’s look back: the list stops at its bound, nothing held whole, the alarms', async () => {
+    const store = createFakeWriteOnceStore();
+    for (let one = 0; one < 100_000; one += 1) {
+      const at = AT.getTime() - one * 500;
+      const name = fileName('e1/set-aside/', at);
+      store.files.set(name, Buffer.from('junk'));
+      store.created.set(name, at);
+    }
+    const starting = copyOn(store);
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(starting.log.state()).toBe('read');
+    // Ten pages of set-aside names and the heads' few: never the whole flood listed or fetched.
+    expect(store.calls.lists).toBeLessThanOrEqual(16);
+    expect(store.calls.smallGets).toBe(0);
+    expect(starting.alarms('set_aside_flood')).toEqual([
+      expect.objectContaining({ mostRead: 1000, mostListed: 50_000 }),
+    ]);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+    expect(starting.capture.lines().filter(({ event }) => event === 'audit.witness_rebase_needed')).toHaveLength(1);
+  });
+});
+
+describe('TR-14 set-aside snapshots at a start', () => {
+  it("goes back past a day's of a set-aside leader's snapshots, a quarter hour apart, to an older one, its state whole", async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const LEADER = '0123456789ab';
+    const older = AT.getTime() - 23 * 60 * MINUTE - 50 * MINUTE;
+    await plant(snapshots, 'snapshots', SNAPSHOT, [headLine(4n, 4, older)], older);
+    for (let quarter = 95; quarter > 0; quarter -= 1) {
+      await plant(snapshots, 'snapshots', SNAPSHOT, [], AT.getTime() - quarter * 15 * MINUTE, LEADER);
     }
     await copyOn(store, { signer: 'operator' }).log.setAside(LEADER, REASON);
     const starting = copyOn(store, { snapshots });
     await starting.log.refresh();
     expect(seqs(starting.log.pending(CHAIN))).toEqual([4n]);
     expect(starting.alarms('set_aside')).toEqual([
-      expect.objectContaining({ writers: [LEADER], folder: 'snapshots', files: 30 }),
+      expect.objectContaining({ writers: [LEADER], folder: 'snapshots', files: 95 }),
     ]);
     expect(starting.alarms('spoiled')).toEqual([]);
+    expect(starting.alarms('read_back_capped')).toEqual([]);
   });
 
-  it("with no other snapshot, reads heads files back from the oldest set-aside one's time, past a day", async () => {
+  it('TR-7 review: an honest snapshot older than a day under a set-aside run is taken whole; heads files read a day back, the alarm', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const LEADER = '0123456789ab';
+    const older = AT.getTime() - 72 * 60 * MINUTE;
+    await plant(snapshots, 'snapshots', SNAPSHOT, [headLine(4n, 4, older)], older);
+    for (let hour = 20; hour > 0; hour -= 1) {
+      await plant(snapshots, 'snapshots', SNAPSHOT, [], AT.getTime() - hour * 60 * MINUTE, LEADER);
+    }
+    await plant(store, 'heads', HEADS, [headLine(3n, 3, older + MINUTE)], older + MINUTE);
+    await plant(store, 'heads', HEADS, [headLine(5n, 5, AT.getTime() - HOUR)], AT.getTime() - HOUR);
+    await copyOn(store, { signer: 'operator' }).log.setAside(LEADER, REASON);
+    const starting = copyOn(store, { snapshots });
+    await starting.log.refresh();
+    // The snapshot's state, and the heads files of the last day alone.
+    expect(seqs(starting.log.pending(CHAIN))).toEqual([5n, 4n]);
+    expect(starting.alarms('read_back_capped')).toEqual([
+      expect.objectContaining({ level: 'error', snapshotAt: new Date(older).toISOString() }),
+    ]);
+  });
+
+  it('TR-7 D3: with none but a set-aside one past a day, reads heads files back a day alone, and says older went unread', async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
     const LEADER = '0123456789ab';
     const threeDays = AT.getTime() - 72 * 60 * MINUTE;
     await plant(snapshots, 'snapshots', SNAPSHOT, [], threeDays, LEADER);
     await plant(store, 'heads', HEADS, [headLine(3n, 3, threeDays + MINUTE)], threeDays + MINUTE);
+    await plant(store, 'heads', HEADS, [headLine(5n, 5, AT.getTime() - HOUR)], AT.getTime() - HOUR);
     await copyOn(store, { signer: 'operator' }).log.setAside(LEADER, REASON);
     const starting = copyOn(store, { snapshots });
     await starting.log.refresh();
-    expect(seqs(starting.log.pending(CHAIN))).toEqual([3n]);
+    expect(seqs(starting.log.pending(CHAIN))).toEqual([5n]);
+    expect(starting.alarms('read_back_capped')).toEqual([
+      expect.objectContaining({ level: 'error', folder: 'snapshots' }),
+    ]);
+  });
+
+  it('TR-7 D3: a thousand set-aside snapshots and a week of heads files: a start reads a day back, in bounded calls', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const LEADER = '0123456789ab';
+    // Every ten minutes for a week: never fetched, as their writer is set aside.
+    for (let one = 1; one <= 1000; one += 1) {
+      snapshots.files.set(fileName('e1/snapshots/', AT.getTime() - one * 10 * MINUTE, LEADER), Buffer.from('junk'));
+    }
+    for (let hour = 1; hour <= 7 * 24; hour += 1) {
+      const at = AT.getTime() - hour * HOUR;
+      await plant(store, 'heads', HEADS, [headLine(BigInt(1000 - hour), 1, at)], at);
+    }
+    await copyOn(store, { signer: 'operator' }).log.setAside(LEADER, REASON);
+    const before = { heads: { ...store.calls }, snapshots: { ...snapshots.calls } };
+    const starting = copyOn(store, { snapshots });
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(starting.log.state()).toBe('read');
+    // A day of heads files and the set-aside, none of the snapshots.
+    expect(store.calls.smallGets - before.heads.smallGets).toBeLessThanOrEqual(26);
+    expect(snapshots.calls.smallGets - before.snapshots.smallGets).toBe(0);
+    expect(store.calls.lists - before.heads.lists + snapshots.calls.lists - before.snapshots.lists).toBeLessThan(40);
+    expect(Math.min(...seqs(starting.log.pending(CHAIN)).map(Number))).toBeGreaterThanOrEqual(1000 - 24);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+    expect(starting.alarms('set_aside')).toContainEqual(expect.objectContaining({ folder: 'snapshots', files: 96 }));
   });
 });
 
 describe('TR-14 the set-aside folder read', () => {
   it('a flood of junk slows no refresh: at most a hundred fetched a pass, said; the rest wait for the next', async () => {
     const store = createFakeWriteOnceStore();
+    const reader = copyOn(store);
+    expect(await reader.log.refreshWhole()).toBe(true);
+    // No landing time from the store: none can be judged misdated, so each is fetched in turn.
     for (let one = 0; one < 10_000; one += 1)
       store.files.set(fileName('e1/set-aside/', AT.getTime() - one), Buffer.from('junk'));
-    const reader = copyOn(store);
     const started = performance.now();
     expect(await reader.log.refreshWhole()).toBe(true);
     expect(performance.now() - started).toBeLessThan(5_000);
     expect(store.calls.smallGets).toBeLessThanOrEqual(100);
     expect(reader.alarms('set_aside_flood')).toHaveLength(1);
+    expect(reader.alarms('set_aside_misdated')).toEqual([]);
     const fetched = store.calls.smallGets;
     expect(await reader.log.refreshWhole()).toBe(true);
     expect(store.calls.smallGets - fetched).toBeLessThanOrEqual(100);
+  });
+
+  it('TR-7 review: a start fetches every set-aside, so a flood ahead of the real one never lets it take the set-aside leader’s snapshot', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const leader = copyOn(store, { snapshots, leads: true, time });
+    await leader.log.refresh();
+    leader.log.soon(OTHER, head(1n, 1));
+    await leader.log.flush();
+    // A stop the leader leaves out of its snapshot: another copy's, which it (broken into) claims never to have read.
+    const honest = copyOn(store, { time });
+    time.at -= 10 * MINUTE;
+    await honest.log.now(CHAIN, head(7n, 7));
+    time.at += 10 * MINUTE + MINUTE;
+    // Well-dated junk planted before the real set-aside, more than a pass fetches.
+    for (let one = 0; one < 150; one += 1) {
+      const name = fileName('e1/set-aside/', time.at - 150 + one);
+      store.files.set(name, Buffer.from('junk'));
+      store.created.set(name, time.at - 150 + one);
+    }
+    time.at += 1000;
+    const real = await setAsideFile(store, leader.log.writer(), time.at);
+    store.created.set(real, time.at);
+    // A day on, past every heads file's look back from the leader's snapshot but the stop's own.
+    const starting = copyOn(store, { snapshots, time });
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(starting.alarms('set_aside')).toContainEqual(expect.objectContaining({ folder: 'snapshots', files: 1 }));
+    expect(seqs(starting.log.pending(CHAIN))).toEqual([7n]);
   });
 
   it('a set-aside file listed and then gone fails the read: never a pass that missed one', async () => {
@@ -392,6 +575,94 @@ describe('TR-14 the set-aside folder read', () => {
     time.at += 20 * MINUTE;
     await reader.log.refresh();
     expect(store.calls.smallGets).toBe(fetched);
+  });
+});
+
+/** A set-aside of `writer` signed with the operator's key, named at `at` (as the operator's command writes it). */
+async function setAsideFile(store: Store, writer: string, at: number): Promise<string> {
+  const name = fileName('e1/set-aside/', at);
+  store.files.set(
+    name,
+    await signedFile(keys, { label: 'audit-witness-set-aside', purpose: 'operator-signing' }, name, 1, [
+      JSON.stringify({ w: writer, reason: REASON }),
+    ]),
+  );
+  return name;
+}
+
+describe('TR-7 D1 lists bounded to the time window', () => {
+  it('a hundred thousand names dated in 2200 and as many back-dated set-asides cost a start and a refresh a few calls, one line', async () => {
+    const store = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const forger = copyOn(store, { time });
+    await forger.log.now(CHAIN, head(9n, 9));
+    const honest = copyOn(store, { time });
+    await honest.log.now(OTHER, head(3n, 1));
+    time.at += MINUTE;
+    await setAsideFile(store, forger.log.writer(), time.at);
+    for (let one = 0; one < 100_000; one += 1) {
+      store.files.set(fileName('e1/heads/', Date.UTC(2200, 0, 1) + one), Buffer.from('junk'));
+      store.files.set(fileName('e1/set-aside/', AT.getTime() - 48 * 60 * MINUTE - one * 20_000), Buffer.from('junk'));
+    }
+    // A few dated just past the clocks' spread: listed, and said once, with their count.
+    for (const ahead of [20, 21, 22])
+      store.files.set(fileName('e1/heads/', time.at + ahead * MINUTE), Buffer.from('junk'));
+    const reader = copyOn(store, { time });
+    const before = { ...store.calls };
+    expect(await reader.log.refreshWhole()).toBe(true);
+    expect(store.calls.lists - before.lists).toBeLessThanOrEqual(10);
+    // The set-aside and the honest file alone: the forger's passed over by name, no junk fetched.
+    expect(store.calls.smallGets - before.smallGets).toBe(2);
+    expect(seqs(reader.log.pending(OTHER))).toEqual([3n]);
+    expect(reader.log.pending(CHAIN)).toEqual([]);
+    expect(reader.alarms('set_aside')).toHaveLength(1);
+    expect(reader.alarms('future')).toEqual([
+      expect.objectContaining({ folders: [expect.objectContaining({ folder: 'e1/heads/', files: 3 })] }),
+    ]);
+    time.at += 10_000;
+    const later = store.calls.lists;
+    expect(await reader.log.refreshWhole()).toBe(true);
+    expect(store.calls.lists - later).toBeLessThanOrEqual(6);
+    expect(reader.alarms('future').length).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('TR-7 D6 a set-aside flood', () => {
+  it('never keeps a real set-aside unread: read oldest first, and names far from when they landed passed over, said', async () => {
+    const store = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const reader = copyOn(store, { time });
+    expect(await reader.log.refreshWhole()).toBe(true);
+    time.at += 1000;
+    const forger = copyOn(store, { time });
+    await forger.log.now(CHAIN, head(9n, 9));
+    time.at += 3 * MINUTE;
+    const real = await setAsideFile(store, forger.log.writer(), time.at);
+    store.created.set(real, time.at);
+    // Junk the flooder names after the real one, landing as named, more each pass than a pass fetches; and junk named
+    // before it (inside the look back) that landed only now.
+    const flood = (count: number) => {
+      for (let one = 0; one < count; one += 1) {
+        const name = fileName('e1/set-aside/', time.at + 1 + one);
+        store.files.set(name, Buffer.from('junk'));
+        store.created.set(name, time.at + 1 + one);
+        const early = fileName('e1/set-aside/', AT.getTime() - 4 * MINUTE - one);
+        store.files.set(early, Buffer.from('junk'));
+        store.created.set(early, time.at);
+      }
+    };
+    flood(300);
+    time.at += 1000;
+    await forger.log.now(CHAIN, head(10n, 8));
+    expect(await reader.log.refreshWhole()).toBe(true);
+    flood(300);
+    expect(await reader.log.refreshWhole()).toBe(true);
+    // The forger's file named before the set-aside passed over from the first pass after it landed; its later one held.
+    expect(reader.alarms('set_aside')).toHaveLength(1);
+    expect(seqs(reader.log.pending(CHAIN))).toEqual([10n]);
+    expect(reader.alarms('set_aside_late')).toHaveLength(1);
+    expect(reader.alarms('set_aside_misdated').map(({ files }) => files)).toEqual([300, 300]);
+    expect(reader.alarms('set_aside_flood')).toHaveLength(1);
   });
 });
 
