@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { strongerClass, WITNESSED_SOON, witnessClassOf } from './witness-class.ts';
 
-describe('TR-1 how soon a write’s chain head is witnessed', () => {
+describe('SEC-DB-20 TR-1 how soon a write’s chain head is witnessed', () => {
   it('the agent’s decision transaction and a payment’s outcome moves go with the next flush', () => {
     expect(witnessClassOf(['spend_request.received', 'spend_request.decided'])).toBe('soon');
     expect(witnessClassOf(['month_total.held', 'payee_window.held', 'order_slot.held'])).toBe('soon');
