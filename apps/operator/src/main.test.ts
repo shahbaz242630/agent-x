@@ -1253,7 +1253,8 @@ describe('TR-14 a witness writer set aside, typed or from a file (playbook H)', 
     async (_how, argv) => {
       const dir = witnessDir();
       const { code, events, line } = await run(argv, { ...ENV, AGENTX_AUDIT_WITNESS_DIR: dir });
-      expect(code).toBe(0);
+      // TR-7 C3: the line stands, but the run isn't done until its event is recorded: 1, and a run again is safe.
+      expect(code).toBe(1);
       expect(events).toEqual([
         'operator.witness_writer_set_aside',
         'operator.database_unavailable',
@@ -1264,7 +1265,7 @@ describe('TR-14 a witness writer set aside, typed or from a file (playbook H)', 
       expect(readdirSync(path.join(dir, 'e1', 'set-aside'))).toHaveLength(1);
       // Run again, as `operator.not_recorded` says: its line found, no second one, so the writer's time stands.
       const again = await run(argv, { ...ENV, AGENTX_AUDIT_WITNESS_DIR: dir });
-      expect(again.code).toBe(0);
+      expect(again.code).toBe(1);
       expect(again.line('operator.witness_writer_set_aside')).toMatchObject({ writer: WRITER, before: true });
       expect(readdirSync(path.join(dir, 'e1', 'set-aside'))).toHaveLength(1);
       // Under the operator's own key, as the API's copies check it: sound, so no alarm.

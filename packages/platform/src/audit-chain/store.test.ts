@@ -9,9 +9,11 @@ import {
   appendEvents,
   ChainBroken,
   type ChainBatchWriter,
+  ChainClockDiffers,
   type ChainReader,
   ChainStoreError,
   type ChainWriter,
+  CLOCKS_DIFFER_MS,
   clockOf,
   countIn,
   edgesIn,
@@ -566,10 +568,46 @@ describe('reading stored rows as untrusted', () => {
   });
 
   it('reads the clock read with the head, and fails a store that read none', () => {
-    expect(clockOf({ ...HEAD_ROW, now: NOW })).toBe(NOW);
+    expect(clockOf({ ...HEAD_ROW, now: NOW }, CHAIN, NOW.getTime())).toBe(NOW);
     for (const now of [undefined, '2026-09-19', new Date(Number.NaN)]) {
-      expect(() => clockOf({ ...HEAD_ROW, now })).toThrow(new ChainStoreError('it read no clock with the head'));
+      expect(() => clockOf({ ...HEAD_ROW, now }, CHAIN, NOW.getTime())).toThrow(
+        new ChainStoreError('it read no clock with the head'),
+      );
     }
+  });
+
+  // SEC-DB-11 (TR-7 A1): a database owner moving its clock can't stretch the horizons read from sealed times.
+  it.each([CLOCKS_DIFFER_MS, -CLOCKS_DIFFER_MS])(
+    'SEC-DB-11 takes a database clock %i ms from the app’s: the allowance itself',
+    (differs) => {
+      expect(clockOf({ ...HEAD_ROW, now: NOW }, CHAIN, NOW.getTime() - differs)).toBe(NOW);
+    },
+  );
+
+  it.each([
+    [CLOCKS_DIFFER_MS + 1, 'ahead of'],
+    [-CLOCKS_DIFFER_MS - 1, 'behind'],
+  ])('SEC-DB-11 refuses a database clock %i ms from the app’s, naming the chain and how far', (differs, side) => {
+    const refusal = (() => {
+      try {
+        clockOf({ ...HEAD_ROW, now: NOW }, { kind: 'organisation', orgId: id(9) }, NOW.getTime() - differs);
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    })();
+    expect(refusal).toBeInstanceOf(ChainClockDiffers);
+    expect(refusal).toBeInstanceOf(ChainBroken);
+    expect(refusal).toMatchObject({ differsMs: differs, chain: { kind: 'organisation', orgId: id(9) } });
+    expect((refusal as Error).message).toContain(`seconds ${side} the app's`);
+  });
+
+  it('compares with the wall clock when no time is given', () => {
+    const now = new Date(Math.trunc(Date.now() / 1000) * 1000);
+    expect(clockOf({ ...HEAD_ROW, now }, CHAIN)).toBe(now);
+    expect(() => clockOf({ ...HEAD_ROW, now: new Date(now.getTime() + 10 * 60_000) }, CHAIN)).toThrow(
+      ChainClockDiffers,
+    );
   });
 
   it.each([

@@ -109,7 +109,7 @@
 // first (`answeredFromEarlier`), so no retry is told the change succeeded with no head of it outside the database; and
 // holds the chain to the head that write left (kept with its answer, migration 0115): one gone from the chain is the write cut
 // out, the alarm and the hold, and the request's answer 503 (WriteCutBack), never the stored one.
-import { ChainBroken, type StateDigest } from '@agentx/platform/audit-chain';
+import { ChainBroken, ChainClockDiffers, type StateDigest } from '@agentx/platform/audit-chain';
 import { answeredFromEarlier, inBoundedSavepoint, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -638,6 +638,16 @@ export async function holdOrganisation(
 }
 
 /**
+ * The alarm for a chain that refused the work's write, named by that chain (the work may record on the platform's too).
+ * TR-7 A1: the database's clock too far from the app's is named apart, by how far, from a head that fails its check.
+ */
+function chainRefused(logger: Logger, orgId: string, error: ChainBroken): void {
+  const why = error instanceof ChainClockDiffers ? { reason: 'clocks_differ', differsMs: error.differsMs } : {};
+  const named = error.chain.kind === 'platform' ? logger : logger.child({ orgId: orgId.toLowerCase() });
+  named.error('audit.integrity_failed', { chain: error.chain.kind, check: 'record', ...why });
+}
+
+/**
  * Runs `work` in withTenant's transaction for the organisation, with signed
  * states of its own and each statement limited (withTenant's `limited`), and then
  * puts the organisation on hold for anything they found tampered with.
@@ -701,12 +711,8 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
         ...(error.seq === undefined ? { record: error.record ?? 'forged' } : { seq: error.seq.toString() }),
       });
       found.push({ orgId: own, subjectType: CHAIN_SUBJECT, objectId: own, sign: 'chain', chainFailure: 'cut_back' });
-    } else if (error instanceof ChainBroken && error.chain.kind === 'platform') {
-      logger.error('audit.integrity_failed', { chain: 'platform', check: 'record' });
     } else if (error instanceof ChainBroken) {
-      logger
-        .child({ orgId: orgId.toLowerCase() })
-        .error('audit.integrity_failed', { chain: 'organisation', check: 'record' });
+      chainRefused(logger, orgId, error);
     }
     throw error;
   } finally {
