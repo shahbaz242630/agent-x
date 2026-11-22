@@ -47,6 +47,12 @@
 //   console to say why; no security event, as nothing about the sign-in was
 //   wrong. Each refusal warned with the person's ID, at most once a minute a
 //   person (personCapWarning). A sign-out is never refused.
+// - S210 R2-4: while the shared platform chain has grown PLATFORM_GROWTH_BRAKE
+//   past its last anchor (platform-growth-brake.ts), a sign-in or step-up
+//   started, and a callback come back, is SIGN_IN_UNAVAILABLE, 503 with
+//   Retry-After, no flow begun and no session opened or rotated, warned at most
+//   once a minute; so many accounts at once can't hold every organisation's
+//   hand-off `too_far`. A sign-out is never refused.
 // - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
 //   a step-up for a challenge of the signed-in person's own session: a flow
 //   cookie, and off to the login service to sign in again (`prompt=login`).
@@ -101,6 +107,7 @@ import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { capWarning, personCapWarning } from './oauth-authorizing.ts';
 import { clientSite, createAddressCounter, type ProxyTrust, shareOfCopies } from './rate-limit.ts';
+import { PLATFORM_GROWTH_BRAKE, type PlatformGrowthBrake } from './platform-growth-brake.ts';
 import type { SecurityEventSink } from './security-recorder.ts';
 
 export const FLOW_COOKIE = '__Host-agentx-flow';
@@ -128,6 +135,8 @@ export interface SignInRoutesOptions {
   readonly trust: ProxyTrust;
   /** How many `web` copies share that limit, each counting its share. */
   readonly copies: number;
+  /** The platform chain's growth brake (R2-4): new sessions and step-ups wait while it is on; never on when not given. */
+  readonly growthBrake?: Pick<PlatformGrowthBrake, 'engaged'> | undefined;
 }
 
 /** The attributes both cookies share: a `__Host-` cookie must be Secure, on Path=/, with no Domain. */
@@ -265,6 +274,9 @@ const UNAVAILABLE_RETRY_SECONDS = 15;
 /** How long to wait past a person's day's sessions or step-ups (TR-7): an hour, as the oldest leave the 24 hours. */
 const PERSON_SPENT_RETRY_SECONDS = 3600;
 
+/** How long to wait while the platform chain's growth brake is on (R2-4): about an anchor check's run, which lifts it. */
+const BRAKED_RETRY_SECONDS = 60;
+
 export function registerSignIn(
   app: FastifyInstance,
   {
@@ -276,6 +288,7 @@ export function registerSignIn(
     clock = systemClock,
     trust,
     copies,
+    growthBrake,
   }: SignInRoutesOptions,
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
@@ -292,6 +305,19 @@ export function registerSignIn(
   // S210 TR-7: a person past their day's sessions or step-ups, said the same way.
   const sessionsSpent = personCapWarning(logger, clock, 'auth.person_sessions_spent', { most: MOST_SESSIONS_A_DAY });
   const stepUpsSpent = personCapWarning(logger, clock, 'auth.person_step_ups_spent', { most: MOST_STEP_UPS_A_DAY });
+  // S210 R2-4: new sessions and step-ups refused while the platform chain's growth brake is on, said the same way.
+  const brakedLine = capWarning(logger, clock, 'auth.platform_chain_braked', { most: PLATFORM_GROWTH_BRAKE });
+  /** Whether the brake is on; and refused, 503 to try again a minute on: no flow begun, the flow cookie cleared. */
+  const brakeOn = async (): Promise<boolean> => growthBrake !== undefined && (await growthBrake.engaged());
+  const braked = (request: FastifyRequest, reply: FastifyReply) => {
+    brakedLine();
+    return sendErrorBody(
+      reply.header('retry-after', String(BRAKED_RETRY_SECONDS)).header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0)),
+      503,
+      'SIGN_IN_UNAVAILABLE',
+      request.id,
+    );
+  };
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
   const failed = (request: FastifyRequest, reply: FastifyReply, failure: SignInFailure, reason?: string) => {
     logger
@@ -376,6 +402,7 @@ export function registerSignIn(
     { schema: SIGN_IN_SCHEMA, config: PUBLIC, onRequest: startLimit },
     async (request, reply) => {
       if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
+      if (await brakeOn()) return braked(request, reply);
       let begun;
       try {
         begun = await signIn.begin(request.query.returnTo, clientSite(request.ip));
@@ -406,6 +433,7 @@ export function registerSignIn(
 
   routes.get('/v1/auth/callback', { schema: CALLBACK_SCHEMA, config: PUBLIC }, async (request, reply) => {
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
+    if (await brakeOn()) return braked(request, reply);
     const { code, state, error } = request.query;
     // The login service said no (the person cancelled, say), or the address was cut short: the flow is still taken,
     // so a step-up's browser goes back to its page (CO2), and a sign-in's is refused as before.
@@ -455,6 +483,7 @@ export function registerSignIn(
     // The access hook lets no one else through; a route that runs without a person is a bug.
     if (session === null) throw new Error('the step-up route ran without a signed-in person');
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
+    if (await brakeOn()) return braked(request, reply);
     let begun;
     try {
       begun = await signIn.beginStepUp(session.sessionId, request.query.challenge, request.query.returnTo);

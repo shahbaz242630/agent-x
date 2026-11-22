@@ -31,6 +31,7 @@ import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
 import { personCapWarning } from './oauth-authorizing.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
 import { clientSite } from './rate-limit.ts';
+import { PLATFORM_GROWTH_BRAKE } from './platform-growth-brake.ts';
 import { buildServer } from './server.ts';
 import { cookieValue, FLOW_COOKIE, SESSION_COOKIE, SIGN_IN_STARTS } from './sign-in.ts';
 
@@ -134,6 +135,7 @@ async function server(
     perUser?: number;
     loginSessions?: LoginSessions;
     findMembership?: FindMembership;
+    growthBrake?: { engaged(): Promise<boolean> };
   } = {},
 ) {
   const config = {
@@ -166,7 +168,12 @@ async function server(
     signIn:
       signIn === undefined
         ? undefined
-        : { service: signIn, sessionSeconds: SESSION_SECONDS, loginSessions: options.loginSessions },
+        : {
+            service: signIn,
+            sessionSeconds: SESSION_SECONDS,
+            loginSessions: options.loginSessions,
+            growthBrake: options.growthBrake,
+          },
     securityEvents: { note: (event) => noted.push(event) },
     findMembership: options.findMembership,
   });
@@ -1314,5 +1321,84 @@ describe('reading our cookies', () => {
     ['a name that runs into a value', `${FLOW_COOKIE}x${FLOW_ID}`],
   ])('finds none with %s', (_, header) => {
     expect(cookieValue(header, FLOW_COOKIE)).toBeUndefined();
+  });
+});
+
+describe('SEC-LIM-13 S210 R2-4 the platform chain’s growth brake', () => {
+  const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c3';
+  /** A brake the test turns on and off, counting how often it was asked. */
+  const brakeOf = () => {
+    const brake = {
+      on: true,
+      asked: 0,
+      engaged: () => {
+        brake.asked += 1;
+        return Promise.resolve(brake.on);
+      },
+    };
+    return brake;
+  };
+  const signingIn = { url: '/v1/auth/sign-in' };
+  const coming = () =>
+    callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`);
+  const steppingUp = {
+    url: `/v1/auth/step-up?challenge=${CHALLENGE}`,
+    headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}` },
+  };
+  const braked = (response: Awaited<ReturnType<FastifyInstance['inject']>>) => {
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual(errorBody('SIGN_IN_UNAVAILABLE', response.headers['x-correlation-id'] as string));
+    expect(response.headers['retry-after']).toBe('60');
+    expect(setCookies(response.headers['set-cookie'])).toEqual([
+      `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+    ]);
+  };
+
+  it('refuses a sign-in, a callback and a step-up while on, 503 with Retry-After, warned once a minute; a sign-out still works', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const brake = brakeOf();
+    const { app, capture, noted } = await server(standIn, { growthBrake: brake });
+
+    braked(await app.inject(signingIn));
+    braked(await app.inject(coming()));
+    braked(await app.inject(steppingUp));
+
+    // Nothing reached the sign-in: no flow begun, no session opened or rotated, no step-up begun.
+    expect(standIn.begun).toEqual([]);
+    expect(standIn.completed).toEqual([]);
+    expect(standIn.steppedUp).toEqual([]);
+    // Said once for the minute, with the brake's place; nothing about the sign-ins was wrong.
+    expect(capture.lines().filter((line) => line.event === 'auth.platform_chain_braked')).toEqual([
+      expect.objectContaining({ level: 'warn', most: PLATFORM_GROWTH_BRAKE, refused: 1 }),
+    ]);
+    expect(noted).toEqual([]);
+    // A sign-out is never refused, nor asks the brake.
+    const asked = brake.asked;
+    const out = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/sign-out',
+      headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}`, origin: PUBLIC_ORIGIN },
+    });
+    expect(out.statusCode).toBe(200);
+    expect(standIn.signedOut).toEqual([SESSION_ID]);
+    expect(brake.asked).toBe(asked);
+  });
+
+  it('lets every one through as before once it is off', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const brake = brakeOf();
+    brake.on = false;
+    const { app, capture } = await server(standIn, { growthBrake: brake });
+
+    expect((await app.inject(signingIn)).statusCode).toBe(302);
+    expect((await app.inject(coming())).statusCode).toBe(302);
+    expect((await app.inject(steppingUp)).statusCode).toBe(302);
+    expect(standIn.begun).toHaveLength(1);
+    expect(standIn.completed).toHaveLength(1);
+    expect(standIn.steppedUp).toHaveLength(1);
+    expect(brake.asked).toBe(3);
+    expect(capture.lines().map((line) => line.event)).not.toContain('auth.platform_chain_braked');
   });
 });

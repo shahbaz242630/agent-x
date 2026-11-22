@@ -133,7 +133,18 @@ function signInFrom(
 /** Builds the server and listens. Returns nothing, the failure logged and everything closed, when it can't listen. */
 export async function startWeb(
   { host, config, keys, logger, database }: Booted,
-  { flows, sessions, challenges, outbox, directory, downloads, recorder, rail, providerEvents }: SharedParts,
+  {
+    flows,
+    sessions,
+    challenges,
+    outbox,
+    directory,
+    downloads,
+    recorder,
+    rail,
+    providerEvents,
+    growthBrake,
+  }: SharedParts,
   healthChecks: readonly HealthCheck[],
   /** What must end while the pool is open when it can't listen. */
   whenRefused: () => Promise<void>,
@@ -187,6 +198,7 @@ export async function startWeb(
             service: signIn,
             sessionSeconds: config.sessions.absoluteSeconds,
             loginSessions: loginSessionsFrom(config),
+            growthBrake,
           },
     securityEvents: recorder,
     activity: activitySinkOf(createActivityLog({ ids: uuidV7Ids }), database),

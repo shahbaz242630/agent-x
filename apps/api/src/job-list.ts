@@ -268,11 +268,15 @@ export function eachProcessJobs({ keys, logger, database }: Booted, { recorder, 
  * started; the digest is given to core at once, read or not: until its first read it holds nothing, and every read goes
  * on as before it. None where no store is named (development, test, Stage G's copy): reads as before the digest.
  */
-export function webCopyJobs({ config, keys, logger }: Booted, { watch, witness }: SharedParts): readonly Job[] {
+export function webCopyJobs(
+  { config, keys, logger }: Booted,
+  { watch, witness, growthBrake }: SharedParts,
+): readonly Job[] {
   // As the anchor check's own stale limit: what a store's reads may fail before that is the alert.
   const alertAfterMs = config.audit.anchorSeconds * 3 * 1000;
   const kept = anchorsReadOf(config, { keys, logger, clock: systemClock, alertAfterMs, witness });
   checkStatesWith(kept?.digest);
+  if (kept !== undefined) growthBrake.useAnchors(kept.log);
   const job = jobsWatchedBy(watch);
   // Its own heads out, and the others' read every minute (TR-1), whether or not its anchors are kept.
   const witnessJob = witness && createWitnessJob({ witness, refreshEveryMs: WEB_WITNESS_EVERY_MS, now: nowMs });
@@ -319,6 +323,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   );
   const anchorLog = kept?.log;
   const anchorStore = anchorLog ?? createMemoryAnchorStore();
+  parts.growthBrake.useAnchors(anchorStore);
   // The signed states' digest (AT13): kept beside the anchors, in memory alone where they are. Every signed state this
   // process reads is held to it from here (withSignedStates), Tx A's among them.
   const digest =

@@ -75,6 +75,7 @@ import { backgroundDownloadsFrom, downloadStoreOf } from './background-downloads
 import { railFor } from './funding-source-links.ts';
 import { directoryNamesFrom } from './kept-names.ts';
 import { createJobWatch } from './job-watch.ts';
+import { createPlatformGrowthBrake } from './platform-growth-brake.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { recordStart } from './start-record.ts';
 import { witnessOf } from './witness-store.ts';
@@ -378,6 +379,9 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
   });
   return {
     witness,
+    // New sessions and step-ups wait while the platform chain grows too far past its anchor (R2-4): its anchors given
+    // by the job list, the jobs copy's or a web copy's read-only ones.
+    growthBrake: createPlatformGrowthBrake({ database, clock: systemClock, logger }),
     flows: createLoginFlows({ clock: systemClock }),
     // Held to the signed states' digest once the jobs keep it (AT13c): a session put back after its signed end. A cut
     // platform chain answered in the database by every session ended, signed (AT13h).

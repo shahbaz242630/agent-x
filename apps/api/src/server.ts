@@ -91,6 +91,7 @@ import type { LogSample } from './log-sample.ts';
 import { createRequestLines, registerRequestMinutes, REQUEST_FAILED, RequestLog } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
 import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.ts';
+import type { PlatformGrowthBrake } from './platform-growth-brake.ts';
 import { registerSignIn } from './sign-in.ts';
 import { registerIntegrityHold } from './integrity-hold.ts';
 import { registerInvitations } from './invitations.ts';
@@ -161,6 +162,8 @@ export interface ServerOptions {
         readonly sessionSeconds: number;
         /** Where a sign-out ends the person's sessions at the login service; nowhere when not given. */
         readonly loginSessions?: LoginSessions | undefined;
+        /** The platform chain's growth brake (R2-4); never on when not given. */
+        readonly growthBrake?: Pick<PlatformGrowthBrake, 'engaged'> | undefined;
       }
     | undefined;
   /** Where each known caller's request is written once answered (activity-recorder.ts, decision 26); nowhere when not given. */
@@ -539,6 +542,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     signIn: options.signIn?.service,
     sessionSeconds: options.signIn?.sessionSeconds ?? 0,
     loginSessions: options.signIn?.loginSessions,
+    growthBrake: options.signIn?.growthBrake,
     logger,
     securityEvents,
     trust,

@@ -538,6 +538,16 @@ export const PLAIN_WORDS = {
     broke: 'People on a busy network were asked to try again shortly; everyone else signs in as usual.',
     next: 'Look for many addresses starting sign-ins over and over. They end within ten minutes.',
   },
+  'auth.platform_chain_braked': {
+    happened: 'The shared audit chain grew far past its last anchor, so new sign-ins and step-ups were refused.',
+    broke: 'People wait a minute to sign in or confirm a change; sign-outs go on, and payments keep moving.',
+    next: 'It lifts at the next anchor. If it lasts, check the anchor check runs.',
+  },
+  'auth.platform_growth_unread': {
+    happened: "The sign-in brake could not read the shared audit chain's head, so it let this sign-in through.",
+    broke: 'Nothing for now: the brake that keeps payments moving under a flood of sign-ins was off for 30 seconds.',
+    next: 'Nothing if rare. If it repeats, the database is struggling: check its health.',
+  },
   'auth.person_sessions_spent': {
     happened: 'One person signed in more than a hundred times in a day, so this sign-in was refused.',
     broke: 'Only that person waits; sessions they hold go on, and everyone else signs in as usual.',
