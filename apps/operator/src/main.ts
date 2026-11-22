@@ -64,6 +64,7 @@ import { markHoldsWith, witnessWith } from '@agentx/core/modules/audit';
 import { markOrgWorkNow } from '@agentx/core/modules/directory';
 import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
+import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import {
@@ -111,7 +112,7 @@ import { checkedHeads, rebaseChain, type RebaseOutcome, type RebaseTables } from
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { type CountingContactsTables, listCountingContacts } from './counting-contacts.ts';
-import { createOrganizationAsOperator } from './create-organization.ts';
+import { createOrganizationAsOperator, OPERATOR } from './create-organization.ts';
 import { evidenceSummary, type EvidenceSummary, READ_DENIED_PROBLEM } from './evidence-read.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { type FactorResetNoticeTables, noticeFactorReset } from './factor-reset-notice.ts';
@@ -147,6 +148,9 @@ import {
   RESTORE_CHECK,
   TOKEN_HASH_HEX,
   UUID_V7,
+  WITNESS_SET_ASIDE,
+  WITNESS_SET_ASIDE_USAGE,
+  WITNESS_WRITER,
 } from './request.ts';
 import { checkRestoredCopy } from './restore-check.ts';
 import { planChainRecovery, planDigest, planFile } from './chain-recovery.ts';
@@ -270,6 +274,12 @@ type Request =
       readonly id: string;
     }
   | { readonly command: typeof COUNTING_CONTACTS; readonly orgId: string }
+  | {
+      readonly command: typeof WITNESS_SET_ASIDE;
+      readonly writer: string;
+      /** The incident's reference, signed into the set-aside's line and recorded on the platform chain. */
+      readonly reason: string;
+    }
   | { readonly command: typeof RESTORE_CHECK }
   | {
       readonly command: typeof CHAIN_RECOVERY;
@@ -389,6 +399,7 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
   [FACTOR_RESET_NOTICE, factorResetNoticeAsked],
   [COUNTING_CONTACTS, countingContactsAsked],
+  [WITNESS_SET_ASIDE, witnessSetAsideAsked],
   [RESTORE_CHECK, restoreCheckAsked],
   [CHAIN_RECOVERY, chainRecoveryAsked],
   [CHAIN_REBASE, chainRebaseAsked],
@@ -650,6 +661,21 @@ function countingContactsAsked(words: readonly string[]): Request | Problems {
   return { command: COUNTING_CONTACTS, orgId };
 }
 
+/** A witness writer set aside (TR-14, playbook H): typed or from a file, the writer's ID and the incident's reference. */
+function witnessSetAsideAsked(words: readonly string[]): Request | Problems {
+  const [, flag, writer, reasonFlag, reason, ...more] = words;
+  if (flag !== '--writer' || reasonFlag !== '--reason' || reason === undefined || more.length > 0) {
+    return problem(`the command is ${WITNESS_SET_ASIDE_USAGE}, and nothing else`);
+  }
+  const problems = [
+    ...(WITNESS_WRITER.test(String(writer)) ? [] : ["the writer's ID must be 12 hex characters, in lower case"]),
+    ...(EVIDENCE_REFERENCE.test(reason)
+      ? []
+      : ["the reason is the incident's reference: 3 to 64 letters, digits and . _ / -"]),
+  ];
+  return problems.length > 0 ? { problems } : { command: WITNESS_SET_ASIDE, writer: String(writer), reason };
+}
+
 /**
  * Whether an error is the directory refusing an organisation it lists already:
  * its key, orgs_pkey, which Postgres names only when a row breaks it.
@@ -766,6 +792,7 @@ async function run(
       settled: () => Promise.resolve(),
     },
   );
+  if (request.command === WITNESS_SET_ASIDE) return setWriterAside(config, keys, witness, request, logger);
   const code = await runRequest(config, keys, request, logger);
   if (witness === undefined) return code;
   try {
@@ -778,6 +805,73 @@ async function run(
     // Done in the database, its heads not yet outside it: never reported as done. Run the same request again.
     logger.error('operator.not_witnessed', { command: request.command, err: error });
     return 1;
+  }
+}
+
+const NO_SET_ASIDE_STORE =
+  'AGENTX_AUDIT_WITNESS_URL is not set: a writer is set aside in the witness store, so there is nowhere to set it aside';
+
+/** The event a set-aside records on the platform chain, so both sides can read it (everything logged). */
+const WRITER_SET_ASIDE = 'audit_chain.witness_writer_set_aside';
+
+/**
+ * A witness writer set aside (TR-14): one line signed with the operator's own key to the witness store, which every
+ * copy of the API reads before its next pass, then the operator's event on the platform chain, its head witnessed.
+ * The event is no condition of the set-aside, which stands once in the store: one not recorded is said
+ * (`operator.not_recorded`). The exit code: 0 once the line is in the store.
+ */
+async function setWriterAside(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  witness: WitnessLog | undefined,
+  { writer, reason }: { readonly writer: string; readonly reason: string },
+  logger: Logger,
+): Promise<number> {
+  if (witness === undefined) {
+    logger.error('operator.refused', { problems: [NO_SET_ASIDE_STORE] });
+    return 1;
+  }
+  let done: 'set' | 'before';
+  try {
+    done = await witness.setAside(writer, reason);
+  } catch (error) {
+    logger.error('operator.failed', { command: WITNESS_SET_ASIDE, err: error });
+    return 1;
+  }
+  // `before`: a run again (its event not recorded the first time) writes no second line, so the time stands.
+  logger.info('operator.witness_writer_set_aside', { writer, before: done === 'before' });
+  if (!(await recordSetAside(config, keys, { writer, reason }, logger))) return 0;
+  try {
+    await witness.drained();
+  } catch (error) {
+    // Recorded, its head not yet outside the database: the same request run again records it again, witnessed.
+    logger.error('operator.not_witnessed', { command: WITNESS_SET_ASIDE, err: error });
+  }
+  return 0;
+}
+
+/** The set-aside's event on the platform chain: whether it was recorded, `operator.not_recorded` where not. */
+async function recordSetAside(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  { writer, reason }: { readonly writer: string; readonly reason: string },
+  logger: Logger,
+): Promise<boolean> {
+  const database = await connect(config, logger);
+  try {
+    if (database === undefined) throw new Error('the database could not be reached');
+    await createPlatformChain({ keys, ids: uuidV7Ids }).recordAlone(database, {
+      actor: OPERATOR,
+      action: WRITER_SET_ASIDE,
+      details: { writer, reason, release: config.release, run: config.run },
+    });
+    logger.info('operator.witness_writer_recorded', { writer });
+    return true;
+  } catch (error) {
+    logger.error('operator.not_recorded', { command: WITNESS_SET_ASIDE, writer, err: error });
+    return false;
+  } finally {
+    await database?.destroy();
   }
 }
 
@@ -846,7 +940,8 @@ const OPERATOR_WITNESS_BYTES = 1024 * 1024;
 async function runRequest(
   config: OperatorConfig,
   keys: KeyProvider,
-  request: Request,
+  // A writer set aside is the witness log's alone, done before (run: setWriterAside).
+  request: Exclude<Request, { readonly command: typeof WITNESS_SET_ASIDE }>,
   logger: Logger,
 ): Promise<number> {
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });

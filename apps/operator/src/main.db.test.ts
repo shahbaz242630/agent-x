@@ -577,6 +577,44 @@ describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version}
       problems: [expect.stringMatching(/^AGENTX_AUDIT_WITNESS_URL is not set: in production every chain write/)],
     });
   });
+
+  it("TR-14: a set-aside records the operator's event on the platform chain, its head witnessed, once the line is in the store", async () => {
+    const witnessDir = folder();
+    const before = await counts();
+    const { code, events } = await run(
+      ['witness-set-aside', '--writer', 'a1b2c3d4e5f6', '--reason', 'INC-2026-11-21'],
+      envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: witnessDir }),
+    );
+    expect(code).toBe(0);
+    expect(events).toEqual(['operator.witness_writer_set_aside', 'operator.witness_writer_recorded']);
+    expect(readdirSync(path.join(witnessDir, 'e1', 'set-aside'))).toHaveLength(1);
+    expect(await counts()).toEqual({ orgs: before.orgs, platform: before.platform + 1 });
+    const [event] = await database
+      .as('backup')
+      .query<{ action: string; details: string }>(
+        'select action, details from platform_controls.audit_events order by seq desc limit 1',
+      );
+    expect(event?.action).toBe('audit_chain.witness_writer_set_aside');
+    expect(JSON.parse(event?.details ?? '{}')).toMatchObject({
+      writer: 'a1b2c3d4e5f6',
+      reason: 'INC-2026-11-21',
+      release: 'r-operator',
+    });
+    const [head] = await database
+      .as('owner')
+      .query<{ seq: string }>('select seq::text as seq from platform_controls.audit_head');
+    const reader = createWitnessLog({
+      store: folderWriteOnceStore(witnessDir),
+      keys: auditKeys,
+      logger: quiet(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    await reader.refresh();
+    expect(reader.pending({ kind: 'platform' }).map(({ seq }) => seq)).toEqual([BigInt(String(head?.seq))]);
+  });
 });
 
 describe(`B1c the lock order and the platform head's wait (ADR-006 §6; Postgres ${server.version})`, () => {

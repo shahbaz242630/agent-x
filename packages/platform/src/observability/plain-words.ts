@@ -1430,6 +1430,11 @@ export const PLAIN_WORDS = {
     broke: "The rebase stands; the chain's owner can't read of it yet.",
     next: 'Run the same request again: it finds the rebase and writes only the entry.',
   },
+  'operator.not_recorded': {
+    happened: 'An operator job set a witness writer aside but could not record it on the platform audit log.',
+    broke: 'The set-aside stands: every copy passes over that writer’s files. Only its record is missing.',
+    next: 'Once the database answers, run the same request again to record it.',
+  },
   'operator.refused': {
     happened: 'An operator job refused the request it was given.',
     broke:
