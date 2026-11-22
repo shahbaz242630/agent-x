@@ -13,7 +13,8 @@
 // Spend requests aren't named again: a new event on one would move the times its waits and checks run from.
 //
 // It is the API's, not the operator command's: the operator's role may not write these tables (0079), and the API's
-// writes are witnessed as any are. A run never throws: each failure is logged, naming the organisation, and the run
+// writes are witnessed as any are. A chain that fails the whole walk raises the integrity alarm and puts the
+// organisation on its integrity hold, as the anchor check does (TR-10). A run never throws: each failure is logged, naming the organisation, and the run
 // goes on. Retire it, as the grant summaries' build will be, once every environment's objects are named.
 import { AGENTS } from '@agentx/core/modules/agents';
 import {
@@ -22,6 +23,7 @@ import {
   type CheckedPoint,
   createAuditTrail,
   historyNamedOf,
+  holdOrganisation,
   namedFromStart,
   namesFromHistory,
   type SignedStates,
@@ -171,7 +173,14 @@ export function createStateNames({
       if (done) return;
       const walked = await walkedWhole(orgId);
       if (!('kept' in walked)) {
-        log.warn('state_names.chain_unverified', { reason: walked.reason, seq: walked.seq });
+        // A chain that fails its whole walk is tampering, as the anchor check's: the alarm, and the same hold (TR-10).
+        log.error('audit.integrity_failed', {
+          chain: 'organisation',
+          check: 'state_names',
+          reason: walked.reason,
+          seq: walked.seq,
+        });
+        await holdOrganisation(database, orgId, services, walked.reason);
         return;
       }
       await afterWalk();

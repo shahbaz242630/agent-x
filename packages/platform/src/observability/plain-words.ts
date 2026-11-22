@@ -836,11 +836,6 @@ export const PLAIN_WORDS = {
     broke: 'Nothing new was built; approvals still work from the full member history.',
     next: 'It is tried again in about an hour. If it keeps failing, check the database.',
   },
-  'state_names.chain_unverified': {
-    happened: "One organisation's audit chain did not check out, so its older records were not linked.",
-    broke: 'Nothing changed, but a failed check may mean someone went round the app.',
-    next: 'Look at the chain problem in this line first. It is tried again in about an hour.',
-  },
   'state_names.failed': {
     happened: "One organisation's older records could not all be given the links that protect their history.",
     broke: 'Those not reached are still read from the log alone; nothing else changed.',

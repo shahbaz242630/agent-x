@@ -1485,12 +1485,16 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     expect(await cancelsHeld(w, 0n)).toEqual({ value: [] });
   });
 
-  it('state names: a chain that doesn’t check out whole names nothing, and says so', async () => {
+  it('SEC-DB-20 TR-10 state names: a chain that doesn’t check out whole names nothing, raises the alarm and holds the organisation', async () => {
     const { w, job } = await legacyOrganisation(false);
     await hideTheCancel(w);
     await job.run();
-    expect(lines('state_names.chain_unverified')).toEqual([expect.objectContaining({ level: 'warn' })]);
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: w.org, chain: 'organisation', check: 'state_names' }),
+    ]);
     expect(lines('state_names.named')).toEqual([]);
+    const hold = await signed(w, (tx, states) => states.integrityHold(tx, w.org, 'none'));
+    expect(hold.outcome).toBe('held');
   });
 
   /** Whether the organisation's and its agent's states carry names where they must (authorityOf's check), and the hold. */
