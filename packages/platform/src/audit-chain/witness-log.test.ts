@@ -606,6 +606,41 @@ describe('SEC-DB-20 the witness log: reading', () => {
     },
   );
 
+  it('TR-12: witnessed gives a head noted here as noted by this clock, though a slow call raised the offset since', async () => {
+    const truth = clock();
+    const time = clock(START.getTime() - 20 * MINUTE);
+    const store = createFakeWriteOnceStore({ now: () => truth.held.at });
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    log.soon(CHAIN, head(5n, 1));
+    const noted = time.held.at;
+    const dated = log.pending(CHAIN)[0]?.at;
+    // A list answered 30 s after it was sent: the offset worked out from it 30 s larger.
+    store.instead.list = (...asked) => {
+      truth.held.at += 30_000;
+      time.held.at += 30_000;
+      return store.real.list(...asked);
+    };
+    await log.refresh();
+    expect(log.witnessed(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: noted }]);
+    expect(log.pending(CHAIN)[0]?.at).toBe(dated);
+  });
+
+  it('TR-12: the first Date arriving on a Put re-dates the heads in it, and witnessed still gives them as noted here', async () => {
+    const fake = createFakeWriteOnceStore();
+    let date: number | undefined;
+    // The store's time on no answer until the Put's.
+    const heads = { ...fake, store: { ...fake.store, serverTime: () => date } };
+    fake.instead.put = (name, bytes) => {
+      date = START.getTime() + 20 * MINUTE;
+      return fake.real.put(name, bytes);
+    };
+    const { log } = witnessOn(heads);
+    await log.now(CHAIN, head(5n, 1));
+    expect(log.pending(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: START.getTime() + 20 * MINUTE + 1000 }]);
+    expect(log.witnessed(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: START.getTime() }]);
+  });
+
   it('TR-12: a head noted before the store’s time was known is re-dated by it once known: a failed Put after, then a snapshot, carries that', async () => {
     const time = clock(START.getTime() - 10 * MINUTE);
     const heads = createFakeWriteOnceStore({ now: () => time.held.at + 10 * MINUTE });

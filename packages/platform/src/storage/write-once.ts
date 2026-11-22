@@ -74,8 +74,9 @@ export interface WriteOnceStore {
    */
   getAtMost(name: string, mostBytes: number): Promise<Buffer | 'missing' | 'too-large' | 'unreadable'>;
   /**
-   * The service's own time on its latest answer (Azure's `Date` header, over TLS), where it gives one (TR-12): a writer
-   * names its files by it, so its own clock being off hides none. None from a store with no service.
+   * The latest of the service's own times it has answered with (Azure's `Date` header, over TLS), where it gives one
+   * (TR-12): read after a call, never earlier than that call's. A writer names its files by it, so its own clock being
+   * off hides none. None from a store with no service.
    */
   readonly serverTime?: () => number | undefined;
 }
@@ -198,12 +199,13 @@ export function azureWriteOnceStore({
     timeoutMs: CALL_TIMEOUT_MS,
     ...(now === undefined ? {} : { now }),
   });
-  // The service's `Date` on its latest answer that gave a readable one (serverTime).
+  // The latest `Date` the service has answered with (serverTime): calls overlap, so an older answer handled last never
+  // takes it back, and a caller reading it after its own call gets that call's Date or a later one, never an earlier.
   let serverAt: number | undefined;
   const call: typeof caller = async (path, init) => {
     const response = await caller(path, init);
     const said = Date.parse(response.headers.get('date') ?? '');
-    if (Number.isFinite(said)) serverAt = said;
+    if (Number.isFinite(said)) serverAt = Math.max(serverAt ?? said, said);
     return response;
   };
 
