@@ -700,18 +700,26 @@ export function createAnchorCheck({
 
   const sameHead = (one: Witnessed, other: Witnessed): boolean => one.seq === other.seq && one.hash.equals(other.hash);
 
+  /** Whether the hash read at a head's place is its own: all of it, or a compact head's first bytes (TR-3). */
+  const holdsAt = (there: Buffer | undefined, head: Witnessed): boolean =>
+    there?.subarray(0, head.hash.length).equals(head.hash) === true;
+
   /**
    * Where a chain's confirming walk starts: where it reached at the last run, where every head below that was checked on
-   * it; else afresh from the lowest head (one that came in since below where it reached starts it again).
+   * it; else afresh from the lowest head (one that came in since below where it reached starts it again). A compact one
+   * lowest (a head released, or a fingerprint: TR-3) gives no whole hash to link from: from the chain's start then.
    */
   const walkStart = (key: string, heads: readonly Witnessed[], lowest: Witnessed) => {
     const saved = confirming.get(key);
     const resumes =
       saved !== undefined &&
       heads.every((head) => head.seq > saved.cursor.seq || saved.checked.some((one) => sameHead(one, head)));
-    return resumes
-      ? { cursor: saved.cursor, checked: [...saved.checked] }
-      : { cursor: { seq: lowest.seq, hash: lowest.hash, macKeyVersion: 0 }, checked: [] as Witnessed[] };
+    if (resumes) return { cursor: saved.cursor, checked: [...saved.checked] };
+    const whole = lowest.hash.length === CHAIN_START.hash.length;
+    return {
+      cursor: whole ? { seq: lowest.seq, hash: lowest.hash, macKeyVersion: 0 } : CHAIN_START,
+      checked: [] as Witnessed[],
+    };
   };
 
   /** Each head a step passed over checked against the hash it read at the head's place: whether all hold, those kept. */
@@ -723,8 +731,7 @@ export function createAnchorCheck({
     checked: Witnessed[],
   ): boolean => {
     for (const head of heads.filter(({ seq }) => seq > from && seq <= step.seq)) {
-      const there = head.seq === step.seq ? step.hash : found.get(head.seq);
-      if (there?.equals(head.hash) !== true) return false;
+      if (!holdsAt(head.seq === step.seq ? step.hash : found.get(head.seq), head)) return false;
       checked.push(head);
     }
     return true;
@@ -752,7 +759,7 @@ export function createAnchorCheck({
     // Those at the walk's own starting place: its hash, or a fork.
     const start = cursor;
     const atStart = heads.filter((one) => one.seq === start.seq && !checked.some((done) => sameHead(done, one)));
-    if (atStart.some((head) => !head.hash.equals(start.hash))) return 'cut';
+    if (atStart.some((head) => !holdsAt(start.hash, head))) return 'cut';
     checked.push(...atStart);
     while (cursor.seq < anchor.seq) {
       const from = cursor;
@@ -779,6 +786,8 @@ export function createAnchorCheck({
    * there, where this process made the anchor and kept it; the rest by one walk from the lowest of them (above). All on
    * the chain, let go; a fork, the alarm and the hold (`failed`); a walk not done (its budget, the run's end, the database,
    * no way to walk) keeps them, said, and the chain anchored no more until it is (`unconfirmed`). Never let go unseen.
+   * The compact heads at or below the anchor (TR-3: released, or fingerprints, that no anchoring walk passed, as after a
+   * restart or a new leader) are judged the same way, by their hashes' first bytes, and let go on the chain.
    */
   const lateHeadsHold = async (
     checked: CheckedChain,
@@ -791,7 +800,8 @@ export function createAnchorCheck({
     unconfirmed.delete(key);
     const anchor = anchors.latest(chain);
     if (witness === undefined || anchor === undefined) return 'held';
-    const late = witness.pending(chain).filter(({ seq }) => seq <= anchor.seq);
+    const compact = (witness.fingerprints?.(chain) ?? []).filter(({ seq }) => seq <= anchor.seq);
+    const late = [...witness.pending(chain).filter(({ seq }) => seq <= anchor.seq), ...compact];
     if (late.length === 0) {
       confirming.delete(key);
       return 'held';
@@ -799,7 +809,7 @@ export function createAnchorCheck({
     const here = anchoredHere.get(key);
     const recent = here?.seq === anchor.seq ? here.recent : new Map<bigint, Buffer>();
     const known = late.filter(({ seq }) => recent.has(seq));
-    const fork = known.find(({ seq, hash }) => recent.get(seq)?.equals(hash) !== true);
+    const fork = known.find((head) => !holdsAt(recent.get(head.seq), head));
     if (fork !== undefined) {
       alarmed(chain, log, 'cut_back', fork.seq);
       return 'failed';
@@ -818,11 +828,17 @@ export function createAnchorCheck({
       alarmed(chain, log, 'cut_back', others[0]?.seq);
       return 'failed';
     }
+    // Compact ones confirmed, told as passed by a walk from the chain's start (the log's walkedPast), so they go too.
+    const confirmed = (heads: readonly Witnessed[]): void => {
+      witness.prune(chain, heads);
+      const compactOnes = heads.filter((head) => compact.includes(head));
+      if (compactOnes.length > 0) witness.walkedPast?.(chain, 0n, anchor.seq, compactOnes);
+    };
     if (verdict === 'holds') {
-      witness.prune(chain, late);
+      confirmed(late);
       return 'held';
     }
-    witness.prune(chain, known);
+    confirmed(known);
     unconfirmed.add(key);
     log.error('audit.witness_head_unconfirmed', {
       chain: chain.kind,

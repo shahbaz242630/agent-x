@@ -430,7 +430,9 @@ describe('TR-1 the anchor check held to the witness log', () => {
       if (!onChain(cursor)) return { ok: false, problem: { reason: 'link', seq: cursor.seq + 1n } };
       const seq = target.seq < cursor.seq + most ? target.seq : cursor.seq + most;
       for (const head of watch?.heads ?? []) {
-        if (head.seq <= seq) watch?.found.set(head.seq, head.seq === forkAt ? Buffer.alloc(32, 99) : head.hash);
+        // The event's whole hash, as a read gives it: a compact head's (TR-3) its first bytes, the rest the event's own.
+        const whole = Buffer.concat([head.hash, Buffer.alloc(32 - head.hash.length, 0xee)]);
+        if (head.seq <= seq) watch?.found.set(head.seq, head.seq === forkAt ? Buffer.alloc(32, 99) : whole);
       }
       return seq === target.seq
         ? { ok: true, seq, hash: target.hash, macKeyVersion: target.macKeyVersion, to: target.seq }
@@ -499,6 +501,27 @@ describe('TR-1 the anchor check held to the witness log', () => {
       expect.objectContaining({ level: 'warn', event: 'audit.anchor_check_failed', check: 'witness' }),
     );
     expect(failing.pruned).not.toContainEqual([ORG, [4n]]);
+  });
+
+  it('TR-3: a head released at or below the anchor that no anchoring walk passed (a restart, a new leader) is walked from the chain’s start to the anchor, by its first bytes: on the chain, let go; another event there, the alarm; not walked, kept and said', async () => {
+    const run = anchoredElsewhere(walkingTo(() => true));
+    run.releasedHeads.set(ORG, [{ seq: 4n, hash: Buffer.alloc(16, 4) }]);
+    await run.check.run();
+    expect(run.steps.filter((step) => step.startsWith(`confirm ${ORG}`))).toEqual([`confirm ${ORG} 0`]);
+    expect(run.toldAsked).toContainEqual([4n]);
+    expect(run.alarms()).toEqual([]);
+    const forked = anchoredElsewhere(walkingTo(() => true, 2_000n, 4n));
+    forked.releasedHeads.set(ORG, [{ seq: 4n, hash: Buffer.alloc(16, 4) }]);
+    await forked.check.run();
+    expect(forked.alarms()).toEqual([{ what: 'witness', reason: 'cut_back', seq: '4' }]);
+    expect(forked.steps).toContain(`hold ${ORG} cut_back`);
+    const waiting = anchoredElsewhere();
+    waiting.releasedHeads.set(ORG, [{ seq: 4n, hash: Buffer.alloc(16, 4) }]);
+    await waiting.check.run();
+    expect(waiting.capture.lines()).toContainEqual(
+      expect.objectContaining({ level: 'error', event: 'audit.witness_head_unconfirmed', orgId: ORG, heads: 1 }),
+    );
+    expect(waiting.toldAsked).not.toContainEqual([4n]);
   });
 
   it('one walk a chain, from its lowest held head, checks every other head on the way: a place holding another event is the alarm', async () => {
