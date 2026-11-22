@@ -9,6 +9,7 @@ import type { Chain } from './chain.ts';
 import {
   createDigestLog,
   type DigestAnchors,
+  hashHolds,
   headCutBelow,
   headHeldTo,
   heldThrough,
@@ -1785,6 +1786,22 @@ describe('SEC-DB-11, SEC-DB-16 a chain taken as it stands after a signed answer 
     expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(6n));
     log.heads(CHAIN)?.saw(headAt(7n));
     expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(7n));
+  });
+
+  it('TR-9: a compact head is held to by its first 16 bytes, at its place and at the head’s own; never by fewer', () => {
+    const compact = (head: { readonly seq: bigint; readonly hash: Buffer }) => ({
+      seq: head.seq,
+      hash: head.hash.subarray(0, 16),
+    });
+    expect(hashHolds(headAt(4n).hash, compact(headAt(4n)).hash)).toBe(true);
+    expect(hashHolds(headAt(4n, 9).hash, compact(headAt(4n)).hash)).toBe(false);
+    expect(hashHolds(headAt(4n).hash, Buffer.alloc(0))).toBe(false);
+    expect(hashHolds(null, headAt(4n).hash)).toBe(false);
+    expect(heldThrough([compact(headAt(4n))], [headAt(4n).hash])).toBe(true);
+    expect(heldThrough([compact(headAt(4n))], [headAt(4n, 9).hash])).toBe(false);
+    // At the head's own place: by those bytes too.
+    expect(headCutBelow([compact(headAt(6n))], headAt(6n), [headAt(6n).hash])).toBeUndefined();
+    expect(headCutBelow([compact(headAt(6n))], headAt(6n, 9), [headAt(6n).hash])).toEqual(compact(headAt(6n)));
   });
 
   it('a write raises only the heads its chain ran through as it wrote (heldThrough, raiseWritten)', async () => {

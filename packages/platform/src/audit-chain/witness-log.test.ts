@@ -951,3 +951,52 @@ describe('TR-3 heads released on a probe’s finding', () => {
     expect(log.fingerprints(CHAIN)).toEqual([]);
   });
 });
+
+describe('SEC-DB-20 TR-9 one held set: heldTo', () => {
+  it('gives the heads held and the compact ones together, the highest first, at most `most`; a released one stays in it', () => {
+    const { log } = witnessOn();
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    for (const seq of [3n, 4n, 5n, 6n]) log.soon(CHAIN, head(seq, Number(seq)));
+    // Nothing compact: the heads held, as pending gives them.
+    expect(log.heldTo(CHAIN)).toEqual(log.pending(CHAIN));
+    log.release(CHAIN, [head(3n, 3), head(5n, 5)]);
+    expect(seqs(log.pending(CHAIN))).toEqual([6n, 4n]);
+    const held = log.heldTo(CHAIN);
+    expect(held.map(({ seq, hash: part }) => [seq, part.length])).toEqual([
+      [6n, 32],
+      [5n, 16],
+      [4n, 32],
+      [3n, 16],
+    ]);
+    expect(held[1]?.hash).toEqual(hash(5).subarray(0, 16));
+    expect(seqs(log.heldTo(CHAIN, 2))).toEqual([6n, 5n]);
+    expect(log.heldTo(OTHER)).toEqual([]);
+  });
+
+  it('holds the fingerprints of heads let go for memory while the chain is beyond memory', () => {
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(2) });
+    for (const seq of [1n, 2n, 3n]) log.soon(CHAIN, head(seq, Number(seq)));
+    expect(log.beyondMemory(CHAIN)).toBe(true);
+    expect(seqs(log.heldTo(CHAIN))).toEqual([3n, 2n, 1n]);
+    expect(log.heldTo(CHAIN)[2]?.hash).toHaveLength(16);
+  });
+
+  it('a web copy lets its released heads go at or below the anchor, as it lets heads go; the copy that anchors keeps them', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const latest = new Map([[ORG, 2n]]);
+    const leader = witnessOn(undefined, { snapshots, leads: true, time });
+    leader.log.useAnchors(anchorsWith(new Map(), latest));
+    for (const seq of [3n, 4n, 5n]) leader.log.soon(CHAIN, head(seq, Number(seq)));
+    leader.log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    await leader.log.refresh();
+    await leader.log.flush();
+    const web = witnessOn(createFakeWriteOnceStore(), { snapshots, time, dropsAtAnchor: true });
+    web.log.useAnchors(anchorsWith(new Map(), latest));
+    await web.log.refresh();
+    expect(seqs(web.log.heldTo(CHAIN))).toEqual([5n, 4n, 3n]);
+    latest.set(ORG, 4n);
+    expect(seqs(web.log.heldTo(CHAIN))).toEqual([5n]);
+    expect(seqs(leader.log.heldTo(CHAIN))).toEqual([5n, 4n, 3n]);
+  });
+});

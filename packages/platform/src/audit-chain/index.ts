@@ -16,6 +16,7 @@ export {
   type DigestAnchors,
   type DigestLog,
   FORGET_MARGIN_MS,
+  hashHolds,
   headCutBelow,
   headHeldTo,
   type HeadSeen,

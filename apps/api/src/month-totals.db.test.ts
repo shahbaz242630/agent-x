@@ -1110,7 +1110,7 @@ describe('SEC-DB-11 AT13f: a month’s total made above the last anchor, cut off
       epoch: 1,
       alertAfterMs: 60_000,
       mostBytes: 64 * 1024 * 1024,
-      witnessed: (chain) => reader.pending(chain),
+      witnessed: (chain) => reader.heldTo(chain),
     });
     checkStatesWith(digest);
     try {

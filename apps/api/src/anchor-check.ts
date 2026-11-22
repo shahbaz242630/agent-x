@@ -150,8 +150,8 @@
 // most) releases every head above the anchor it found on the chain but the highest, compact, the next walk from the
 // anchor held to them until it passes them (never let go on the probe alone, as it reads no link): so a burst never
 // fills what the log may hold. A chain that let heads go for memory anyway anchors again once a walk held to every head
-// still held and to the fingerprints of those let go (each its place and its hash's first 8 bytes, checked as a head's)
-// runs from below the lowest let go to at or past the highest (the log's walkedPast), with no rebase.
+// still held and to the fingerprints of those let go (each its place and its hash's first 16 bytes, checked as a
+// head's) runs from below the lowest let go to at or past the highest (the log's walkedPast), with no rebase.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type Anchor,
@@ -168,6 +168,7 @@ import {
   createMemoryAnchorStore,
   createMemoryPassRecord,
   type DigestLog,
+  hashHolds,
   sameAnchor,
   type SignedSeen,
   signAnchor,
@@ -406,7 +407,7 @@ export interface AnchorCheckOptions {
   readonly probePages?: number;
   /** The witness log (TR-1): the heads each probe and walk is held to, let go once confirmed. None, held to none. */
   readonly witness?:
-    | (Pick<WitnessLog, 'pending' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> &
+    | (Pick<WitnessLog, 'pending' | 'heldTo' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> &
         Partial<Pick<WitnessLog, 'walkedPast' | 'fingerprints' | 'release' | 'baseBelow'>>)
     | undefined;
 }
@@ -700,10 +701,6 @@ export function createAnchorCheck({
 
   const sameHead = (one: Witnessed, other: Witnessed): boolean => one.seq === other.seq && one.hash.equals(other.hash);
 
-  /** Whether the hash read at a head's place is its own: all of it, or a compact head's first bytes (TR-3). */
-  const holdsAt = (there: Buffer | undefined, head: Witnessed): boolean =>
-    there?.subarray(0, head.hash.length).equals(head.hash) === true;
-
   /**
    * Where a chain's confirming walk starts: where it reached at the last run, where every head below that was checked on
    * it; else afresh from the lowest head (one that came in since below where it reached starts it again). A compact one
@@ -733,7 +730,7 @@ export function createAnchorCheck({
     checked: Witnessed[],
   ): boolean => {
     for (const head of heads.filter(({ seq }) => seq > from && seq <= step.seq)) {
-      if (!holdsAt(head.seq === step.seq ? step.hash : found.get(head.seq), head)) return false;
+      if (!hashHolds(head.seq === step.seq ? step.hash : found.get(head.seq), head.hash)) return false;
       checked.push(head);
     }
     return true;
@@ -762,7 +759,7 @@ export function createAnchorCheck({
     // Those at the walk's own starting place: its hash, or a fork.
     const start = cursor;
     const atStart = heads.filter((one) => one.seq === start.seq && !checked.some((done) => sameHead(done, one)));
-    if (atStart.some((head) => !holdsAt(start.hash, head))) return 'cut';
+    if (atStart.some((head) => !hashHolds(start.hash, head.hash))) return 'cut';
     checked.push(...atStart);
     while (cursor.seq < anchor.seq) {
       const from = cursor;
@@ -812,7 +809,7 @@ export function createAnchorCheck({
     const here = anchoredHere.get(key);
     const recent = here?.seq === anchor.seq ? here.recent : new Map<bigint, Buffer>();
     const known = late.filter(({ seq }) => recent.has(seq));
-    const fork = known.find((head) => !holdsAt(recent.get(head.seq), head));
+    const fork = known.find((head) => !hashHolds(recent.get(head.seq), head.hash));
     if (fork !== undefined) {
       alarmed(chain, log, 'cut_back', fork.seq);
       return 'failed';
@@ -1136,8 +1133,9 @@ export function createAnchorCheck({
       const walkBegan = clock.now();
       // The heads it is held to, asked before its first statement (TR-1): each committed before it began. Its last
       // events' hashes kept, for a head landing after it anchors.
-      // With the fingerprints of heads let go for memory (TR-3): a place holding another event is a fork, as at a head.
-      const heldTo = [...(witness?.pending(chain) ?? []), ...(witness?.fingerprints?.(chain) ?? [])];
+      // With the compact heads (TR-3: let go for memory, or released): a place holding another event is a fork, as at a
+      // head. The one held set every consumer reads (TR-9).
+      const heldTo = witness?.heldTo(chain) ?? [];
       const recent: RecentPlaces = { since: new Date(walkBegan.getTime() - RECENT_MS), found: new Map() };
       const checking = Promise.resolve()
         .then(() => (witness === undefined ? verify(last) : verify(last, heldTo, recent)))
@@ -1319,7 +1317,11 @@ export function createAnchorCheck({
       return anchor === undefined ? [] : [{ orgId, from: anchor, heldTo: heldToOf(chain) }];
     });
 
-  /** The heads copies witnessed above the chain's anchor (TR-1), asked before a probe's statement: none without a log. */
+  /**
+   * The heads copies witnessed above the chain's anchor (TR-1), asked before a probe's statement: none without a log.
+   * Whole heads alone (TR-9): the probe is what releases them, reads no link, and lets nothing pay; every walk and read
+   * that does is held to the compact ones too (heldTo).
+   */
   const heldToOf = (chain: Chain): readonly { readonly seq: bigint; readonly hash: Buffer }[] =>
     witness?.pending(chain) ?? [];
 

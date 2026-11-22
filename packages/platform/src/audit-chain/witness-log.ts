@@ -46,7 +46,7 @@
 // read: the alarm at once. Bounded: past what may be held, the organisation chain holding most lets its lowest heads go
 // first, loudly (the platform's only where no organisation's is held), and that chain reads as `beyondMemory` (its
 // hand-offs wait, the anchor check holds its anchor). Each head let go leaves a fingerprint (its place and its hash's
-// first 8 bytes, a tenth of a head), which the next walk is held to as to a head (`fingerprints`: a place holding
+// first 16 bytes, a fifth of a head), which the next walk is held to as to a head (`fingerprints`: a place holding
 // another event is a fork, the alarm and the hold); once a walk held to them all runs from below the lowest to at or past
 // the highest, the chain is beyond memory no more (`walkedPast`: TR-3, a spike may slow a chain, never stop it for good).
 // Fingerprints past their own share drop the chain holding most of them, loudly, back to a rebase alone. Both are kept in
@@ -60,10 +60,17 @@
 // the same one, or a fork, as with a held head. They take the fingerprints' share; past it, a head stays held. With
 // them each chain keeps the anchors (place and whole hash) its compact heads went above (`baseBelow`), in the snapshot
 // too: a walk confirming one that ended at or below a later anchor starts from there, not from the chain's first event.
+//
+// One held set (TR-9): every read and walk that may let money move or a read stand (Tx A's walks, the hand-off's gate,
+// the digest's reads, the anchor check's walk) is held to `heldTo`, the heads held and the compact ones together. A
+// released head left only the anchor check holding it, so a stop released on a fooled probe, its cut branch put back,
+// was paid before the next anchor run raised the alarm. Kept as released rather than held whole until a linked walk
+// passes it, as release exists to keep a busy chain's memory flat between anchor runs.
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import type { WriteOnceStore } from '../storage/write-once.ts';
 import { type Chain, chainName } from './chain.ts';
+import { COMPACT_HASH_BYTES } from './digest-log.ts';
 import { timeIn } from './rebase.ts';
 import { bodyLines, fileName, type FileKind, isSoundFile, namesIn, signedFile, timeOfName } from './signed-files.ts';
 
@@ -159,6 +166,12 @@ export interface WitnessLog extends ChainWitness {
    */
   fingerprints(chain: Chain): readonly { readonly seq: bigint; readonly hash: Buffer }[];
   /**
+   * Everything a read or walk of the chain is held to (TR-9, the header): every head still held (pending) and every
+   * compact head (fingerprints), the highest first, at most `most` where given. A compact head's hash is its first
+   * COMPACT_HASH_BYTES alone, compared as such (hashHolds): a place holding another event is a fork, never a pass.
+   */
+  heldTo(chain: Chain, most?: number): readonly WitnessedHead[];
+  /**
    * Those heads out of the list as released (TR-3, the header): a probe found them on the chain, which no link proves, so
    * every walk stays held to them (fingerprints) until one from the anchor passes them (walkedPast). Only those above
    * the chain's anchor, where the anchors' log holds it now (its base); none with no anchor known. Past the compact
@@ -243,7 +256,7 @@ const WITNESS_FINGERPRINT_BYTES = 48;
 
 /** A compact head's packed record: its place, its hash's part, and when noted. */
 const PRINT_RECORD = 32;
-const PRINT_PREFIX = 16;
+const PRINT_PREFIX = COMPACT_HASH_BYTES;
 const PRINT_AT = 24;
 const PREFIX = /^[0-9a-f]{32}$/;
 
@@ -661,10 +674,17 @@ export function createWitnessLog({
     changedSinceSnapshot = true;
   };
 
-  /** A chain's released heads that still stand: those dated before a rebase of it let go. */
+  /**
+   * A chain's released heads that still stand: those dated before a rebase of it let go, and where `dropsAtAnchor` (a
+   * web copy, which never walks the chain to let them go), those at or below its anchor, as `stands` lets heads go.
+   */
   const releasedOf = (name: string): Compact[] => {
     const list = unpacked(released.get(name));
-    const kept = list.filter(({ at }) => anchors?.rebasedAfter(chainOfName(name), new Date(at)) !== true);
+    const anchored = dropsAtAnchor ? anchoredAt(name) : undefined;
+    const kept = list.filter(
+      ({ seq, at }) =>
+        (anchored === undefined || seq > anchored) && anchors?.rebasedAfter(chainOfName(name), new Date(at)) !== true,
+    );
     if (kept.length !== list.length) setReleased(name, kept);
     return kept;
   };
@@ -726,6 +746,9 @@ export function createWitnessLog({
     dropPrints(name);
     return false;
   };
+
+  /** A chain's compact heads a walk is held to: its fingerprints while it is beyond memory, and its released heads. */
+  const compactOf = (name: string): Compact[] => [...(beyond(name) ? printsOf(name) : []), ...releasedOf(name)];
 
   /** The chain's list as given, counted. */
   const setList = (name: string, list: WitnessedHead[]): void => {
@@ -1181,8 +1204,15 @@ export function createWitnessLog({
       return beyond(name);
     },
     fingerprints(chain: Chain): readonly { readonly seq: bigint; readonly hash: Buffer }[] {
+      return compactOf(nameOf(chain)).map(({ seq, hash }) => ({ seq, hash }));
+    },
+    heldTo(chain: Chain, most = Number.POSITIVE_INFINITY): readonly WitnessedHead[] {
       const name = nameOf(chain);
-      return [...(beyond(name) ? printsOf(name) : []), ...releasedOf(name)].map(({ seq, hash }) => ({ seq, hash }));
+      const heads = standing(name, most);
+      // Most chains hold no compact head: their pending heads as they are, no merge.
+      const compact = compactOf(name);
+      if (compact.length === 0) return heads;
+      return [...heads, ...compact].toSorted((one, other) => (one.seq > other.seq ? -1 : 1)).slice(0, most);
     },
     baseBelow(chain: Chain, seq: bigint): { readonly seq: bigint; readonly hash: Buffer } | undefined {
       let best: Compact | undefined;

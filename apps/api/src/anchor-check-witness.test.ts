@@ -78,6 +78,10 @@ function withWitness({
   const bases = new Map<string, { seq: bigint; hash: Buffer }>();
   const clock = new FixedClock(AT);
   const nameOf = (chain: Chain) => (chain.kind === 'platform' ? 'platform' : chain.orgId);
+  const fingerprints = (chain: Chain) => [
+    ...(lost.has(nameOf(chain)) ? (prints.get(nameOf(chain)) ?? []) : []),
+    ...(releasedHeads.get(nameOf(chain)) ?? []),
+  ];
   const organizations: OrganisationChains = {
     list: () => Promise.resolve([ORG, OTHER_ORG]),
     recorded: () => Promise.resolve([ORG, OTHER_ORG]),
@@ -148,9 +152,11 @@ function withWitness({
         const base = bases.get(nameOf(chain));
         return base !== undefined && base.seq <= seq ? base : undefined;
       },
-      fingerprints: (chain) => [
-        ...(lost.has(nameOf(chain)) ? (prints.get(nameOf(chain)) ?? []) : []),
-        ...(releasedHeads.get(nameOf(chain)) ?? []),
+      fingerprints,
+      // As the log's: the heads held and the compact ones, together (TR-9).
+      heldTo: (chain) => [
+        ...(pending.get(nameOf(chain)) ?? []),
+        ...fingerprints(chain).map((one) => ({ ...one, at: 0 })),
       ],
     },
   });
