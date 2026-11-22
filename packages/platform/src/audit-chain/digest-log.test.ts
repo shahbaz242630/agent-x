@@ -566,6 +566,53 @@ describe('SEC-DB-11 the digest’s coverage: Tx A goes on a chain only as far as
 });
 
 describe('SEC-DB-11 the digest within its memory: one organisation’s growth never stops another’s (AT13; S165, S170)', () => {
+  it('TR-3 factsKept: a mark while the chain’s facts are kept; none while given way or not writing', async () => {
+    const leads = { now: true };
+    const time = clock();
+    const log = createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: time.now,
+      epoch: 1,
+      anchors: anchorsWith(),
+      alertAfterMs: 15 * MINUTE,
+      mostBytes: 12_000,
+      writes: () => leads.now,
+    });
+    await log.read();
+    // Not held yet: a walk's facts would be kept.
+    expect(log.factsKept(CHAIN)).toBe(0);
+    log.record(OTHER, seen(['agent', AGENT, 2n]), START, stretch(0n, 2n));
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 3n));
+    const mark = log.factsKept(CHAIN);
+    const other = log.factsKept(OTHER);
+    expect(mark).toBeDefined();
+    expect(mark).not.toBe(other);
+    log.record(CHAIN, seen(['agent', AGENT, 4n]), START);
+    expect(log.factsKept(CHAIN)).toBe(mark);
+    // Not leading: nothing a walk read is kept, so no mark.
+    leads.now = false;
+    expect(log.factsKept(CHAIN)).toBeUndefined();
+    leads.now = true;
+    // Its payments outgrowing what may be held: given way, no mark, the other chain's untouched.
+    log.record(CHAIN, requests(400), START, stretch(3n, 500n));
+    expect(log.factsKept(CHAIN)).toBeUndefined();
+    expect(log.factsKept(OTHER)).toBe(other);
+  });
+
+  it('TR-3 factsKept moves when a rebase sets the chain aside: a stretch kept before it stands for nothing', async () => {
+    const rebases = new Map<string, Date>();
+    const { log } = digestOn(undefined, { anchors: anchorsWith(rebases) });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 3n));
+    const before = log.factsKept(CHAIN);
+    rebases.set(ORG, new Date(START.getTime() + MINUTE));
+    // Set aside: not held, then held anew by the next walk, under a mark of its own.
+    log.record(CHAIN, seen(['agent', AGENT, 2n]), new Date(START.getTime() + 2 * MINUTE), stretch(0n, 2n));
+    expect(log.factsKept(CHAIN)).toBeDefined();
+    expect(log.factsKept(CHAIN)).not.toBe(before);
+  });
+
   it('the largest chain gives way, its payments first, then all of it, each with its own alarm; the small one keeps all', async () => {
     const capture = new LogCapture();
     const { log, fake, time } = digestOn(undefined, { capture, mostBytes: 12_000 });
@@ -984,6 +1031,7 @@ describe('SEC-DB-11 the digest’s fair share: many small organisations never pu
     const { log } = digestOn(undefined, { capture, mostBytes: 12_000 });
     await log.read();
     log.record(PLATFORM, seen(['platform.handoff_pause', 'pause', 3n]), START);
+    const mark = log.factsKept(PLATFORM);
     const ends = new Map(
       Array.from({ length: 400 }, (_, at) => [subjectKey('identity.session_ended', `p/${String(at)}`), BigInt(at + 4)]),
     );
@@ -994,6 +1042,11 @@ describe('SEC-DB-11 the digest’s fair share: many small organisations never pu
     expect(line?.orgId).toBeUndefined();
     expect(log.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(3n);
     expect(log.latest(PLATFORM, 'identity.session_ended', 'p/0')).toBeUndefined();
+    // TR-3: the pause, all the frontier's platform walks keep, is still kept: its mark stands, so no Tx A of any
+    // organisation walks the platform chain from its anchor while its session ends are given way.
+    expect(mark).toBeDefined();
+    expect(log.factsKept(PLATFORM)).toBe(mark);
+    // An organisation's chain given way its payments alone keeps no mark (its requests are what Tx A reads).
   });
 });
 
@@ -1022,9 +1075,23 @@ describe('SEC-DB-11 a chain given way comes back once there is room again (AT13e
     return { log: restarted.log, capture };
   }
 
+  it('TR-3 a record that moves nothing judges no memory: a chain due back comes back at the next that moves something', async () => {
+    const { fake, time } = await gaveWay();
+    const { log, capture } = await restartedWith(fake, time);
+    log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    time.held.at += HOUR;
+    // The same fact again: nothing moved, nothing judged.
+    log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    expect(said(capture, 'audit.state_digest_chain_coming_back')).toEqual([]);
+    log.record(OTHER, seen(['agent', AGENT, 3n]), time.now());
+    expect(said(capture, 'audit.state_digest_chain_coming_back')).toEqual([expect.objectContaining({ orgId: ORG })]);
+  });
+
   it('an hour after it gave way, with room, its catch-up walk reads it again from its first event; no wait meanwhile', async () => {
     const { fake, time } = await gaveWay();
     const { log, capture } = await restartedWith(fake, time);
+    // TR-3: given way, no facts of it kept: the frontier keeps no stretch.
+    expect(log.factsKept(CHAIN)).toBeUndefined();
     // Within the hour it stays given way, though there is room: it never flaps.
     log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
     log.record(CHAIN, requests(1, 2000), time.now());
@@ -1042,6 +1109,8 @@ describe('SEC-DB-11 a chain given way comes back once there is room again (AT13e
     expect(log.coverage(CHAIN)).toBeUndefined();
     expect(log.owed(CHAIN, 600n)).toBe(true);
     expect(log.latest(CHAIN, 'agent', AGENT)).toBe(3n);
+    // TR-3: its facts kept again, under a mark past the one before it gave way (0): no stretch from before stands.
+    expect(log.factsKept(CHAIN)).toBeGreaterThan(0);
     log.record(CHAIN, requests(1, 3000), time.now());
     expect(log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-000000000bb8')).toBe(3001n);
 

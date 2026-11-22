@@ -588,12 +588,19 @@ export function platformWalked(
   [edges, events]: readonly [QueryResult<unknown>, QueryResult<unknown>],
   from: CheckedPoint,
   most: number = MOST_WALKED_WITHIN,
+  subjectOf: PlatformSubjectOf = () => undefined,
 ): Promise<WithinWalk> {
   const read: ReadAhead[] = (events.rows as Readonly<Record<string, unknown>>[]).map((row) => ({
     seq: typeof row.seq === 'bigint' ? row.seq : -1n,
     entry: platformEntryOf(keys, row),
   }));
-  return walkWithin(keys, CHAIN, platformEdgesOf(edges.rows as Readonly<Record<string, unknown>>[]), read, from, most);
+  // platformEventContent's order: actor, its type and ID, then the action, then the details.
+  const subject = ({ content }: StoredEntry) => {
+    const [, , , , action, , details] = content;
+    return typeof action === 'string' && typeof details === 'string' ? subjectOf(action, details) : undefined;
+  };
+  const edgesRead = platformEdgesOf(edges.rows as Readonly<Record<string, unknown>>[]);
+  return walkWithin(keys, CHAIN, edgesRead, read, from, most, subject);
 }
 
 /**

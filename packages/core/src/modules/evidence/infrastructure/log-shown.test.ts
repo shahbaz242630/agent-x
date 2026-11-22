@@ -11,7 +11,15 @@ const namesOf = (facts: readonly (readonly [string, unknown])[]) => facts.map(([
 describe('factsShown (E10: the platform’s seals left out)', () => {
   it('leaves out a signed state’s fingerprint and its key’s version, and keeps every other fact', () => {
     expect(
-      namesOf(factsShown({ stateFingerprint: 'ab12', stateKeyVersion: 3, amountMinor: 500, status: 'HELD' })),
+      namesOf(
+        factsShown({
+          stateFingerprint: 'ab12',
+          stateKeyVersion: 3,
+          trackedBefore: '{"from":"0","last":{}}',
+          amountMinor: 500,
+          status: 'HELD',
+        }),
+      ),
     ).toEqual(['amountMinor', 'status']);
   });
 });

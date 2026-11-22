@@ -158,7 +158,7 @@ async function cutWitnessedOnW() {
   return { store, witnessOf, bystander, onJ, digest, witnessed, j: sessionsOn(digest) };
 }
 
-describe('TR-1 (11): a platform cut below another copy’s witnessed head, answered as AT13h answers it', () => {
+describe('SEC-DB-20 TR-1 (11): a platform cut below another copy’s witnessed head, answered as AT13h answers it', () => {
   it('found on J from W’s head: the alarm, every session ended once, then a new sign-in works on J; the pause stays held', async () => {
     const { bystander, onJ, digest, witnessed, j } = await cutWitnessedOnW();
 

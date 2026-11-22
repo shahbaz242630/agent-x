@@ -45,6 +45,11 @@ export interface SignedStateTable {
   readonly fields: readonly SignedField[];
   /** Its rows are made once and never changed (`made_once`): one read as not there may be made in that transaction. */
   readonly madeOnce?: true;
+  /**
+   * The actions whose earlier events each of its state events names (state-trail.ts, TR-3 residual 75): those a
+   * decision reads from its objects' histories. An action added later is named from then on.
+   */
+  readonly tracks?: readonly string[];
 }
 
 /** The row, by its organisation and its own ID. */

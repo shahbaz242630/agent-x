@@ -25,7 +25,7 @@
 // replay. Forced: an approval waiting on a cancel or an expiry holding the
 // request finds it no longer waiting, and one waiting on a mandate's revoke
 // finds it changed (revoke-during-approval).
-import { AGENT_KEYS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
+import { AGENT_KEYS, AGENTS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import {
   CHAIN_START,
@@ -61,6 +61,8 @@ import {
   type Database,
   type DatabaseTransaction,
   type IdempotentRequest,
+  noStatementTimes,
+  timingStatements,
   withTenant,
 } from '@agentx/platform/db';
 import {
@@ -199,6 +201,9 @@ const CHANGES = {
 } as const;
 
 const { mandateIdOf: mandateOf } = shared;
+
+/** An ask's trips before its reads were held to the names (781c713a), measured there. */
+const TRIPS_BEFORE_75 = 30;
 
 /** The months the agent's reservations sit in, oldest first. */
 const monthsOf = (w: World) =>
@@ -869,5 +874,68 @@ describe('approving while a brake holds the request or its mandate (forced)', ()
 
     expect(racing).toEqual(refused(409, 'REQUEST_CHANGED'));
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+  });
+});
+
+describe('SEC-DB-20 TR-3 residual 75 on the approval path: an older cancel hidden for good', () => {
+  /**
+   * A request waiting; the agent suspended choosing to cancel (E1) and reactivated (E2), the request left waiting as one
+   * past the brake's batch is. With `hide`, the owner moves E1 to another subject, its hash kept: the agent's newest
+   * event is still E2, and its state names E1. The admin asks to approve.
+   */
+  async function hiddenThenAsked(hide: boolean) {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    for (const [event, action] of [
+      ['suspend', 'agent.suspended'],
+      ['reactivate', 'agent.reactivated'],
+    ] as const) {
+      await signed(w, (tx, states) =>
+        states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, event, {
+          actor: OPERATOR,
+          action,
+          details: event === 'suspend' ? { pendingRequests: 'cancel' } : {},
+        }),
+      );
+    }
+    if (hide) {
+      const owner = await tamperAsOwner(database, AGENTS, w.org);
+      try {
+        await owner.query('alter table audit.events disable trigger user');
+        await owner.query(
+          "update audit.events set subject_id = gen_random_uuid() where org_id = $1 and subject_id = $2 and action = 'agent.suspended'",
+          [w.org, w.agent],
+        );
+        await owner.query('alter table audit.events enable trigger user');
+      } finally {
+        await owner.end();
+      }
+    }
+    const answer = await asking(w.admin, waiting.id);
+    const hold = await signed(w, (tx, states) => states.integrityHold(tx, w.org, 'none'));
+    return { w, waiting, answer, onHold: hold.outcome === 'held' };
+  }
+
+  it('hidden: the approval refused INTEGRITY_FAILED, the request still waiting, the organisation held', async () => {
+    const { w, waiting, answer, onHold } = await hiddenThenAsked(true);
+    expect(answer).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    expect(onHold).toBe(true);
+  });
+
+  it('held to the weighing’s own states: an ask takes no trip more than before (few calls a request, S62)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const times = noStatementTimes();
+    const answer = await timingStatements(times, () => asking(w.admin, waiting.id));
+    expect(answer).toMatchObject({ outcome: 'asked' });
+    // TRIPS_BEFORE_75: an ask's trips as they were before its reads were held (781c713a), its commit's among them.
+    expect(times.trips).toBe(TRIPS_BEFORE_75);
+  });
+
+  it('the positive control: not hidden, the cancel read, REQUEST_CHANGED, no hold', async () => {
+    const { answer, onHold } = await hiddenThenAsked(false);
+    expect(answer).toEqual(refused(409, 'REQUEST_CHANGED'));
+    expect(onHold).toBe(false);
   });
 });

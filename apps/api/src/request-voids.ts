@@ -47,7 +47,7 @@
 //
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next.
-import { type AgentKeyCheck, agentKeyOf, agentOf, type AgentsTables } from '@agentx/core/modules/agents';
+import { AGENTS, type AgentKeyCheck, agentKeyOf, agentOf, type AgentsTables } from '@agentx/core/modules/agents';
 import {
   type AuditTables,
   cancelledSince,
@@ -61,7 +61,7 @@ import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type FundingSourcesTables, SOURCES, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { mandateOf, type MandatesTables, mandateVersionOf } from '@agentx/core/modules/mandates';
+import { MANDATES, mandateOf, type MandatesTables, mandateVersionOf } from '@agentx/core/modules/mandates';
 import {
   APPROVAL_HORIZON_MS,
   approvedAtLooks,
@@ -461,21 +461,41 @@ export async function authorityOf(
     states.mismatch(SPEND_REQUESTS.subject, key);
     throw new Error(`A pending request has no decision to read: ${key.id}`);
   }
-  const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, {
-    organization: orgId,
-    agent: named.agentId,
-    mandate: named.mandateId,
-    source: named.fundingSourceId,
-    supplier: named.supplierId,
-  });
+  // Each read of the stops' histories held to what their verified states name (TR-3 residual 75).
+  const held = [
+    { table: ORGANIZATIONS, id: orgId, state: organization },
+    { table: AGENTS, id: named.agentId, state: agent.state },
+    { table: MANDATES, id: named.mandateId, state: mandate.state },
+    { table: SOURCES, id: named.fundingSourceId, state: source.state },
+    { table: SUPPLIERS, id: named.supplierId, state: supplier.state },
+  ];
+  // Every one named, where its organisation's names reach its start (state-names.ts): one without is tampering.
+  if (!states.historyHeld(orgId, [], { on: held, actions: [], after: undefined })) {
+    throw new Error(`What a pending request names carries no names where it must: ${key.id}`);
+  }
+  const cancelledBy = await cancelledSinceOf(
+    tx,
+    states,
+    orgId,
+    decision.seq,
+    {
+      organization: orgId,
+      agent: named.agentId,
+      mandate: named.mandateId,
+      source: named.fundingSourceId,
+      supplier: named.supplierId,
+    },
+    undefined,
+    held,
+  );
   const organizationStatus = String(organization.fields.get('status'));
   const stopped = (
     [
-      ['organization', { id: orgId, status: organizationStatus }],
-      ['agent', agent.agent],
-      ['mandate', mandate.mandate],
-      ['source', source.source],
-      ['supplier', supplier.supplier],
+      ['organization', { id: orgId, status: organizationStatus }, organization],
+      ['agent', agent.agent, agent.state],
+      ['mandate', mandate.mandate, mandate.state],
+      ['source', source.source, source.state],
+      ['supplier', supplier.supplier, supplier.state],
     ] as const
   ).filter(([which, { status }]) => PAUSE_EVENTS[which][status] !== undefined);
   // On a version replaced, it may be one the version in force still carries (PL-47): the carry job's, not a void.
@@ -485,7 +505,7 @@ export async function authorityOf(
     agentStatus: agent.agent.status,
     mandate: {
       ...mandate.mandate,
-      carriesRest: replaced && (await carriesRest(tx, states, orgId, mandate.mandate)),
+      carriesRest: replaced && (await carriesRest(tx, states, orgId, mandate.mandate, mandate.state)),
       ended,
     },
     source: {
@@ -493,14 +513,17 @@ export async function authorityOf(
       availability: source.source.availability,
       consentPast,
       // Its admin's choice for an expiry (decision 21), read from the log only once the consent has run out.
-      consentHeld: consentPast && (await holdsOverExpiry(tx, states, orgId, source.source.id)),
+      consentHeld: consentPast && (await holdsOverExpiry(tx, states, orgId, source.source.id, source.state)),
     },
-    supplier: { ...supplier.supplier, pausedFrom: await pausedFromOf(tx, states, orgId, supplier.supplier) },
+    supplier: {
+      ...supplier.supplier,
+      pausedFrom: await pausedFromOf(tx, states, orgId, supplier.supplier, undefined, supplier.state),
+    },
     paused: await pausedOf(
       tx,
       states,
       orgId,
-      stopped.map(([which, { id, status }]) => [which, id, status] as const),
+      stopped.map(([which, { id, status }, state]) => [which, id, status, state] as const),
     ),
     cancelledBy,
     at: now,

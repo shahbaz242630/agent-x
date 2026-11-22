@@ -836,6 +836,21 @@ export const PLAIN_WORDS = {
     broke: 'Nothing new was built; approvals still work from the full member history.',
     next: 'It is tried again in about an hour. If it keeps failing, check the database.',
   },
+  'state_names.chain_unverified': {
+    happened: "One organisation's audit chain did not check out, so its older records were not linked.",
+    broke: 'Nothing changed, but a failed check may mean someone went round the app.',
+    next: 'Look at the chain problem in this line first. It is tried again in about an hour.',
+  },
+  'state_names.failed': {
+    happened: "One organisation's older records could not all be given the links that protect their history.",
+    broke: 'Those not reached are still read from the log alone; nothing else changed.',
+    next: 'It is tried again in about an hour. If it keeps failing, check the error.',
+  },
+  'state_names.run_failed': {
+    happened: 'The list of organisations could not be read, so no older records were linked this run.',
+    broke: 'Nothing changed; older records are still read from the log alone.',
+    next: 'It is tried again in about an hour. If it keeps failing, check the database.',
+  },
   'health.check_failed': {
     happened: "One of the API's health checks failed.",
     broke: 'The API told the uptime monitors it is unavailable.',
@@ -885,6 +900,16 @@ export const PLAIN_WORDS = {
     happened: 'A last check of the audit records before paying the bank raised a doubt.',
     broke: 'That payment was not sent; its money stays held and the bank check settles it.',
     next: 'Read the reason: a cut means the database was changed, so follow the incident runbook.',
+  },
+  'handoff.read_moved': {
+    happened: 'An approved payment’s records changed between its checks and the audit trail’s last check.',
+    broke: 'Nothing was sent. The payment waits and is checked again on the next run, in about 10 seconds.',
+    next: 'Nothing if rare. If it repeats, someone may be changing the database: follow the incident runbook.',
+  },
+  'handoff.read_moved_repeatedly': {
+    happened: 'An organisation’s payment checks kept finding its records changed between reads, many times in a row.',
+    broke: 'Its approved payments wait, unsent, while it goes on.',
+    next: 'Treat it as someone changing the database: follow the incident runbook and look at that organisation.',
   },
   'handoff.queue_stale': {
     happened: 'Approved payments have waited over 15 minutes without being handed to the bank, for no known reason.',

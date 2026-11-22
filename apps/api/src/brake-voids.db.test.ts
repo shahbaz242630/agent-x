@@ -56,7 +56,7 @@ import {
   SPEND_REQUESTS,
   voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
-import { PAYEE_COOLING_OFF_MS, supplierOf } from '@agentx/core/modules/suppliers';
+import { PAYEE_COOLING_OFF_MS, SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -1283,6 +1283,39 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
 
       expect(await asking(w, waiting.id, false)).toEqual({ outcome: 'refused', status: 409, code: 'RECHECK_REQUIRED' });
       expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    });
+
+    /** Carried twice (a second change chosen to pause, verified again); with `hide`, the owner moves the first aside. */
+    const carriedTwice = async (hide: boolean) => {
+      const { w, waiting } = await carried();
+      await changedDetails(w, 'pause', 'Gulf Office Supplies Trading Co LLC');
+      await shared.verified(w, supplierOfWorld(w));
+      if (hide) {
+        const owner = await tamperAsOwner(database, SUPPLIERS, w.org);
+        try {
+          await owner.query('alter table audit.events disable trigger user');
+          await owner.query(
+            `update audit.events set subject_id = gen_random_uuid() where org_id = $1 and seq = (
+               select min(seq) from audit.events where org_id = $1 and subject_id = $2 and action = 'supplier.details_changed')`,
+            [w.org, supplierOfWorld(w)],
+          );
+          await owner.query('alter table audit.events enable trigger user');
+        } finally {
+          await owner.end();
+        }
+      }
+      return { w, waiting, answer: await asking(w, waiting.id, true) };
+    };
+
+    it('TR-3 residual 75: its first change hidden for good, the carry can’t be believed: INTEGRITY_FAILED, still waiting', async () => {
+      const { w, waiting, answer } = await carriedTwice(true);
+      expect(answer).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+      expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    });
+
+    it('TR-3 residual 75’s positive control: carried twice, nothing hidden, asked with its re-check', async () => {
+      const { answer } = await carriedTwice(false);
+      expect(answer).toMatchObject({ outcome: 'asked' });
     });
 
     it('re-checked: shown what changed and how it is weighed now, then approved with the re-check on its event', async () => {

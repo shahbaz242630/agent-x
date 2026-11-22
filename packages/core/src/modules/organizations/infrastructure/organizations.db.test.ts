@@ -91,6 +91,8 @@ describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
       eventId: recorded.eventId.toLowerCase(),
       recordedAt: expect.any(Date) as Date,
       fields: new Map([['status', 'ACTIVE']]),
+      // Its event's place and action, naming no earlier events: the organisation's first, complete from its start.
+      trail: { seq: 1n, action: 'organization.created', tracked: { from: 0n, last: new Map() } },
     });
     expect(await listed(id)).toBe(true);
     const { row, events, chain } = await withTenant(app, id, async (tx) => ({

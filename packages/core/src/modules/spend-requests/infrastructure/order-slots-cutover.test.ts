@@ -34,7 +34,7 @@ const settled = (
   versionKey?: string | null,
 ) => sealedPayeeKey(keys, ORG, holding(payee), { claims, others, versionKey });
 
-describe('a payee key sealed by its decision (E1b)', () => {
+describe('SEC-DB-21 a payee key sealed by its decision (E1b)', () => {
   it('is the key that holds to the seal, its claim the same or gone', () => {
     expect(settled({ key: 'payee-1' }, ['payee-1'], ['payee-1', 'payee-1'])).toBe('payee-1');
     // The claim deleted: its reservation's or its supplier's signed key stands for it.
@@ -55,7 +55,7 @@ describe('a payee key sealed by its decision (E1b)', () => {
   });
 });
 
-describe('a payee key decided before E1b (no seal)', () => {
+describe('SEC-DB-21 a payee key decided before E1b (no seal)', () => {
   it('is the key its sealed supplier version paid, its claim the same, gone or keyless with it', () => {
     expect(settled('none', ['payee-1'], ['payee-2', 'payee-3'], 'payee-1')).toBe('payee-1');
     expect(settled('none', [], ['payee-2', 'payee-3'], 'payee-1')).toBe('payee-1');
@@ -76,13 +76,13 @@ describe('a payee key decided before E1b (no seal)', () => {
   });
 });
 
-describe('a sealed payee key held to its supplier version', () => {
+describe('SEC-DB-21 a sealed payee key held to its supplier version', () => {
   it('is found in the version it paid where its claim and reservation are gone', () => {
     expect(settled({ key: 'payee-1' }, [], [null, null], 'payee-1')).toBe('payee-1');
   });
 });
 
-describe('the slots the requests fill at the cutover', () => {
+describe('SEC-DB-21 the slots the requests fill at the cutover', () => {
   const SUPPLIER = '0199a0f0-0000-7000-8000-00000000a001';
   const requestOf = (n: number) => ({ id: `0199a0f0-0000-7000-8000-${n.toString(16).padStart(12, '0')}` }) as never;
   const order = (orderKey: string) => ({ supplierId: SUPPLIER, payeeKey: null, orderKey, bankKey: 'inv7' });
@@ -116,7 +116,7 @@ describe('the slots the requests fill at the cutover', () => {
   });
 });
 
-describe("a request's payee key by its supplier version", () => {
+describe("SEC-DB-21 a request's payee key by its supplier version", () => {
   const known = { now: new Map(), byVersion: new Map([['0199a0f0-0000-7000-8000-00000000f001', 'payee-1']]) };
 
   it('is the key its sealed version paid, undefined where no signed record says or it names none', () => {

@@ -117,7 +117,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import { createAuditTrail } from './audit-trail.ts';
-import { nowChainsOf, waitWitnessed, witnessReplayedWrite, WriteCutBack } from './witnessing.ts';
+import { noteAgainOnCommit, nowChainsOf, waitWitnessed, witnessReplayedWrite, WriteCutBack } from './witnessing.ts';
 import {
   holdNoLongerWaiting,
   holdStillWaiting,
@@ -232,7 +232,10 @@ const HOLD_MARK_LIMITS = { lockMs: 500, statementMs: 1_000 } as const;
 
 /**
  * The hold history's mark for a hold just set, in the hold's transaction, inside a savepoint of its own with its waits
- * bounded: any failure is rolled back alone and said, so the hold commits all the same.
+ * bounded: any failure is rolled back alone and said, so the hold commits all the same. That rollback drops every
+ * afterCommit hook given before it (tenant.ts: anything that could undo part of the transaction), the hold's own head's
+ * note to the witness log among them, though the hold stands: noted again here (TR-3), or the owner holding the mark's
+ * row would leave a hold unwitnessed, to be cut back unseen.
  */
 async function markHeld(tx: Transaction<AuditTables>, held: string, log: Logger): Promise<void> {
   const mark = markHold;
@@ -241,6 +244,7 @@ async function markHeld(tx: Transaction<AuditTables>, held: string, log: Logger)
     await inBoundedSavepoint(tx, HOLD_MARK_SAVEPOINT, HOLD_MARK_LIMITS, () => mark(tx, held));
   } catch (error) {
     log.warn('org_work.hold_mark_skipped', { err: error });
+    await noteAgainOnCommit(tx, { kind: 'organisation', orgId: held });
   }
 }
 

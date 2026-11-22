@@ -11,6 +11,7 @@ import {
   createDigestLog,
   type DigestLog,
   type HeadSeen,
+  subjectKey,
 } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -627,6 +628,9 @@ describe('TR-1 F.4 the platform chain walked from its frontier on the pause’s 
     const { pause, lines } = await pauseWithin(fromStart(), [await witnessOf(2), await witnessOf(3)]);
     expect(pause).toMatchObject({ outcome: 'running', walk: { kind: 'walked', head: { seq: 3n } } });
     expect(lines).toEqual([]);
+    // TR-3: the pause's newest place on the walk named, for the digest: a pause below F_p rewritten in place is held to it.
+    const walked = pause.outcome === 'running' ? pause.walk : undefined;
+    expect([...(walked?.signed ?? [])]).toEqual([[subjectKey('platform.handoff_pause', 'pause'), 3n]]);
   });
 
   it('a witnessed head above the head, or another at its place: the cut, tampered, the alarm', async () => {

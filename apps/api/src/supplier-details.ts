@@ -175,7 +175,7 @@ export function createSupplierDetailsChanges({
       throw new SupplierRefused(409, 'SUPPLIER_DETAILS_UNCHANGED');
     }
     const cancelledBefore =
-      pendingRequests === 'pause' && (await cancelledByItsStop(tx, states, orgId, found.supplier));
+      pendingRequests === 'pause' && (await cancelledByItsStop(tx, states, orgId, found.supplier, found.state));
     return { admin, found, current, cancelledBefore };
   };
 

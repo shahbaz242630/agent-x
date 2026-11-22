@@ -29,7 +29,7 @@
 // alarms such a total.
 import type { Transaction } from 'kysely';
 
-import type { AuditEvent, AuditTables, SignedStates } from '../../audit/index.ts';
+import type { AuditEvent, AuditTables, SignedStates, VerifiedState } from '../../audit/index.ts';
 import {
   agentMonthLocking,
   type LimitReservationsTables,
@@ -219,7 +219,9 @@ async function holdingOf(
     if (check.outcome !== 'found') return 'tampered';
     // With the supplier version its signed state names (the payee key it was decided under, TR-2 review).
     const { supplierVersionId } = decidedAgainst(check.state);
-    if (holdsNow(check.request.status) || ended === 'kept') holding.push({ request: check.request, supplierVersionId });
+    if (holdsNow(check.request.status) || ended === 'kept') {
+      holding.push({ request: check.request, supplierVersionId, state: check.state });
+    }
   }
   return holding;
 }
@@ -228,6 +230,8 @@ async function holdingOf(
 interface Holder {
   readonly request: SpendRequestRecord;
   readonly supplierVersionId: string | null;
+  /** Its verified state: what its decision's read is held to (TR-3 residual 75). */
+  readonly state: VerifiedState;
 }
 
 /**
@@ -250,6 +254,7 @@ async function visitHeld<Tx extends CutoverTransaction>(
     states,
     orgId,
     holding.map(({ request }) => request.id),
+    new Map(holding.map(({ request, state }) => [request.id, state])),
   );
   if (decided === 'tampered') return 'tampered';
   for (const { request, supplierVersionId } of holding.filter(({ request }) => paid.get(request.id) !== 'ended')) {

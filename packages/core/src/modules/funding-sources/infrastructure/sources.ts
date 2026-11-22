@@ -57,6 +57,9 @@ export const SOURCES = {
     { column: 'partner_changed_at', type: 'timestamptz' },
   ],
   rules: FUNDING_SOURCE,
+  // The actions a request's authority reads from its history (state-trail.ts, TR-3 residual 75): CANCEL_BRAKES,
+  // PAUSE_EVENTS and the rest in apps/api, held to these by its tracked-actions test.
+  tracks: ['funding_source.suspended', 'funding_source.consent_lapsed', 'funding_source.consent_expiry_chosen'],
 } as const satisfies SignedStateTable & { readonly rules: typeof FUNDING_SOURCE };
 
 /** A transaction on the tables sources are added and read in, opened by withSignedStates for their organisation. */

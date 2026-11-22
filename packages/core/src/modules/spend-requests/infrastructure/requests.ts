@@ -13,6 +13,17 @@ import { SPEND_REQUEST, type SpendRequestStatus } from '../domain/spend-request.
 import type { SpendRequestsTables } from './tables.ts';
 
 /** A spend request's row, as the signed state reads, records and moves it. */
+/** A person's approval of a request (Decided's `approvedAt`, AT13d). */
+export const REQUEST_APPROVED = 'spend_request.approved';
+
+/** The events that end a request before hand-off (endings.ts): one may say it kept its capacity (`capacityKept`). */
+export const ENDING_ACTIONS: readonly string[] = [
+  'spend_request.voided',
+  'spend_request.expired',
+  'spend_request.cancelled',
+  'spend_request.rejected',
+];
+
 export const SPEND_REQUESTS = {
   table: 'spend_requests.requests',
   subject: 'spend_request',
@@ -38,6 +49,10 @@ export const SPEND_REQUESTS = {
     { column: 'status', type: 'text' },
   ],
   rules: SPEND_REQUEST,
+  // Its approvals and endings, whose earlier events each state event names (state-trail.ts, TR-3 residual 75): an
+  // ending that kept its capacity can't be hidden from decisionsRead. Its decision isn't (its own event's details
+  // fill the most a state event may carry; a decision hidden reads as none, which every reader refuses).
+  tracks: [REQUEST_APPROVED, ...ENDING_ACTIONS],
   // Everything but the status, fixed when the request is made: 0039's `fixed_at_creation` refuses any change after.
   // The mandate version alone may move, to its mandate's waiting version while pending (0047's `carried_version`, E4).
   fixedAtCreation: [

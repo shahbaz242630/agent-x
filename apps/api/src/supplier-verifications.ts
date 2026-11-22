@@ -184,7 +184,7 @@ export function createSupplierVerifications({
       [...enterers].map((enteredById) => verifierVerdict(facts, { enteredById, verifierId: verifier.id }, now)),
     );
     if (verdict.outcome === 'refused') throw new SupplierRefused(403, REFUSALS[verdict.reason]);
-    const leftByItsStop = await cancelledByItsStop(tx, states, orgId, found.supplier);
+    const leftByItsStop = await cancelledByItsStop(tx, states, orgId, found.supplier, found.state);
     return { verifier, found, current, nameCheck, path: verdict.outcome, leftByItsStop };
   };
 

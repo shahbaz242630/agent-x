@@ -162,8 +162,9 @@ import {
 } from '../domain/event.ts';
 import { HISTORY_CHECK_SUBJECT, HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
+import { type TrackedBefore, trackedBeforeIn } from './state-trail.ts';
 import { witnessClassOf } from './witness-class.ts';
-import { MOST_WALKED_WITHIN, type ReadAhead, walkWithin, type WithinWalk } from './chain-frontier.ts';
+import { type EventSeen, MOST_WALKED_WITHIN, type ReadAhead, walkWithin, type WithinWalk } from './chain-frontier.ts';
 import { chainWitness, noteCommitted, witnessedWrite, wroteTo } from './witnessing.ts';
 
 /** A transaction on the audit tables, opened by withTenant for the organisation. */
@@ -204,6 +205,9 @@ export type LatestSignedState =
       readonly recordedAt: Date;
       readonly version: number;
       readonly seal: StateSeal;
+      /** Its action, and the earlier events it names (state-trail.ts): none for one recorded before the names. */
+      readonly action: string;
+      readonly tracked: TrackedBefore | undefined;
     }
   | BrokenRead;
 
@@ -289,17 +293,21 @@ export function subjectsAre(subjects: readonly AuditSubjectKey[]): RawBuilder<bo
 export interface WalkedEvent {
   readonly seq: bigint;
   readonly recordedAt: Date;
+  readonly action: string;
+  readonly subjectType: string;
   readonly subjectId: string;
+  readonly subjectVersion: number;
   /** Its details, as the exact JSON text that was sealed. */
   readonly details: string;
 }
 
 /** The event a walk read, if it is of `actions`: its content's labelled parts (eventContent) name what it is. */
 function walkedOf(entry: StoredEntry | undefined, actions: readonly string[]): WalkedEvent | undefined {
-  const [, , , , action, , , subjectId, , , details] = entry?.content ?? [];
+  const [, , , , action, , subjectType, subjectId, version, , details] = entry?.content ?? [];
   if (entry === undefined || typeof action !== 'string' || !actions.includes(action)) return undefined;
-  if (typeof subjectId !== 'string' || typeof details !== 'string') return undefined;
-  return { seq: entry.seq, recordedAt: entry.recordedAt, subjectId, details };
+  if (typeof subjectType !== 'string' || typeof subjectId !== 'string' || typeof details !== 'string') return undefined;
+  const subjectVersion = Number(version);
+  return { seq: entry.seq, recordedAt: entry.recordedAt, action, subjectType, subjectId, subjectVersion, details };
 }
 
 /**
@@ -318,15 +326,21 @@ function seeingSigned<Reader extends Pick<ChainReader, 'events'>>(reader: Reader
     async events(after, upTo, limit) {
       const batch = await reader.events(after, upTo, limit);
       for (const entry of batch) {
-        const [, , , , , , type, id, , , details] = entry?.content ?? [];
-        if (entry === undefined || typeof type !== 'string' || typeof id !== 'string') continue;
-        if (typeof details !== 'string' || !details.includes(HAS_STATE_SEAL)) continue;
-        const key = subjectKey(type, id);
+        const subject = entry === undefined ? undefined : signedSubjectOf(entry);
+        if (entry === undefined || subject === undefined) continue;
+        const key = subjectKey(...subject);
         if ((seen.get(key) ?? 0n) < entry.seq) seen.set(key, entry.seq);
       }
       return batch;
     },
   };
+}
+
+/** The signed object an event is a state of (it carries a state seal): its type and ID, or none. */
+function signedSubjectOf(entry: StoredEntry): readonly [string, string] | undefined {
+  const [, , , , , , type, id, , , details] = entry.content;
+  if (typeof type !== 'string' || typeof id !== 'string') return undefined;
+  return typeof details === 'string' && details.includes(HAS_STATE_SEAL) ? [type, id] : undefined;
 }
 
 /** A step and what it saw, kept only for one that holds: a step that fails read no chain to believe. */
@@ -1109,6 +1123,137 @@ const headsMoved = new WeakMap<object, Map<string, HeadMoved>>();
  */
 const headsTaken = new WeakMap<object, Set<string>>();
 
+/**
+ * Each transaction's reads of signed states (TR-3): for every object read, the newest signed place it found there
+ * (0 for none), by its digest key. A walk later in the same transaction that names an object's newer signed state is a
+ * read made on a chain that moved under it (readBelowWalk): an event hidden while the transaction read, put back
+ * before its walk.
+ */
+const readPlaces = new WeakMap<object, Map<string, bigint>>();
+
+/** A read's place kept for its transaction: the lowest it has found of the object. */
+export function placeRead(tx: object, type: string, id: string, latest: LatestSignedState): void {
+  if (latest.kind === 'broken') return;
+  const place = latest.kind === 'none' ? 0n : latest.seq;
+  const byKey = readPlaces.get(tx) ?? new Map<string, bigint>();
+  readPlaces.set(tx, byKey);
+  const key = subjectKey(type, id);
+  // The lowest kept: a later read of the object that found more never covers one that found less (an event hidden for
+  // the first read alone).
+  const before = byKey.get(key);
+  if (before === undefined || place < before) byKey.set(key, place);
+}
+
+/** A history read in a transaction (TR-3): what it asked for, and the places of the events it got. */
+export interface HistoryRead {
+  readonly types?: ReadonlySet<string>;
+  readonly ids?: ReadonlySet<string>;
+  readonly actions?: ReadonlySet<string>;
+  readonly afterSeq?: bigint;
+  /** An event read by its ID alone. */
+  readonly eventId?: string;
+  /** How far the read reached where it took only part (`newest`/`oldest` up to its limit, or one event about an object). */
+  readonly from?: bigint;
+  readonly upTo?: bigint;
+  readonly got: ReadonlySet<bigint>;
+}
+
+/** Each transaction's history reads, for the walk later in it to hold them to (historyMissed). */
+const historyReads = new WeakMap<object, HistoryRead[]>();
+
+export function historyRead(tx: object, read: HistoryRead): void {
+  const reads = historyReads.get(tx) ?? [];
+  historyReads.set(tx, reads);
+  reads.push(read);
+}
+
+/** A list read kept: its filter, how far it reached where it took part only, and what it got. */
+export function listRead(tx: object, find: HistoryToRead, read: RecordedEventsCheck): void {
+  if (read.kind !== 'recorded') return;
+  const got = new Set(read.events.map(({ seq }) => seq));
+  const named = find.subjectId === undefined ? find.subjectIds : [find.subjectId];
+  const places = [...got];
+  const full = places.length >= find.limit;
+  const lowest = places.reduce<bigint | undefined>(
+    (one, seq) => (one === undefined || seq < one ? seq : one),
+    undefined,
+  );
+  const highest = places.reduce<bigint | undefined>(
+    (one, seq) => (one === undefined || seq > one ? seq : one),
+    undefined,
+  );
+  historyRead(tx, {
+    types: new Set(find.subjectTypes),
+    ...(named === undefined ? {} : { ids: new Set(named.map((id) => id.toLowerCase())) }),
+    ...(find.actions === undefined ? {} : { actions: new Set(find.actions) }),
+    ...(find.afterSeq === undefined ? {} : { afterSeq: find.afterSeq }),
+    // Part of what matches only: the newest up to the limit reach down to the lowest got; the oldest, up to the highest.
+    ...(full && find.newest === true && lowest !== undefined ? { from: lowest } : {}),
+    ...(full && find.oldest === true && highest !== undefined ? { upTo: highest } : {}),
+    got,
+  });
+}
+
+/** One event read kept for the walk later in the transaction (historyMissed): by its ID, or as its object's first. */
+function eventRead(tx: object, find: EventToFind, found: bigint | undefined): void {
+  const got = new Set(found === undefined ? [] : [found]);
+  if ('eventId' in find) {
+    historyRead(tx, { eventId: find.eventId.toLowerCase(), got });
+    return;
+  }
+  historyRead(tx, {
+    types: new Set([find.onlyAbout.type]),
+    ids: new Set([find.onlyAbout.id.toLowerCase()]),
+    ...(found === undefined ? {} : { upTo: found }),
+    got,
+  });
+}
+
+/** Whether a history read asked for this event and didn't get it, within how far it reached. */
+function missedBy(read: HistoryRead, seen: EventSeen): boolean {
+  if (read.got.has(seen.seq)) return false;
+  if (read.eventId !== undefined) return read.eventId === seen.id;
+  if (read.types?.has(seen.subjectType) !== true) return false;
+  if (read.ids !== undefined && !read.ids.has(seen.subjectId.toLowerCase())) return false;
+  if (read.actions !== undefined && !read.actions.has(seen.action)) return false;
+  if (read.afterSeq !== undefined && seen.seq <= read.afterSeq) return false;
+  if (read.from !== undefined && seen.seq < read.from) return false;
+  return read.upTo === undefined || seen.seq <= read.upTo;
+}
+
+/**
+ * The first event a walk later in the transaction read that one of its history reads asked for and didn't get (TR-3):
+ * a history read made on a chain that moved under it (an event hidden while it read, put back before the walk). None
+ * where every history read stands.
+ */
+export function historyMissed(tx: object, seen: readonly EventSeen[] | undefined): EventSeen | undefined {
+  const reads = historyReads.get(tx);
+  if (reads === undefined || seen === undefined) return undefined;
+  return seen.find((event) => reads.some((read) => missedBy(read, event)));
+}
+
+/** A walked event as a history's filter names it: org events' content order (eventContent). */
+function eventSeenIn(entry: StoredEntry): EventSeen | undefined {
+  const [, , , , action, , type, id] = entry.content;
+  if (typeof action !== 'string' || typeof type !== 'string' || typeof id !== 'string') return undefined;
+  return { seq: entry.seq, id: entry.id, subjectType: type, subjectId: id, action };
+}
+
+/**
+ * The first object this transaction read whose newest signed state a walk later in it found further on (`signed`, the
+ * walk's own: each object's newest place on it): the read was made on a chain that moved under it, put back before the
+ * walk (TR-3). None where every read stands.
+ */
+export function readBelowWalk(tx: object, signed: SignedSeen): readonly [string, bigint] | undefined {
+  const byKey = readPlaces.get(tx);
+  if (byKey === undefined) return undefined;
+  for (const [key, place] of signed) {
+    const read = byKey.get(key);
+    if (read !== undefined && read < place) return [key, place];
+  }
+  return undefined;
+}
+
 /** Recording's steps over the audit tables, for one organisation and the events recorded together, in their order. */
 function writerFor(
   tx: AuditTransaction,
@@ -1656,11 +1801,23 @@ export function createAuditTrail({
    * which every row of the statement carries alike (`first`).
    */
   const latestIn = (
+    tx: AuditTransaction,
     chain: Chain & { readonly kind: 'organisation' },
-    rows: readonly Readonly<Record<string, unknown>>[],
-    first: Readonly<Record<string, unknown>> | undefined,
+    subject: readonly [string, string],
+    {
+      rows,
+      first,
+    }: {
+      readonly rows: readonly Readonly<Record<string, unknown>>[];
+      readonly first: Readonly<Record<string, unknown>> | undefined;
+    },
     known: bigint | undefined,
-  ): LatestSignedState => heldToDigest(latestOfRows(chain, rows, first), known);
+  ): LatestSignedState => {
+    const latest = heldToDigest(latestOfRows(chain, rows, first), known);
+    // Kept for the transaction: a walk later in it holds the read to what it finds (readBelowWalk, TR-3).
+    placeRead(tx, ...subject, latest);
+    return latest;
+  };
 
   /**
    * Where the digest (AT13) says the object's newest signed event is, if it says. Asked before the statement that reads
@@ -1741,14 +1898,18 @@ export function createAuditTrail({
     );
     const details = detailsObject(newestSigned.details);
     const seal = details === undefined ? undefined : stateSealIn(details);
+    const tracked = details === undefined ? undefined : trackedBeforeIn(details);
     const signed = read[0]?.sealed;
     const version = newestSigned.subject_version;
+    const action = newestSigned.action;
     if (
       bad !== undefined ||
       signed === undefined ||
       typeof version !== 'number' ||
+      typeof action !== 'string' ||
       seal === undefined ||
-      seal === 'malformed'
+      seal === 'malformed' ||
+      tracked === 'malformed'
     ) {
       return brokenAt((bad ?? read[0])?.row.seq);
     }
@@ -1760,6 +1921,8 @@ export function createAuditTrail({
       recordedAt: signed.recordedAt,
       version,
       seal,
+      action,
+      tracked,
     });
   };
 
@@ -1788,7 +1951,10 @@ export function createAuditTrail({
       // A backlog, past the head or not, is left to the row's own read, which judges it as it always has.
       return {
         id: typeof asked === 'string' ? asked : null,
-        latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : unlessCut(latestIn(chain, own, first, known), cut),
+        latest:
+          own.length > LATER_EVENTS_READ
+            ? BACKLOGGED
+            : unlessCut(latestIn(tx, chain, [type ?? '', String(asked)], { rows: own, first }, known), cut),
         rows: rowsAlong(first),
       };
     });
@@ -1823,7 +1989,10 @@ export function createAuditTrail({
     );
     const rows = rowRead === undefined ? undefined : rowsAlong(events[0]);
     const cut = cutBack(tx, chain, watch, events[0]);
-    return { latest: unlessCut(latestIn(chain, events, events[0], known), cut), rows };
+    return {
+      latest: unlessCut(latestIn(tx, chain, [subject.type, id], { rows: events, first: events[0] }, known), cut),
+      rows,
+    };
   };
 
   /**
@@ -2062,7 +2231,8 @@ export function createAuditTrail({
       const edgeRows = edges.rows as Readonly<Record<string, unknown>>[];
       return {
         kept: keptIn(kept.rows[0] as Parameters<typeof keptIn>[0], anchor),
-        walk: await walkWithin(keys, chain, edgesOf(edgeRows), read, from, most),
+        // Each signed object's newest place on it, for the digest (TR-3), as an anchor check's walk keeps them.
+        walk: await walkWithin(keys, chain, edgesOf(edgeRows), read, from, most, signedSubjectOf, eventSeenIn),
       };
     },
 
@@ -2160,7 +2330,7 @@ export function createAuditTrail({
             id,
             !pastHead && own.length > LATER_EVENTS_READ
               ? BACKLOGGED
-              : unlessCut(latestIn(chain, own, first, known.get(id)), cut),
+              : unlessCut(latestIn(tx, chain, [type, id], { rows: own, first }, known.get(id)), cut),
           ];
         }),
       );
@@ -2230,6 +2400,7 @@ export function createAuditTrail({
       const cut = cutBack(tx, chain, watch, row);
       const past = row?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);
+      eventRead(tx, find, typeof row?.seq === 'bigint' ? row.seq : undefined);
       if (row === undefined || row.seq === null) return cut ?? { kind: 'none' };
       const head = row.has_head === true ? headIsWhole(keys, chain, row) : undefined;
       const read = wholeEvent(keys, chain, row, head);
@@ -2247,7 +2418,9 @@ export function createAuditTrail({
         heldTo: watch?.heldTo,
       });
       const cut = cutBack(tx, chain, watch, rows[0]);
-      return unlessCut(historyIn(chain, rows, rows[0], find.limit), cut);
+      const read = unlessCut(historyIn(chain, rows, rows[0], find.limit), cut);
+      listRead(tx, find, read);
+      return read;
     },
 
     async recordedHistories(
@@ -2265,8 +2438,8 @@ export function createAuditTrail({
       const watch = watchOf(chain);
       const rows = await historiesWithHead(tx, chain, picks, watch?.heldTo);
       const cut = cutBack(tx, chain, watch, rows[0]);
-      return finds.map((find, index) =>
-        unlessCut(
+      return finds.map((find, index) => {
+        const read = unlessCut(
           historyIn(
             chain,
             rows.filter((row) => row.find === index),
@@ -2274,8 +2447,10 @@ export function createAuditTrail({
             find.limit,
           ),
           cut,
-        ),
-      );
+        );
+        listRead(tx, find, read);
+        return read;
+      });
     },
 
     async logPage(

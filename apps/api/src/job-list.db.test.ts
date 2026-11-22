@@ -6,10 +6,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { checkStatesWith, witnessWith } from '@agentx/core/modules/audit';
+import { checkStatesWith, statesDigest, witnessWith } from '@agentx/core/modules/audit';
+import { SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
-import { createWitnessLog } from '@agentx/platform/audit-chain';
+import { createWitnessLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { loadConfig } from '@agentx/platform/config';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { folderWriteOnceStore } from '@agentx/platform/storage';
@@ -149,7 +150,7 @@ async function ranUntil(started: { stop(): Promise<void> }, capture: LogCapture,
   }
 }
 
-describe('TR-1 the jobs side wired over the database and a witness store', () => {
+describe('SEC-DB-20 TR-1 the jobs side wired over the database and a witness store', () => {
   it('anchors both chains held to the heads witnessed, probes a head another copy wrote, and pays through the gate', async () => {
     const { w, acting } = await ready();
     const { made, job, capture } = jobsSide();
@@ -186,6 +187,10 @@ describe('TR-1 the jobs side wired over the database and a witness store', () =>
       const elsewhere = await ask(other.acting, other.w, { amount: ALLOWED() });
       await made.handoff?.run();
       expect(await statusOf(w, again.id)).toBe('HANDED_OFF');
+      // TR-3: what that Tx A's walk read of the request kept in the digest (the anchor check never walked past it).
+      expect(
+        (statesDigest() as DigestLog).latest({ kind: 'organisation', orgId: w.org }, SPEND_REQUESTS.subject, again.id),
+      ).toBeDefined();
       expect(await statusOf(other.w, elsewhere.id)).toBe('HANDED_OFF');
       expect(capture.lines().filter(({ event }) => event === 'handoff.held_before_sending')).toEqual([]);
       expect(capture.lines().filter(({ event }) => event === 'audit.integrity_failed')).toEqual([]);

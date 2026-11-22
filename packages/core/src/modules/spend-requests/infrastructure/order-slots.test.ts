@@ -44,7 +44,7 @@ const statesWatching = () => {
   return { states: { mismatch } as unknown as SignedStates, mismatch };
 };
 
-describe('an order slot as read', () => {
+describe('SEC-DB-21 an order slot as read', () => {
   it('is held by who its seal says, under its own ID', () => {
     const { states, mismatch } = statesWatching();
     const read = orderSlotFrom(states, ORG, orderSlotId(ORG, KEY).toUpperCase(), verified(fieldsOf(KEY, REQUEST)));
@@ -79,7 +79,7 @@ describe('an order slot as read', () => {
   });
 });
 
-describe("an order's slots", () => {
+describe("SEC-DB-21 an order's slots", () => {
   it("are its supplier's and its key's, by canonical form, then by bank key, each named by a hash", () => {
     const keys = orderSlotKeys({
       supplierId: SUPPLIER.toUpperCase(),
@@ -110,7 +110,7 @@ describe("an order's slots", () => {
   });
 });
 
-describe("a slot's ID", () => {
+describe("SEC-DB-21 a slot's ID", () => {
   it('is named the same for a slot naming neither supplier nor key (never sealed so: 0114 refuses it)', () => {
     const neither = { kind: 'payee_order', supplierId: null, payeeKey: null, keyHash: keyHashOf('inv-7') } as const;
     expect(orderSlotId(ORG, neither)).toBe(orderSlotId(ORG, neither));
@@ -118,7 +118,7 @@ describe("a slot's ID", () => {
   });
 });
 
-describe('a slot held to its open claims', () => {
+describe('SEC-DB-21 a slot held to its open claims', () => {
   const entry = (n: number) => `${ORDER}:0199a0f0-0000-7000-8000-${n.toString(16).padStart(12, '0')}`;
   const ORDER = '1111111111111111';
   const bankOf = (entries: readonly string[]) => ({
@@ -153,7 +153,7 @@ describe('a slot held to its open claims', () => {
   });
 });
 
-describe("a payment's failure letting go of its slots", () => {
+describe("SEC-DB-21 a payment's failure letting go of its slots", () => {
   it('lets go of nothing where its caller locked none', async () => {
     const { states, mismatch } = statesWatching();
     await expect(
@@ -166,7 +166,7 @@ describe("a payment's failure letting go of its slots", () => {
   });
 });
 
-describe("the holdings check's page", () => {
+describe("SEC-DB-21 the holdings check's page", () => {
   it('is 1 to its most slots, refused before any SQL runs', async () => {
     const { states } = statesWatching();
     for (const limit of [0, MOST_SLOTS_CHECKED_A_PAGE + 1, 1.5]) {

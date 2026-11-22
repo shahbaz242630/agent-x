@@ -1,3 +1,4 @@
+import { WriteCutBack } from '@agentx/core/modules/audit';
 import { REASON_CODES } from '@agentx/core/shared-kernel';
 import { describe, expect, it } from 'vitest';
 
@@ -55,6 +56,9 @@ describe('SEC-DATA-04 an error response carries a reason code, never the error',
     expect(responseFor(new OrganisationBusy(10_000))).toEqual({ status: 503, code: 'ORGANISATION_BUSY' });
     // TR-1: saved, its chain head not yet outside the database: busy, sent again under its key.
     expect(responseFor(new WitnessUnconfirmed())).toEqual({ status: 503, code: 'ORGANISATION_BUSY' });
+    // TR-1: the write an idempotent retry repeats is no longer on the chain: the record failed its check.
+    expect(responseFor(new WriteCutBack(5n))).toEqual({ status: 503, code: 'INTEGRITY_FAILED' });
+    expect(responseFor(new WriteCutBack(undefined, 'forged'))).toEqual({ status: 503, code: 'INTEGRITY_FAILED' });
     expect(responseFor(new PoolWaitRanOut(new Error('x')))).toEqual({ status: 503, code: 'PLATFORM_BUSY' });
     // Only that: a database that is down stays what it was.
     expect(responseFor(new Error('Connection terminated due to connection timeout'))).toEqual({

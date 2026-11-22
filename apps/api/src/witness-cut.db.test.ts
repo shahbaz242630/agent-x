@@ -246,7 +246,7 @@ async function handOffOnJ(w: World, j: { digest: DigestLog; anchors: AnchorStore
   return submitted;
 }
 
-describe('TR-1 (1): a stop on one copy, the chain cut back below it, and the jobs copy’s Tx A', () => {
+describe('SEC-DB-20 TR-1 (1): a stop on one copy, the chain cut back below it, and the jobs copy’s Tx A', () => {
   it('the positive control: J held to its own heads alone (before TR-1) pays the request the stop should have stopped', async () => {
     const store = createFakeWriteOnceStore();
     const { w, request, j } = await suspendedOnWThenCut(store, false);
@@ -269,7 +269,7 @@ describe('TR-1 (1): a stop on one copy, the chain cut back below it, and the job
   });
 });
 
-describe('TR-1 (7), (5): the anchor check held to the heads witnessed', () => {
+describe('SEC-DB-20 TR-1 (7), (5): the anchor check held to the heads witnessed', () => {
   /** J's anchor check over the real trail, its probe and walks held to J's witness log where given. */
   function anchorCheckOnJ(w: World, j: { anchors: AnchorStore }, witness: WitnessLog | undefined) {
     const trail = createAuditTrail({ keys, ids });
@@ -339,7 +339,7 @@ describe('TR-1 (7), (5): the anchor check held to the heads witnessed', () => {
   });
 });
 
-describe('TR-1 review finding 1: the anchor check on a witness view older than the run', () => {
+describe('SEC-DB-20 TR-1 review finding 1: the anchor check on a witness view older than the run', () => {
   it('reads the store first: a stop J had not listed yet, cut and grown again on, is the alarm, never anchored past', async () => {
     const { w, j, jWitness } = await suspendedOnWThenCut(createFakeWriteOnceStore(), true, false);
     expect(jWitness?.pending({ kind: 'organisation', orgId: w.org })).toEqual([]);
@@ -384,7 +384,7 @@ describe('TR-1 review finding 1: the anchor check on a witness view older than t
   });
 });
 
-describe('TR-1 review finding 2: a retry answered from the stored result', () => {
+describe('SEC-DB-20 TR-1 review finding 2: a retry answered from the stored result', () => {
   /** The agent's suspension under one idempotency key, as a route runs it, through the signed states. */
   const suspendUnderKey = (w: World, key: string) => {
     const idempotency = createIdempotentWrites({ keys, logger: testLogger(capture) });
@@ -552,7 +552,7 @@ describe('TR-1 review finding 2: a retry answered from the stored result', () =>
   });
 });
 
-describe('TR-1 review 4: a write that recorded on the platform chain too', () => {
+describe('SEC-DB-20 TR-1 review 4: a write that recorded on the platform chain too', () => {
   const platformChain = createPlatformChain({ keys, ids });
   const started = { configHash: `sha256:${'ab'.repeat(32)}`, release: 'r-test' };
 
@@ -639,7 +639,7 @@ describe('TR-1 review 4: a write that recorded on the platform chain too', () =>
   });
 });
 
-describe('TR-1 review 3: a head below an anchor this process didn’t make (a restart, another copy’s)', () => {
+describe('SEC-DB-20 TR-1 review 3: a head below an anchor this process didn’t make (a restart, another copy’s)', () => {
   /** The agent suspended, then suspended again: two events, the first's head witnessed where `witnessed` is given. */
   const suspendOn = (w: World, reason: string) =>
     signed(w, (tx, states) =>
@@ -736,7 +736,7 @@ describe('TR-1 review 3: a head below an anchor this process didn’t make (a re
   });
 });
 
-describe('TR-1 review 4: a replayed row with no head seal, judged by the row itself', () => {
+describe('SEC-DB-20 TR-1 review 4: a replayed row with no head seal, judged by the row itself', () => {
   const REQUEST = (w: World, key: string) => ({
     orgId: w.org,
     client: { kind: 'agent' as const, id: w.agent },
@@ -816,7 +816,7 @@ describe('TR-1 review 4: a replayed row with no head seal, judged by the row its
   });
 });
 
-describe('TR-1 (10): a stop whose head can’t be witnessed', () => {
+describe('SEC-DB-20 TR-1 (10): a stop whose head can’t be witnessed', () => {
   it('answers WitnessUnconfirmed (503), its change saved; later requests here for the organisation wait for it; once out, all go on', async () => {
     const { w } = await ready();
     const store = createFakeWriteOnceStore();

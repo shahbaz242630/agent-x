@@ -181,7 +181,7 @@ function withWitness({
   };
 }
 
-describe('TR-1 the anchor check held to the witness log', () => {
+describe('SEC-DB-20 TR-1 the anchor check held to the witness log', () => {
   it('a walk that holds anchors and lets go the heads at or below it; one that missed a witnessed head is the alarm, never anchored', async () => {
     const run = withWitness({ verified: (orgId) => ok(orgId === ORG ? 9n : 1n) });
     // Asked of the walk: 4 and 9, above where it began (the chain's start), at or below where it reached; 2 too.

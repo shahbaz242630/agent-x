@@ -67,6 +67,8 @@ export {
 } from './infrastructure/chain-rows.ts';
 export {
   type AuditTrail,
+  historyMissed,
+  readBelowWalk,
   type AuditTransaction,
   type CheckedEventFacts,
   createAuditTrail,
@@ -112,7 +114,18 @@ export {
   type StateCheck,
   type TamperSign,
   type VerifiedState,
+  type HistoryRests,
 } from './infrastructure/signed-states.ts';
+// Each tracked state event names its object's earlier events (TR-3 residual 75): where a newest-first read covers.
+export {
+  historyNamedOf,
+  namedFromStart,
+  namesFromHistory,
+  newestCovered,
+  TRACKED_BEFORE,
+  type TrailEvent,
+  withTracked,
+} from './infrastructure/state-trail.ts';
 export { type SealedRowAsRead, sealedRowJudged, sealedRowRead } from './infrastructure/seal-at-the-door.ts';
 export {
   INVESTIGATION_CONCLUSIONS,

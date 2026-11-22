@@ -25,6 +25,9 @@ export const MANDATES = {
     { column: 'accepted_at', type: 'timestamptz' },
   ],
   rules: MANDATE,
+  // The actions a request's authority reads from its history (state-trail.ts, TR-3 residual 75): CANCEL_BRAKES,
+  // PAUSE_EVENTS and the rest in apps/api, held to these by its tracked-actions test.
+  tracks: ['mandate.suspended', 'mandate.accepted'],
   // Fixed when the mandate is made (SEC-LIM-08): 0035's `fixed_at_creation` refuses any change after.
   fixedAtCreation: ['agent_id', 'time_zone', 'split_window_hours'],
   // Live or ended with a version in force, waiting with one to accept (0035): CI's A3c

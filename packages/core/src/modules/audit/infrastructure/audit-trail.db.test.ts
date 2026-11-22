@@ -1502,6 +1502,9 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       recordedAt: recorded?.recordedAt,
       version: 1,
       seal: sealState(keys, facts(org, 1, 'ACTIVE')),
+      // Its action, and the earlier events it names (state-trail.ts): an event written here names none.
+      action: 'agent.status_changed',
+      tracked: undefined,
     });
     if (found.kind !== 'signed') throw new Error('The test expected a signed state');
     expect(stateSealMatches(keys, facts(org, 1, 'ACTIVE'), found.seal)).toBe(true);

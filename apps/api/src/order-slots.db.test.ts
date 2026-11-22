@@ -84,6 +84,7 @@ import {
   type AgentActing,
   createSpendRequestDecisions,
   DECIDE_OPERATION,
+  notFrozen,
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
 
@@ -292,7 +293,7 @@ beforeEach(() => {
   });
 });
 
-describe("an order's slots, signed (TR-2)", () => {
+describe("SEC-DB-21 an order's slots, signed (TR-2)", () => {
   it("are made by the order's first decision, each held by it, sealed, their IDs in the decision", async () => {
     const { w, acting } = await ready();
     const supplierId = supplierOf_(w);
@@ -520,7 +521,7 @@ describe("an order's slots, signed (TR-2)", () => {
   });
 });
 
-describe("the slot's own rules", () => {
+describe("SEC-DB-21 the slot's own rules", () => {
   it('is named apart for each organisation, kind, supplier, payee key (its case too) and order', () => {
     const org = '0199a0f0-0000-7000-8000-00000000b001';
     const supplierId = '0199a0f0-0000-7000-8000-00000000a001';
@@ -655,7 +656,7 @@ describe("the slot's own rules", () => {
   });
 });
 
-describe('every ending lets go of the slots its decision sealed, the holdings check finding nothing apart', () => {
+describe('SEC-DB-21 every ending lets go of the slots its decision sealed, the holdings check finding nothing apart', () => {
   type Ending = (w: World, acting: AgentActing, requestId: string) => Promise<unknown>;
   const inOrg = <Result>(w: World, work: (tx: DatabaseTransaction<Tables>, states: SignedStates) => Promise<Result>) =>
     withSignedStates(app, w.org, quiet(), work);
@@ -768,7 +769,7 @@ describe('every ending lets go of the slots its decision sealed, the holdings ch
   });
 });
 
-describe('in the lock order (11c: after the payee windows, in order of ID, before the audit head), forced', () => {
+describe('SEC-DB-21 in the lock order (11c: after the payee windows, in order of ID, before the audit head), forced', () => {
   /** A void of `requestId` in a transaction of its own, held open at `gate` once it has let go of its slots. */
   const voidHeldOpen = (w: World, requestId: string, gate: Promise<unknown>, done: () => void) =>
     withSignedStates(app, w.org, quiet(), async (tx, states) => {
@@ -909,6 +910,7 @@ describe('in the lock order (11c: after the payee windows, in order of ID, befor
           requestId: waiting.id,
           now: clock.now(),
           decides: true,
+          organization: await notFrozen(tx, states, w.org),
         });
         weighed = true;
         return again;
@@ -935,8 +937,14 @@ describe('in the lock order (11c: after the payee windows, in order of ID, befor
         waiting.id,
       ]);
     });
-    const { made } = await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      weighedAgain(tx, states, { orgId: w.org, requestId: waiting.id, now: clock.now(), decides: false }),
+    const { made } = await withSignedStates(app, w.org, quiet(), async (tx, states) =>
+      weighedAgain(tx, states, {
+        orgId: w.org,
+        requestId: waiting.id,
+        now: clock.now(),
+        decides: false,
+        organization: await notFrozen(tx, states, w.org),
+      }),
     );
     // Held by itself alone, it is no duplicate of its own.
     expect(made.decision).toBe('REQUIRE_APPROVAL');
@@ -944,7 +952,7 @@ describe('in the lock order (11c: after the payee windows, in order of ID, befor
   });
 });
 
-describe('the holdings check', () => {
+describe('SEC-DB-21 the holdings check', () => {
   it('holds each slot to its open claims: a claim released past the app is a mismatch, alarmed', async () => {
     const { w, acting } = await ready();
     const held = await decided(acting, w, 'INV-7');
@@ -984,7 +992,7 @@ describe('the holdings check', () => {
   });
 });
 
-describe('an organisation made before TR-2, until its cutover', () => {
+describe('SEC-DB-21 an organisation made before TR-2, until its cutover', () => {
   /** Its slots' cutover by hand, so its decisions can be made: then taken away with the slots, as before TR-2. */
   const cutOverByHand = (w: World) =>
     withSignedStates(app, w.org, quiet(), (tx) =>

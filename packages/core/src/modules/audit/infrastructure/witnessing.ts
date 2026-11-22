@@ -81,6 +81,19 @@ export function noteCommitted(
   witness.note(chain, head, held.klass);
 }
 
+/**
+ * The head `tx` moved `chain` to, noted again once it commits (TR-3): for a write whose afterCommit note a later
+ * savepoint's rollback dropped (a hold's own head, after its mark gave way), though the write itself stands. Nothing
+ * where nothing was written there, or no witness log is given.
+ */
+export async function noteAgainOnCommit(tx: Transaction<unknown>, chain: Chain): Promise<void> {
+  const head = headWrittenIn(tx, chain);
+  if (witness === undefined || head === undefined) return;
+  await afterCommit(tx, () => {
+    noteCommitted(tx, chain, head);
+  });
+}
+
 /** The chains `tx` wrote with a `now` write: its answer waits for them (withSignedStates). */
 export const nowChainsOf = (tx: object): readonly Chain[] =>
   [...(writtenIn.get(tx)?.values() ?? [])].filter(({ klass }) => klass === 'now').map(({ chain }) => chain);

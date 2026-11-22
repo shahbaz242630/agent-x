@@ -9,7 +9,7 @@ const head = (seq: bigint, fill: number) => ({ seq, hash: hash(fill) });
 const reached = (seq: bigint, fill: number, to = seq) =>
   ({ ok: true, seq, hash: hash(fill), macKeyVersion: 1, to }) as const;
 
-describe('TR-1 a walk held to the witnessed heads', () => {
+describe('SEC-DB-20 TR-1 a walk held to the witnessed heads', () => {
   it('keeps the hash its own reads found at each witnessed place, no read of its own', async () => {
     const found = new Map<bigint, Buffer>();
     const entries = [4n, 5n, 6n].map((seq) => ({ seq, hash: hash(Number(seq)) }) as unknown as StoredEntry);

@@ -13,13 +13,22 @@
 // one on the stretch is judged at once, not left to wait for the anchor check. Memory: 32 bytes an event, for chains a
 // hand-off walked; past `mostBytes` a chain's stretch is not kept (its next Tx A walks from the anchor again: slower,
 // never less safe).
+//
+// What a walk read of each signed object (its newest place on the stretch) goes to the process's signed states'
+// digest as the walk raises F, as an anchor check's walk is kept (`seen`, TR-3): every later read is held to it. Else an
+// event below F rewritten in place, its hash column kept and its object's row put back to an older sealed state, would
+// pass: no later walk re-reads it, and the stretch kept only its hash. So a stretch is kept only while the digest keeps
+// those facts: one the digest couldn't take (a copy no longer leading writes nothing), or a chain it gave way for since
+// (its facts dropped for memory), keeps no stretch, and the next walk starts from the anchor again (`facts.kept`).
 import {
   type Chain,
   type ChainEdges,
   type ChainProblem,
   type CheckedPoint,
   type HeadSeen,
+  type SignedSeen,
   type StoredEntry,
+  subjectKey,
   verifyFromAnchor,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -42,13 +51,41 @@ export interface FrontierStart {
   readonly hashes: Buffer;
   readonly from: CheckedPoint;
   readonly at: number;
+  /** The digest's mark for the chain when the stretch began (`facts.kept`): a stretch stands only while it is the same. */
+  readonly mark?: number | undefined;
+}
+
+/**
+ * Where what each walk read of the signed objects is kept (the signed states' digest, TR-3): `keep` records it; `kept`
+ * says whether the chain's facts are kept now, and a mark that moves whenever they are dropped (none: they aren't).
+ */
+export interface FrontierFacts {
+  readonly keep: (chain: Chain, signed: SignedSeen, began: Date) => void;
+  readonly kept: (chain: Chain) => number | undefined;
 }
 
 /** What a walk within a transaction found: the head it reached with every hash on the way, or why not. */
 export type WithinWalk =
-  | { readonly kind: 'walked'; readonly head: CheckedPoint; readonly path: ReadonlyMap<bigint, Buffer> }
+  | {
+      readonly kind: 'walked';
+      readonly head: CheckedPoint;
+      readonly path: ReadonlyMap<bigint, Buffer>;
+      /** Each signed object's newest place on the walk, as the anchor check's walks keep them (AT13, TR-3). */
+      readonly signed: SignedSeen;
+      /** Every event it read, where it was asked to name them (`describe`): what Tx A's histories are held to (TR-3). */
+      readonly seen?: readonly EventSeen[];
+    }
   | { readonly kind: 'broken'; readonly problem: ChainProblem }
   | { readonly kind: 'too_far' };
+
+/** An event a walk read, as a history's filter would name it: its place, ID, object and action. */
+export interface EventSeen {
+  readonly seq: bigint;
+  readonly id: string;
+  readonly subjectType: string;
+  readonly subjectId: string;
+  readonly action: string;
+}
 
 /** The walk's answer once it reached the head. */
 export type WalkedWithin = Extract<WithinWalk, { readonly kind: 'walked' }>;
@@ -92,9 +129,15 @@ export function createChainFrontier({
   now,
   mostBytes = MOST_FRONTIER_BYTES,
   mostKept = MOST_WALKED_WITHIN,
+  facts,
 }: {
   readonly anchors: FrontierAnchors;
   readonly now: () => Date;
+  /**
+   * Where what each walk read of the signed objects is kept as it is raised (the signed states' digest, TR-3), and
+   * whether it still is: none, nothing is kept and every stretch stands as walked (a process keeping no digest).
+   */
+  readonly facts?: FrontierFacts;
   readonly mostBytes?: number;
   /** How many events a chain's stretch keeps before it is trimmed to the latest anchor. */
   readonly mostKept?: number;
@@ -119,6 +162,9 @@ export function createChainFrontier({
     // The anchor past F, or a rebase dated after the stretch began: it says nothing of the chain now.
     if (anchor.seq > kept.from.seq || anchor.seq < kept.base.seq) return undefined;
     if (anchors.rebasedAfter(chain, new Date(kept.at))) return undefined;
+    // The digest dropped the chain's facts since (it gave way for memory), or keeps none now: nothing holds the reads to
+    // what the stretch walked, so the next walk starts from the anchor and reads it all again.
+    if (facts !== undefined && facts.kept(chain) !== kept.mark) return undefined;
     // The anchor not on the stretch walked: another walk read another chain there. Start over from the anchor.
     if (hashIn(kept, anchor.seq)?.equals(anchor.hash) !== true) return undefined;
     if (anchor.seq === kept.base.seq || kept.hashes.length <= mostKept * HASH_BYTES) return kept;
@@ -138,15 +184,31 @@ export function createChainFrontier({
       }
       const kept = standing(chain, name, anchor);
       if (kept !== undefined) return kept;
-      const fresh: FrontierStart = { base: anchor, hashes: Buffer.alloc(0), from: anchor, at: now().getTime() };
+      const fresh: FrontierStart = {
+        base: anchor,
+        hashes: Buffer.alloc(0),
+        from: anchor,
+        at: now().getTime(),
+        mark: facts?.kept(chain),
+      };
       set(name, fresh);
       return fresh;
     },
 
     raise(chain: Chain, start: FrontierStart, walk: WalkedWithin | undefined): void {
       if (walk === undefined) return;
+      // First, whatever F does: the walk read every event it names, and every later read is held to them.
+      facts?.keep(chain, walk.signed, now());
       const { head, path } = walk;
       const name = chainName(chain);
+      // Not kept (no copy writing them, the chain given way), or dropped since the stretch began: no stretch kept.
+      if (facts !== undefined) {
+        const mark = facts.kept(chain);
+        if (mark === undefined || mark !== start.mark) {
+          set(name, undefined);
+          return;
+        }
+      }
       const kept = byChain.get(name);
       if (kept !== undefined && kept.from.seq >= head.seq) return;
       const added: Buffer[] = [];
@@ -162,7 +224,7 @@ export function createChainFrontier({
         return;
       }
       // The stretch's own start time: a rebase dated after it, however often it is raised, still sets it aside.
-      set(name, { base: start.base, hashes, from: head, at: start.at });
+      set(name, { base: start.base, hashes, from: head, at: start.at, mark: start.mark });
     },
   });
 }
@@ -218,8 +280,12 @@ export async function walkWithin(
   events: readonly ReadAhead[],
   from: CheckedPoint,
   most: number = MOST_WALKED_WITHIN,
+  subjectOf: (entry: StoredEntry) => readonly [string, string] | undefined = () => undefined,
+  describe?: (entry: StoredEntry) => EventSeen | undefined,
 ): Promise<WithinWalk> {
   const path = new Map<bigint, Buffer>();
+  const signed = new Map<string, bigint>();
+  const seen: EventSeen[] = [];
   let next = 0;
   const step = await verifyFromAnchor(
     keys,
@@ -233,7 +299,14 @@ export async function walkWithin(
         for (let at = next; at < events.length && batch.length < limit; at += 1) {
           const read = events[at];
           if (read === undefined || read.seq > upTo) break;
-          if (read.entry !== undefined) path.set(read.seq, read.entry.hash);
+          if (read.entry !== undefined) {
+            path.set(read.seq, read.entry.hash);
+            const subject = subjectOf(read.entry);
+            // In number order: the last seen is the newest.
+            if (subject !== undefined) signed.set(subjectKey(...subject), read.seq);
+            const named = describe?.(read.entry);
+            if (named !== undefined) seen.push(named);
+          }
           batch.push(read.entry);
         }
         return Promise.resolve(batch);
@@ -244,5 +317,6 @@ export async function walkWithin(
   );
   if (!step.ok) return { kind: 'broken', problem: step.problem };
   if (step.seq !== step.to) return { kind: 'too_far' };
-  return { kind: 'walked', head: { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion }, path };
+  const head = { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion };
+  return { kind: 'walked', head, path, signed, ...(describe === undefined ? {} : { seen }) };
 }

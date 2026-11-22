@@ -18,11 +18,13 @@ import {
   type HistoryToRead,
   MOST_HISTORIES_READ,
   type SignedStates,
+  type VerifiedState,
 } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
 import { z } from 'zod';
 import { IntegrityFailure } from './errors.ts';
+import { heldTo } from './history-held.ts';
 
 /** The action of the event that keeps a source's choice: the newest is in force. */
 export const CONSENT_EXPIRY_CHOSEN = 'funding_source.consent_expiry_chosen';
@@ -83,9 +85,15 @@ export async function consentExpiryOf(
   states: SignedStates,
   orgId: string,
   sourceId: string,
+  state?: VerifiedState,
 ): Promise<PendingChoice | null> {
-  const history = await states.historyOf(tx, orgId, consentExpiryHistory(sourceId));
-  if (history.outcome !== 'read')
+  const asked = consentExpiryHistory(sourceId);
+  const history = await states.historyOf(tx, orgId, asked);
+  // Held to the choice the source's state names (TR-3 residual 75): an older choice can't stand in for its newest.
+  if (
+    history.outcome !== 'read' ||
+    !heldTo(states, orgId, history.events, state && [SOURCES, sourceId, state], [CONSENT_EXPIRY_CHOSEN], asked.limit)
+  )
     throw new IntegrityFailure(`A source's consent-expiry choice can't be believed: ${sourceId}`);
   return consentExpiryIn(history.events.at(-1)?.event.details);
 }

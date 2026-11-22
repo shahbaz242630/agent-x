@@ -2,6 +2,8 @@
 // outcome of the registration, the reads and the changes. Who reaches them is the access hook's
 // (role-matrix.test.ts); what the use case does in the database is
 // agent-registering.db.test.ts.
+import { WriteCutBack } from '@agentx/core/modules/audit';
+import { WitnessUnconfirmed } from '@agentx/platform/audit-chain';
 import type { AgentKeyRecord, AgentShown } from '@agentx/core/modules/agents';
 import type { MembershipCheck, Role } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
@@ -323,6 +325,20 @@ describe('POST /v1/agents/confirm registers the agent once signed in again (C1-2
     const response = await app.inject(post('/confirm', { ...ASKED, stepUpChallengeId: CHALLENGE }));
 
     expect(response.statusCode).toBe(status);
+    expect(response.json()).toMatchObject({ error: { code } });
+  });
+
+  it.each([
+    // TR-1: saved, its chain head not yet outside the database: busy, sent again under its key.
+    ['its head unconfirmed', new WitnessUnconfirmed(), 'ORGANISATION_BUSY'],
+    // TR-1: the write a retry repeats no longer on the chain: never answered as done.
+    ['the write it repeats cut back', new WriteCutBack(5n), 'INTEGRITY_FAILED'],
+  ])('answers a use case failing on the witness log (%s) 503 over HTTP, never an agent', async (_what, error, code) => {
+    const { app } = await withAgents({ write: error });
+
+    const response = await app.inject(post('/confirm', { ...ASKED, stepUpChallengeId: CHALLENGE }));
+
+    expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({ error: { code } });
   });
 

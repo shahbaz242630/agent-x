@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   chainWitness,
   headWrittenIn,
+  noteAgainOnCommit,
   noteCommitted,
   nowChainsOf,
   waitWitnessed,
@@ -35,7 +36,7 @@ afterEach(() => {
   witnessWith(undefined);
 });
 
-describe('TR-1 each transaction’s chain heads to the witness log', () => {
+describe('SEC-DB-20 TR-1 each transaction’s chain heads to the witness log', () => {
   it('notes a transaction’s highest head once, `now` if any of its writes there is', () => {
     const { witness, notes } = recording();
     witnessWith(witness);
@@ -72,6 +73,35 @@ describe('TR-1 each transaction’s chain heads to the witness log', () => {
     witnessedWrite(soon, ORG, 'soon');
     expect(nowChainsOf(soon)).toEqual([]);
     expect(nowChainsOf({})).toEqual([]);
+  });
+
+  it('TR-3 notes a head again on commit only where a witness log is given and the transaction wrote there', async () => {
+    // A stand-in transaction that counts the hooks asked of it: a connection of another driver keeps none (afterCommit;
+    // the DB test runs the real one through a commit).
+    const asked: number[] = [];
+    const tx = {
+      isTransaction: true,
+      getExecutor: () => ({
+        provideConnection: (use: (connection: object) => Promise<boolean>) => {
+          asked.push(1);
+          return use({});
+        },
+      }),
+    } as unknown as Parameters<typeof noteAgainOnCommit>[0];
+    // No witness log: no hook.
+    await noteAgainOnCommit(tx, ORG);
+    expect(asked).toEqual([]);
+    const { witness, notes } = recording();
+    witnessWith(witness);
+    // A witness log, but nothing written there by the transaction: no hook.
+    await noteAgainOnCommit(tx, ORG);
+    expect(asked).toEqual([]);
+    // Written there: the hook asked for, once, and nothing noted before the commit.
+    witnessedWrite(tx, ORG, 'now');
+    wroteTo(tx, ORG, head(4n));
+    await noteAgainOnCommit(tx, ORG);
+    expect(asked).toEqual([1]);
+    expect(notes).toEqual([]);
   });
 
   it('waits for the chains given, and for none without a witness log or chains', async () => {

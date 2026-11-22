@@ -201,7 +201,8 @@ async function readPause(
       ...platformWalkReads(tx, within.start.from, most),
     ]);
     newest = event.rows[0] as typeof newest;
-    walk = await platformWalked(keys, [edges, events], within.start.from, most);
+    // The pause's own places on it, for the digest (TR-3): a pause below P_F rewritten in place is held to them.
+    walk = await platformWalked(keys, [edges, events], within.start.from, most, pauseSubjectOf);
   }
   // The key holds one row at most; should the owner drop it and add a second, neither can be believed.
   const [row, ...others] = rows;

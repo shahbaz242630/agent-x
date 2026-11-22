@@ -173,6 +173,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         table: ORGANIZATIONS.table,
         subject: ORGANIZATIONS.subject,
         fields: ORGANIZATIONS.fields,
+        // The actions its state events name the earlier events of (state-trail.ts, TR-3 residual 75).
+        tracks: ORGANIZATIONS.tracks,
         status: ORGANIZATION,
       },
       {
@@ -208,6 +210,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         table: agents.AGENTS.table,
         subject: agents.AGENTS.subject,
         fields: agents.AGENTS.fields,
+        // The actions its state events name the earlier events of (state-trail.ts, TR-3 residual 75).
+        tracks: agents.AGENTS.tracks,
         status: agents.AGENT,
       },
       {
@@ -233,6 +237,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         table: mandates.MANDATES.table,
         subject: mandates.MANDATES.subject,
         fields: mandates.MANDATES.fields,
+        // The actions its state events name the earlier events of (state-trail.ts, TR-3 residual 75).
+        tracks: mandates.MANDATES.tracks,
         status: mandates.MANDATE,
         fixedAtCreation: ['agent_id', 'time_zone', 'split_window_hours'],
         // Each by name and its printed definition, which A3c's schema test proves against the migrated server.
@@ -261,12 +267,16 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         table: fundingSources.SOURCES.table,
         subject: fundingSources.SOURCES.subject,
         fields: fundingSources.SOURCES.fields,
+        // The actions its state events name the earlier events of (state-trail.ts, TR-3 residual 75).
+        tracks: fundingSources.SOURCES.tracks,
         status: fundingSources.FUNDING_SOURCE,
       },
       {
         table: suppliers.SUPPLIERS.table,
         subject: suppliers.SUPPLIERS.subject,
         fields: suppliers.SUPPLIERS.fields,
+        // The actions its state events name the earlier events of (state-trail.ts, TR-3 residual 75).
+        tracks: suppliers.SUPPLIERS.tracks,
         status: suppliers.SUPPLIER,
         statusConditions: suppliers.SUPPLIERS.statusConditions,
       },
@@ -302,6 +312,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         table: spendRequests.SPEND_REQUESTS.table,
         subject: spendRequests.SPEND_REQUESTS.subject,
         fields: spendRequests.SPEND_REQUESTS.fields,
+        // The actions its state events name the earlier events of (state-trail.ts, TR-3 residual 75).
+        tracks: spendRequests.SPEND_REQUESTS.tracks,
         status: spendRequests.SPEND_REQUEST,
         fixedAtCreation: [
           'agent_id',

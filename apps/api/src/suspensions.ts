@@ -54,6 +54,7 @@ import type {
   AuditActor,
   AuditDetails,
   AuditTransaction,
+  HistoryRests,
   SignedStates,
   VerifiedState,
 } from '@agentx/core/modules/audit';
@@ -67,6 +68,7 @@ import { z } from 'zod';
 
 import { CONSENT_EXPIRY_CHOSEN } from './consent-expiry-choice.ts';
 import { CONSENT_LAPSED } from './consent-lapses.ts';
+import { heldTo } from './history-held.ts';
 import { IntegrityFailure } from './errors.ts';
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
@@ -312,6 +314,7 @@ export async function pausedFromOf(
   orgId: string,
   supplier: { readonly id: string; readonly currentVersionId: string },
   unbelieved: () => Error = () => new Error(`A supplier's version history can't be believed: ${supplier.id}`),
+  state?: VerifiedState,
 ): Promise<readonly string[]> {
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SUPPLIERS.subject],
@@ -321,6 +324,18 @@ export async function pausedFromOf(
     newest: true,
   });
   if (history.outcome !== 'read') throw unbelieved();
+  if (
+    !heldTo(
+      states,
+      orgId,
+      history.events,
+      state && [SUPPLIERS, supplier.id, state],
+      VERSION_MOVES,
+      MOST_CARRIED_CHANGES,
+    )
+  ) {
+    throw unbelieved();
+  }
   const carried: string[] = [];
   let expected = supplier.currentVersionId;
   for (const { event } of history.events.toReversed()) {
@@ -384,6 +399,18 @@ export const choiceIn = (details: AuditDetails | undefined): PendingChoice =>
 /** The choice as a suspend's event keeps it, with the statement confirmed. */
 export const choiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: STATEMENT_VERSION }) as const;
+
+/** Each stoppable's table: what its verified state, held by the digest, names of its history (state-trail.ts). */
+export const PAUSABLE_TABLES: Readonly<Record<Pausable, SignedStateTable>> = {
+  organization: ORGANIZATIONS,
+  agent: AGENTS,
+  mandate: MANDATES,
+  source: SOURCES,
+  supplier: SUPPLIERS,
+};
+
+/** An object a history read rests on, with its verified state: the read is held to the events that state names. */
+export type HeldBy = HistoryRests['on'][number];
 
 /** Each suspend's object type and action in the log: an organisation's freeze too (decision 10, D1). */
 export const SUSPENDS = {
@@ -493,32 +520,46 @@ export async function cancelledSinceOf(
   decidedSeq: bigint,
   ids: Readonly<Record<Pausable, string | null>>,
   unbelieved: () => Error = () => new Error(`A spend request's stops can't be believed: ${orgId}`),
+  held?: readonly HeldBy[],
 ): Promise<ReadonlySet<Pausable>> {
   const kinds = (Object.keys(CANCEL_BRAKES) as Pausable[]).filter((which) => ids[which] !== null);
   const whichOf = ({ type, id }: { readonly type: string; readonly id: string }) =>
     kinds.find((kind) => CANCEL_BRAKES[kind].type === type && ids[kind]?.toLowerCase() === id.toLowerCase());
+  const actions = kinds.flatMap((which) => {
+    const { cancels: always, cancelsIfChosen, cancelsPastEnd } = CANCEL_BRAKES[which];
+    return [...always, ...cancelsIfChosen, ...cancelsPastEnd];
+  });
   const cancelledBy = new Set<Pausable>();
+  const read: Parameters<SignedStates['historyHeld']>[1][number][] = [];
   let afterSeq = decidedSeq;
   let more = true;
   while (more && cancelledBy.size === 0) {
     const history = await states.historyOf(tx, orgId, {
       subjectTypes: kinds.map((which) => CANCEL_BRAKES[which].type),
       subjectIds: kinds.map((which) => String(ids[which])),
-      actions: kinds.flatMap((which) => {
-        const { cancels: always, cancelsIfChosen, cancelsPastEnd } = CANCEL_BRAKES[which];
-        return [...always, ...cancelsIfChosen, ...cancelsPastEnd];
-      }),
+      actions,
       afterSeq,
       limit: BRAKES_A_PAGE,
       oldest: true,
     });
     if (history.outcome !== 'read') throw unbelieved();
+    read.push(...history.events);
     for (const { event } of history.events) {
       const which = whichOf(event.subject);
       if (which !== undefined && cancels(which, event.action, event.details)) cancelledBy.add(which);
     }
     afterSeq = history.events.at(-1)?.seq ?? afterSeq;
     more = history.events.length === BRAKES_A_PAGE;
+  }
+  // None cancelling, every page read to the newest: each stop the states name since the decision must be among them
+  // (an older one moved off its object below F is missed by the log's read alone, TR-3 residual 75). A cancel found
+  // needs no more: a stop hidden can only take one away.
+  if (
+    cancelledBy.size === 0 &&
+    held !== undefined &&
+    !states.historyHeld(orgId, read, { on: held, actions, after: decidedSeq })
+  ) {
+    throw unbelieved();
   }
   return cancelledBy;
 }
@@ -533,10 +574,10 @@ export async function pausedOf(
   tx: AuditTransaction,
   states: SignedStates,
   orgId: string,
-  stopped: readonly (readonly [Pausable, string, string])[],
+  stopped: readonly (readonly [Pausable, string, string, (VerifiedState | undefined)?])[],
 ): Promise<ReadonlySet<Pausable>> {
   const paused = new Set<Pausable>();
-  for (const [which, id, status] of stopped) {
+  for (const [which, id, status, state] of stopped) {
     const events = PAUSE_EVENTS[which][status];
     if (events === undefined) continue;
     const history = await states.historyOf(tx, orgId, {
@@ -546,7 +587,12 @@ export async function pausedOf(
       limit: 1,
       newest: true,
     });
-    if (history.outcome !== 'read') throw new IntegrityFailure(`A suspension's history can't be believed: ${id}`);
+    if (
+      history.outcome !== 'read' ||
+      !heldTo(states, orgId, history.events, state && [PAUSABLE_TABLES[which], id, state], events.actions, 1)
+    ) {
+      throw new IntegrityFailure(`A suspension's history can't be believed: ${id}`);
+    }
     if (choiceIn(history.events.at(-1)?.event.details) === 'pause') paused.add(which);
   }
   return paused;
@@ -564,8 +610,11 @@ export const cancelledInForce = async (
   orgId: string,
   which: Pausable,
   id: string,
+  state?: VerifiedState,
 ): Promise<boolean> =>
-  !(await pausedOf(tx, states, orgId, [[which, id, which === 'organization' ? 'FROZEN' : 'SUSPENDED']])).has(which);
+  !(await pausedOf(tx, states, orgId, [[which, id, which === 'organization' ? 'FROZEN' : 'SUSPENDED', state]])).has(
+    which,
+  );
 
 /**
  * Suspends again one SUSPENDED already (an organisation: FROZEN), read for
@@ -588,7 +637,7 @@ export async function chosenAgain(
 ): Promise<'as_is' | 'refused'> {
   const { which, table, key, state } = subject;
   const stoppedIn = which === 'organization' ? 'FROZEN' : 'SUSPENDED';
-  const paused = (await pausedOf(tx, states, key.orgId, [[which, key.id, stoppedIn]])).has(which);
+  const paused = (await pausedOf(tx, states, key.orgId, [[which, key.id, stoppedIn, state]])).has(which);
   if (!paused) return choice === 'cancel' ? 'as_is' : 'refused';
   if (choice === 'cancel') {
     await states.record(tx, table, key, state, {}, { actor, action: SUSPENDS[which].action, details });
@@ -616,7 +665,7 @@ export async function payeeCancelOverPause(
   actor: AuditActor,
 ): Promise<boolean> {
   const { key, state, status } = supplier;
-  if (!(await pausedOf(tx, states, key.orgId, [['supplier', key.id, status]])).has('supplier')) return false;
+  if (!(await pausedOf(tx, states, key.orgId, [['supplier', key.id, status, state]])).has('supplier')) return false;
   await states.record(
     tx,
     SUPPLIERS,

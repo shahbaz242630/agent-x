@@ -73,6 +73,7 @@ import {
   type AgentActing,
   createSpendRequestDecisions,
   DECIDE_OPERATION,
+  notFrozen,
   type SpendAskedByAgent,
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
@@ -817,6 +818,7 @@ describe('SEC-LIM-01 in the lock order (11b: after the month totals, in order of
           requestId: waiting.id,
           now: clock.now(),
           decides: true,
+          organization: await notFrozen(tx, states, w.org),
         });
         weighed = true;
       }),
