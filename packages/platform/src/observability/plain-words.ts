@@ -887,8 +887,8 @@ export const PLAIN_WORDS = {
   },
   'funding_sources.partner_answer_mismatch': {
     happened: 'The bank link answered about a different account or organisation than the one asked about.',
-    broke: 'The answer was not believed, and the person was told the bank link is unavailable.',
-    next: 'Raise it with the payment partner; if it repeats, see the runbook.',
+    broke: 'Not believed: a new link was rejected, or a refresh said the bank link is unavailable.',
+    next: 'Raise it with the payment partner, then link again; if it repeats, see the runbook.',
   },
   'funding_sources.partner_page_refused': {
     happened: 'The bank link gave a web page that is not its own secure page.',

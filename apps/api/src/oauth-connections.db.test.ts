@@ -1128,6 +1128,8 @@ describe(`SEC-OAUTH-05, SEC-OAUTH-08 a refresh token rotated, used once (Postgre
     });
     expect(await accepted(second.accessToken)).toEqual({ outcome: 'refused' });
     expect(lines('oauth.refresh_reused')).toEqual([expect.objectContaining({ revoked: true, orgId: org })]);
+    // The head closed on purpose is no tamper sign: no integrity alarm for the newest token, unused, refused.
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
   it('refuses a refresh token past its 30 idle days, and an access token sent as one', async () => {

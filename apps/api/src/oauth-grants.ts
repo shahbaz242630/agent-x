@@ -22,7 +22,9 @@
 //   0102, R-15, S206), locked before the token's row and moved to the new
 //   token in the same transaction: any other token is a reuse, and one whose
 //   row still says unused (`used_at` cleared by the database's owner) is the
-//   integrity alarm too (check `refresh_token`, reason `not_head`). A
+//   integrity alarm too (check `refresh_token`, reason `not_head`). A reuse
+//   closes the head (Shannon p6 MISC-02), so nothing is refreshed after even
+//   if its revoke is lost, and no alarm is raised for the closed head. A
 //   connection with no head (made before 0102, not refreshed since) is
 //   refused, nothing issued, so its client connects again (S207, R-15): its
 //   tokens would be judged by `used_at` alone, which the owner can clear. A refresh
@@ -60,6 +62,7 @@ import {
   agentKeyOf,
   agentOf,
   type AgentsTables,
+  CLOSED_HEAD,
   CONNECTIONS,
   connectionOf,
   credentialAt,
@@ -549,6 +552,8 @@ export function createOauthGrants({
   const REUSED = { outcome: 'reused' as const, forgot: undefined };
   const notTheHead = (head: Exclude<HeadCheck, { readonly outcome: 'unset' }>, row: TokenRow, tokenId: string) => {
     if (head.outcome === 'tampered') return REUSED;
+    // Closed at an earlier reuse (MISC-02): a reuse again, its revoke retried, but no alarm: nothing was hidden.
+    if (head.refreshId === CLOSED_HEAD) return REUSED;
     if (head.refreshId === tokenId.toLowerCase()) return undefined;
     return { outcome: 'reused' as const, forgot: row.usedAt === null ? ('not_head' as const) : undefined };
   };
