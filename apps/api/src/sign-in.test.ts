@@ -1354,20 +1354,24 @@ describe('SEC-LIM-13 S210 R2-4 the platform chain’s growth brake', () => {
     ]);
   };
 
-  it('refuses a sign-in, a callback and a step-up while on, 503 with Retry-After, warned once a minute; a sign-out still works', async () => {
+  it('refuses a sign-in and a step-up started while on, 503 with Retry-After, warned once a minute; a flow begun before completes, and a sign-out still works', async () => {
     const standIn = new StandIn();
     standIn.live.set(SESSION_ID, LIVE);
     const brake = brakeOf();
     const { app, capture, noted } = await server(standIn, { growthBrake: brake });
 
     braked(await app.inject(signingIn));
-    braked(await app.inject(coming()));
     braked(await app.inject(steppingUp));
 
-    // Nothing reached the sign-in: no flow begun, no session opened or rotated, no step-up begun.
+    // Nothing started: no flow begun, no step-up begun.
     expect(standIn.begun).toEqual([]);
-    expect(standIn.completed).toEqual([]);
     expect(standIn.steppedUp).toEqual([]);
+    // A flow begun before the brake, back from the login service, completes: no one lands on an error there.
+    const asking = brake.asked;
+    const back = await app.inject(coming());
+    expect(back.statusCode).toBe(302);
+    expect(standIn.completed).toHaveLength(1);
+    expect(brake.asked).toBe(asking);
     // Said once for the minute, with the brake's place; nothing about the sign-ins was wrong.
     expect(capture.lines().filter((line) => line.event === 'auth.platform_chain_braked')).toEqual([
       expect.objectContaining({ level: 'warn', most: PLATFORM_GROWTH_BRAKE, refused: 1 }),
@@ -1398,7 +1402,7 @@ describe('SEC-LIM-13 S210 R2-4 the platform chain’s growth brake', () => {
     expect(standIn.begun).toHaveLength(1);
     expect(standIn.completed).toHaveLength(1);
     expect(standIn.steppedUp).toHaveLength(1);
-    expect(brake.asked).toBe(3);
+    expect(brake.asked).toBe(2);
     expect(capture.lines().map((line) => line.event)).not.toContain('auth.platform_chain_braked');
   });
 });

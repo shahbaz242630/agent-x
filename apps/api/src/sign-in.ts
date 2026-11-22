@@ -49,10 +49,12 @@
 //   person (personCapWarning). A sign-out is never refused.
 // - S210 R2-4: while the shared platform chain has grown PLATFORM_GROWTH_BRAKE
 //   past its last anchor (platform-growth-brake.ts), a sign-in or step-up
-//   started, and a callback come back, is SIGN_IN_UNAVAILABLE, 503 with
-//   Retry-After, no flow begun and no session opened or rotated, warned at most
-//   once a minute; so many accounts at once can't hold every organisation's
-//   hand-off `too_far`. A sign-out is never refused.
+//   started is SIGN_IN_UNAVAILABLE, 503 with Retry-After, no flow begun,
+//   warned at most once a minute; so many accounts at once can't hold every
+//   organisation's hand-off `too_far`. A flow begun before the brake still
+//   completes at the callback (bounded by the flows' caps and 15 minutes), so
+//   no one finished at the login service lands on an error. A sign-out is
+//   never refused.
 // - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
 //   a step-up for a challenge of the signed-in person's own session: a flow
 //   cookie, and off to the login service to sign in again (`prompt=login`).
@@ -433,7 +435,6 @@ export function registerSignIn(
 
   routes.get('/v1/auth/callback', { schema: CALLBACK_SCHEMA, config: PUBLIC }, async (request, reply) => {
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
-    if (await brakeOn()) return braked(request, reply);
     const { code, state, error } = request.query;
     // The login service said no (the person cancelled, say), or the address was cut short: the flow is still taken,
     // so a step-up's browser goes back to its page (CO2), and a sign-in's is refused as before.
