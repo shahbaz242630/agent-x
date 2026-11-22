@@ -23,7 +23,7 @@
                   {
                     "type": "string",
                     "const": "ACTIVITY_EXPORTS_SPENT",
-                    "description": "You have downloaded the activity log as many times as you may in an hour (5), so this one was not made. Try again later."
+                    "description": "You have downloaded the activity log as many times as you may for now (5 an hour; your own activity, 20 a day), so this one was not made. Try again later."
                   },
                   {
                     "type": "string",

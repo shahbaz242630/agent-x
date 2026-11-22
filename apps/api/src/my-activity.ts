@@ -17,9 +17,11 @@
 //   or NDJSON, up to 12 months and MOST_EXPORTED_REQUESTS requests
 //   (ACTIVITY_EXPORT_TOO_LARGE, nothing recorded), recorded first on the
 //   platform chain as `access_log.person_exported` (naming the person, the
-//   range, the format, the count and the last row written then), five an hour a
-//   person counted from those records under the person's own lock
-//   (ACTIVITY_EXPORTS_SPENT); one built at a time on a server
+//   range, the format, the count and the last row written then), five an hour
+//   and twenty a day a person counted from those records under the person's own
+//   lock (ACTIVITY_EXPORTS_SPENT; the day's cap, TR-13: each record is a platform
+//   chain event every hand-off's walk reads past, so no one person may grow the
+//   shared chain without end); one built at a time on a server
 //   (ACTIVITY_EXPORTS_BUSY). With an Idempotency-Key, kept under
 //   PERSON_KEYS_TENANT (the store is walled by organisation; a person's own
 //   writes belong to none), so a retry answers the same rows again.
@@ -80,6 +82,7 @@ import {
   type ExportFormat,
 } from './audit-log-exports.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { capWarning } from './oauth-authorizing.ts';
 import type { PersonSealTables } from './person-seal.ts';
 import { type Refused, refused } from './refused.ts';
 import { UseCaseRefused } from './use-case-work.ts';
@@ -100,6 +103,12 @@ const MOST_A_PAGE = 100;
 
 /** The most of a person's own downloads in an hour, as an admin's of theirs. */
 const MOST_EXPORTS_AN_HOUR = 5;
+
+/**
+ * The most of a person's own downloads in a day (TR-13): each is an event on the shared platform chain, which every
+ * organisation's hand-off walks past, so the hourly cap alone would let one person add 120 a day.
+ */
+const MOST_EXPORTS_A_DAY = 20;
 
 /** How many of Agent X's exports of the person's log the page lists, newest first. */
 const EXPORTS_LISTED = 20;
@@ -257,6 +266,8 @@ export function createMyActivity({
 }): MyActivity {
   const platform = createPlatformChain({ keys, ids });
   const gate = createBuildGate(clock);
+  // A person at their day's cap, said at most once a minute with how many were refused (TR-13).
+  const daySpent = capWarning(logger, clock, 'activity.person_exports_day_spent', { most: MOST_EXPORTS_A_DAY });
 
   /** A read in one limited transaction; a record that can't be believed raises the alarm and is INTEGRITY_FAILED. */
   const read = async <T>(correlationId: string, work: (tx: MyActivityTx) => Promise<T | 'unsealed'>) => {
@@ -310,8 +321,12 @@ export function createMyActivity({
         idempotency.run(tx, idempotent, async () => {
           // The person's other download in flight commits or rolls back before this one counts (ADR-006 §6).
           await holdTransactionLock(tx, MY_ACTIVITY_EXPORTS_LOCK, userId);
-          const since = new Date(clock.now().getTime() - HOUR_MS);
-          if ((await personExportsSince(tx, userId, since)) >= MOST_EXPORTS_AN_HOUR) {
+          const now = clock.now().getTime();
+          if ((await personExportsSince(tx, userId, new Date(now - HOUR_MS))) >= MOST_EXPORTS_AN_HOUR) {
+            throw new MyActivityRefused(409, 'ACTIVITY_EXPORTS_SPENT');
+          }
+          if ((await personExportsSince(tx, userId, new Date(now - DAY_MS))) >= MOST_EXPORTS_A_DAY) {
+            daySpent();
             throw new MyActivityRefused(409, 'ACTIVITY_EXPORTS_SPENT');
           }
           const range = await personInRange(tx, userId, asked);

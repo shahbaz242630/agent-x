@@ -256,14 +256,16 @@ export function createOrganisationCounter(
 /**
  * A route's own limit per client address (6E3a: the OAuth endpoints'), beside the address's limit for every route,
  * in a window of its own (`windowMs`): an hour for registering a client, a minute for the rest. A count of its own
- * for each counter made. Over it, the limit headers are its own, and the same 429.
+ * for each counter made. Over it, the limit headers are its own, and the same 429. `keyOf` groups the addresses
+ * counted as one: `clientKey` (an IPv6 /64) unless the route's own pool groups them otherwise (sign-ins: `clientSite`).
  */
 export function createAddressCounter(
   app: FastifyInstance,
   { most, windowMs }: { readonly most: number; readonly windowMs: number },
   trust: ProxyTrust,
+  keyOf: (ip: string | undefined) => string = clientKey,
 ): CountRequest {
-  const limiter = counterOf(app, most, (request) => clientKey(rawClientIp(request, trust)), windowMs);
+  const limiter = counterOf(app, most, (request) => keyOf(rawClientIp(request, trust)), windowMs);
   return async (request, reply) => {
     if (await overLimit(limiter, request, reply, 'when-refused')) throw new RateLimited('rate limit exceeded');
   };
