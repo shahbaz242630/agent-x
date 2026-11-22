@@ -15,7 +15,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -42,7 +42,8 @@ import {
   sessionsEndedAt,
   sessionsEndedEvent,
 } from './sessions.ts';
-import { createSignIn, type SignIn, SignInBusy, StepUpFailed } from './sign-in-flow.ts';
+import { PERSON_CHAIN_LOCK, sessionsSpent } from './person-chain-caps.ts';
+import { createSignIn, SessionsSpent, type SignIn, SignInBusy, StepUpFailed } from './sign-in-flow.ts';
 import { createSignedEnds } from './signed-ends.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -1766,6 +1767,192 @@ describe(`SEC-DB-14 SEC-DB-20 S208 the owner can't point a step-up's flow at ano
     expect(await verified(done.sessionId, first.challengeId, 'members.invite', 9)).toBeUndefined();
     expect(await challenges.pending(app, second.challengeId, done.sessionId)).toMatchObject({
       challengeId: second.challengeId,
+    });
+  });
+});
+
+// S210 TR-7 (B3): each session's end and each step-up is an event on the shared platform chain, so a person's day's
+// sessions and step-ups are capped (person-chain-caps.ts). Small caps here rather than a hundred sign-ins: the rule is
+// the same at any size.
+describe(`SEC-LIM-13 S210 TR-7 a person's sessions and step-ups held to a day's cap (Postgres ${server.version})`, () => {
+  const CHANGE = (n: number) => Buffer.alloc(32, n);
+  const FRESH: SignInEvidence = {
+    idpSessionId: 'V1_fresh',
+    authTime: new Date(START.getTime() + 10_000),
+    amr: ['pwd', 'user', 'mfa'],
+  };
+  /** A sign-in like the others', its caps the ones named. */
+  const capped = (caps: { readonly mostSessions?: number; readonly mostStepUps?: number }) =>
+    createSignIn({
+      db: app,
+      oidc: client,
+      flows: createLoginFlows({ clock }),
+      sessions,
+      challenges,
+      ids: new SequentialIds(0x100_0000 + subjects * 0x1000),
+      clock,
+      keys,
+      logger: testLogger(capture),
+      ...caps,
+    });
+  const signedIn = async (with_: SignIn, previousCookie?: string) => {
+    const { url, flowId } = await with_.begin(undefined, NETWORK);
+    const state = new URL(url).searchParams.get('state') ?? '';
+    return with_.complete({ flowId, code: 'a-code', state, previousCookie });
+  };
+
+  it('opens a person’s day’s sessions, their ends counted with the ones kept; the next opens nothing; sign-out still ends one; another person signs in', async () => {
+    const three = capped({ mostSessions: 3 });
+    const first = await signedIn(three);
+    // One replacing the first: the first's end signed, so two counted.
+    const second = await signedIn(three, first.cookie);
+    const third = await signedIn(three);
+    // Three now (one ended, two kept): the fourth is refused, opening nothing and ending nothing.
+    await expect(signedIn(three, second.cookie)).rejects.toEqual(new SessionsSpent(first.userId));
+    expect((await sessionsOf(first.userId)).map(({ id }) => id).toSorted()).toEqual(
+      [second.sessionId, third.sessionId].toSorted(),
+    );
+    expect(await sessions.use(app, second.cookie)).toMatchObject({ sessionId: second.sessionId });
+    // Past the cap a sign-out is never refused: the session ends, signed, as ever.
+    expect(await three.signOut(second.cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
+    expect(await sessions.use(app, second.cookie)).toBeUndefined();
+    // Its end counted too: still refused.
+    await expect(signedIn(three)).rejects.toBeInstanceOf(SessionsSpent);
+    // Another person is not held by it.
+    client.subject = `${client.subject}-other`;
+    expect(await signedIn(three)).toMatchObject({ stepUpChallengeId: undefined });
+  });
+
+  it('counts under the person’s lock: a sign-in waits for another opening the day’s last, then is refused (ADR-006 §6)', async () => {
+    const two = capped({ mostSessions: 2 });
+    const first = await signedIn(two);
+    const { url, flowId } = await two.begin(undefined, NETWORK);
+    const state = new URL(url).searchParams.get('state') ?? '';
+    // Another sign-in of the person's, holding their lock as it opens the day's last session, before it commits.
+    const holding = Promise.withResolvers<undefined>();
+    const letGo = Promise.withResolvers<undefined>();
+    const other = app.transaction().execute(async (tx) => {
+      expect(await sessionsSpent(tx, first.userId, clock.now(), 2)).toBe(false);
+      await sessions.open(tx, first.userId, evidence);
+      holding.resolve(undefined);
+      await letGo.promise;
+    });
+    await holding.promise;
+    const settled = within(
+      20_000,
+      two.complete({ flowId, code: 'a-code', state, previousCookie: undefined }),
+      'the sign-in',
+    ).then(
+      () => 'opened',
+      (error: unknown) => (error instanceof SessionsSpent ? 'spent' : 'other'),
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    letGo.resolve(undefined);
+    await other;
+    // Counted once the other committed: two kept, so refused.
+    expect(await settled).toBe('spent');
+    expect(await sessionsOf(first.userId)).toHaveLength(2);
+  });
+
+  it('two step-ups racing for the day’s last place: one completes, the other is refused, nothing rotated for it (ADR-006 §6)', async () => {
+    const one = capped({ mostStepUps: 1 });
+    const done = await signedIn(one);
+    client.proves = FRESH;
+    const begun = async (n: number) => {
+      const challenge = await challenges.open(app, {
+        sessionId: done.sessionId,
+        action: 'members.invite',
+        changeHash: CHANGE(n),
+      });
+      if (challenge === undefined) throw new Error('no challenge');
+      const { url, flowId } = await one.beginStepUp(done.sessionId, challenge.challengeId, '/members/confirm');
+      return { flowId, state: new URL(url).searchParams.get('state') ?? '' };
+    };
+    // Both begun under the cap, then both come back at once while the person's lock is held elsewhere: each waits on it.
+    const [first, second] = [await begun(1), await begun(2)];
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+      lockName(PERSON_CHAIN_LOCK, done.userId),
+    ]);
+    const outcome = (flow: { flowId: string; state: string }) =>
+      within(20_000, one.complete({ ...flow, code: 'a-code', previousCookie: done.cookie }), 'the step-up').then(
+        () => 'stepped',
+        (error: unknown) => (error instanceof StepUpFailed ? error.failure : 'other'),
+      );
+    const racing = Promise.all([outcome(first), outcome(second)]);
+    await waitUntilQueued(database.as('admin'), 2);
+    await holder.query('commit');
+    await holder.end();
+
+    // One took the last place; the other, counting after it committed, was refused.
+    expect((await racing).toSorted()).toEqual(['step_ups_spent', 'stepped']);
+    const rotations = await (app as unknown as Kysely<PlatformControlsTables>)
+      .selectFrom('platform_controls.audit_events')
+      .select('details')
+      .where('action', '=', SESSION_ROTATED)
+      .execute();
+    expect(rotations.filter(({ details }) => details.includes(done.sessionId))).toHaveLength(1);
+  });
+
+  it('counts the sessions kept only from the last 24 hours of the app’s clock', async () => {
+    const two = capped({ mostSessions: 2 });
+    const first = await signedIn(two);
+    await signedIn(two);
+    await expect(signedIn(two)).rejects.toBeInstanceOf(SessionsSpent);
+    // A day on, the two kept are out of the count (their ends, none here, the database's last day).
+    clock.advanceBy(24 * 60 * 60 * 1000);
+    client.proves = { ...evidence, authTime: clock.now() };
+    expect(await signedIn(two)).toMatchObject({ userId: first.userId });
+  });
+
+  it('completes a person’s day’s step-ups; past it a step-up is refused as it starts and as it completes, nothing rotated; another person steps up', async () => {
+    const two = capped({ mostStepUps: 2 });
+    const done = await signedIn(two);
+    const open = async (sessionId: string, n: number) => {
+      const challenge = await challenges.open(app, { sessionId, action: 'members.invite', changeHash: CHANGE(n) });
+      if (challenge === undefined) throw new Error('no challenge');
+      return challenge;
+    };
+    client.proves = FRESH;
+    const begun = async (sessionId: string, challengeId: string) => {
+      const { url, flowId } = await two.beginStepUp(sessionId, challengeId, '/members/confirm');
+      return { flowId, state: new URL(url).searchParams.get('state') ?? '' };
+    };
+    // One begun under the cap, left at the login service while two others complete.
+    const waiting = await begun(done.sessionId, (await open(done.sessionId, 1)).challengeId);
+    let cookie = done.cookie;
+    for (const n of [2, 3]) {
+      const { flowId, state } = await begun(done.sessionId, (await open(done.sessionId, n)).challengeId);
+      cookie = (await two.complete({ flowId, code: 'a-code', state, previousCookie: cookie })).cookie;
+    }
+    // Two completed: the one waiting is refused as it comes back, to its page, the session's cookie kept,
+    await expect(two.complete({ ...waiting, code: 'a-code', previousCookie: cookie })).rejects.toMatchObject({
+      name: 'StepUpFailed',
+      failure: 'step_ups_spent',
+      userId: done.userId,
+      back: { returnTo: '/members/confirm' },
+    });
+    expect(await sessions.use(app, cookie)).toMatchObject({ sessionId: done.sessionId });
+    // and a new one is refused before the browser leaves, no flow started.
+    const started = client.started;
+    await expect(two.beginStepUp(done.sessionId, (await open(done.sessionId, 4)).challengeId)).rejects.toMatchObject({
+      name: 'StepUpFailed',
+      failure: 'step_ups_spent',
+      userId: done.userId,
+      back: undefined,
+    });
+    expect(client.started).toBe(started);
+    // Signing out still works.
+    expect(await two.signOut(cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
+    // Another person is not held by it.
+    client.subject = `${client.subject}-other`;
+    client.proves = evidence;
+    const other = await signedIn(two);
+    client.proves = FRESH;
+    const theirs = await begun(other.sessionId, (await open(other.sessionId, 5)).challengeId);
+    expect(await two.complete({ ...theirs, code: 'a-code', previousCookie: other.cookie })).toMatchObject({
+      userId: other.userId,
     });
   });
 });

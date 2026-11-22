@@ -53,10 +53,13 @@ import {
   MOST_OPEN_FLOWS_A_BROWSER,
   MOST_OPEN_FLOWS_A_NETWORK,
   MOST_OPEN_FLOWS_A_SOURCE,
+  MOST_REGISTRATIONS_A_DAY,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   keepClientMetadata,
   newFlowCookie,
   type OauthTables,
+  QUIET_NETWORK_FLOWS,
+  QUIET_NETWORK_REGISTRATIONS,
   sweepClients,
 } from '@agentx/core/modules/oauth';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
@@ -353,11 +356,7 @@ beforeEach(async () => {
     issuer: capabilities.issuer,
     clients,
   });
-  const registered = await authorizing.register(
-    { redirect_uris: [REDIRECT], client_name: 'ChatGPT' },
-    CORRELATION,
-    fresh(),
-  );
+  const registered = await authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, fresh());
   if (registered.outcome !== 'registered') throw new Error('registered');
   clientId = registered.client.clientId;
 });
@@ -671,28 +670,40 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     });
   });
 
-  it(`refuses every new flow while ${String(MOST_OPEN_FLOWS)} are open, with the warning`, async () => {
+  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} are open, refuses only a busy network's new flow, with the warning; a quiet one still opens`, async () => {
     const admin = database.as('admin');
+    // The server's cap filled by a crowd of 400 networks, each under its own share.
     await admin.query(
-      `insert into oauth.flows (id, kind, client_id, redirect_uri, code_challenge, scopes_asked, resource, browser_hash, created_at, ends_at)
-       select gen_random_uuid(), 'code', 'filler', 'https://a.example/cb', $1, 'requests:read', 'r', $2, $3, $4
-       from generate_series(1, $5::int)`,
+      `insert into oauth.flows (id, kind, client_id, redirect_uri, code_challenge, scopes_asked, resource, browser_hash, created_at, ends_at, source_key, network_key)
+       select gen_random_uuid(), 'code', 'filler', 'https://a.example/cb', $1, 'requests:read', 'r', $2, $3, $4,
+         'tr7-source-' || n, 'tr7-net-' || (n % 400)
+       from generate_series(1, $5::int) as n`,
       [challengeOf(VERIFIER), 'f'.repeat(64), START, new Date(START.getTime() + 900_000), MOST_OPEN_FLOWS],
     );
+    const authorize = (ip: string) => authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), ip);
+    const busy = '198.51.100.40';
     try {
-      const answer = await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
+      // A network with fewer than its few open is let in, up to them,
+      for (let open = 0; open < QUIET_NETWORK_FLOWS; open += 1) {
+        expect(await authorize(busy)).toMatchObject({ outcome: 'opened' });
+      }
+      expect(lines('oauth.flows_capped')).toEqual([]);
+      // and only then refused, back to the client to try again, with the warning.
+      const answer = await authorize(busy);
       if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
       expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
       expect(lines('oauth.flows_capped')).toEqual([expect.objectContaining({ level: 'warn', refused: 1 })]);
       // At most one line a minute, however many are refused, then one counting them.
-      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
+      await authorize(busy);
       expect(lines('oauth.flows_capped')).toHaveLength(1);
       clock.advanceBy(60_000);
-      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
+      await authorize(busy);
       expect(lines('oauth.flows_capped')).toEqual([
         expect.objectContaining({ refused: 1 }),
         expect.objectContaining({ refused: 2 }),
       ]);
+      // Another network, quiet, still opens one: no one locked out.
+      expect(await authorize(fresh())).toMatchObject({ outcome: 'opened' });
     } finally {
       await admin.query("delete from oauth.flows where client_id = 'filler'");
     }
@@ -726,7 +737,6 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     });
     const asDevice = await authorizing.register(
       { redirect_uris: [REDIRECT], client_name: 'Hermes', grant_types: [DEVICE_CODE_GRANT] },
-      CORRELATION,
       fresh(),
     );
     if (asDevice.outcome !== 'registered') throw new Error('registered');
@@ -795,7 +805,6 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     });
     const asDevice = await authorizing.register(
       { redirect_uris: [REDIRECT], client_name: 'Hermes', grant_types: [DEVICE_CODE_GRANT] },
-      CORRELATION,
       fresh(),
     );
     if (asDevice.outcome !== 'registered') throw new Error('registered');
@@ -813,7 +822,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
 
   it(`6F1 G4: holds one network to ${String(MOST_REGISTRATIONS_A_NETWORK_A_DAY)} registrations a day`, async () => {
     const register = (address: string) =>
-      authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, CORRELATION, address);
+      authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, address);
     for (let made = 0; made < MOST_REGISTRATIONS_A_NETWORK_A_DAY; made += 1) {
       // Every address of the /24 its own, as an attacker's would be.
       expect(await register(`192.0.2.${String(made + 1)}`)).toMatchObject({ outcome: 'registered' });
@@ -839,9 +848,40 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
       capabilities,
       clients: oauthClients,
     });
-    expect(
-      await after.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, CORRELATION, '192.0.2.201'),
-    ).toMatchObject({ outcome: 'registered' });
+    expect(await after.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, '192.0.2.201')).toMatchObject({
+      outcome: 'registered',
+    });
+  });
+
+  it(`SEC-OAUTH-13 S210 TR-7: past ${String(MOST_REGISTRATIONS_A_DAY)} a day, a quiet network still registers; a busy one is refused, warned once a minute`, async () => {
+    const admin = database.as('admin');
+    // The day's cap filled by a crowd of 14 networks, each under its own share.
+    await admin.query(
+      `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at, network)
+       select 'axcl_7' || lpad(to_hex(n), 31, '0'), 'Filler', array['https://a.example/cb'], 'web', array['authorization_code'], $1,
+         'tr7-net-' || (n % 14)
+       from generate_series(1, $2::int) as n`,
+      [START, MOST_REGISTRATIONS_A_DAY],
+    );
+    const register = (address: string) =>
+      authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, address);
+    try {
+      // A network registering its first few today is let in,
+      for (let made = 0; made < QUIET_NETWORK_REGISTRATIONS; made += 1) {
+        expect(await register(`203.0.113.${String(made + 1)}`)).toMatchObject({ outcome: 'registered' });
+      }
+      expect(lines('oauth.registrations_capped')).toEqual([]);
+      // and refused past them: busy now, it meets the server's cap, warned once a minute with how many.
+      expect(await register('203.0.113.50')).toEqual({ outcome: 'capped' });
+      expect(await register('203.0.113.51')).toEqual({ outcome: 'capped' });
+      expect(lines('oauth.registrations_capped')).toEqual([
+        expect.objectContaining({ level: 'warn', most: MOST_REGISTRATIONS_A_DAY, refused: 1 }),
+      ]);
+      // Another network, quiet, still registers: no one locked out.
+      expect(await register('198.51.100.77')).toMatchObject({ outcome: 'registered' });
+    } finally {
+      await admin.query("delete from oauth.clients where name = 'Filler'");
+    }
   });
 
   it('answers busy back to the client, never a failure, when the flow’s transaction hits a limit', async () => {
@@ -885,7 +925,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
   });
 
   it('refuses a registration that can’t be kept, with RFC 7591’s error', async () => {
-    expect(await authorizing.register({ redirect_uris: ['http://a.example/cb'] }, CORRELATION, fresh())).toMatchObject({
+    expect(await authorizing.register({ redirect_uris: ['http://a.example/cb'] }, fresh())).toMatchObject({
       outcome: 'invalid',
       error: 'invalid_redirect_uri',
     });
@@ -2336,7 +2376,6 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     // A client that registered for the device flow, named as the one above.
     const registered = await authorizing.register(
       { redirect_uris: [REDIRECT], client_name: 'ChatGPT', grant_types: [DEVICE_CODE_GRANT] },
-      CORRELATION,
       fresh(),
     );
     if (registered.outcome !== 'registered') throw new Error('registered');
@@ -3223,7 +3262,6 @@ describe(`SEC-OAUTH-15 (S205 tamper pass): the database's owner can't grant a co
       // Registered so, as anyone may: the owner widening a client's grant types is refused before (SEC-OAUTH-17).
       const registered = await authorizing.register(
         { redirect_uris: [REDIRECT], client_name: 'Hermes', grant_types: [DEVICE_CODE_GRANT] },
-        CORRELATION,
         fresh(),
       );
       if (registered.outcome !== 'registered') throw new Error('registered');
@@ -3707,11 +3745,7 @@ describe(`SEC-OAUTH-17 a client's kept facts rewritten by the database's owner (
     ]);
     expect(lines('audit.integrity_failed')).toEqual([]);
     // Registering again, as an MCP client does when it is unknown, connects it once more.
-    const again = await authorizing.register(
-      { redirect_uris: [REDIRECT], client_name: 'ChatGPT' },
-      CORRELATION,
-      fresh(),
-    );
+    const again = await authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, fresh());
     if (again.outcome !== 'registered') throw new Error('registered');
     expect(await askFor(authorizing, again.client.clientId, REDIRECT)).toMatchObject({ outcome: 'opened' });
   });

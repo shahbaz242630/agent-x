@@ -58,6 +58,8 @@ const KEY = 'agentx.step-up.';
 export const STEPPED = 'stepped';
 /** The query a page comes back with when its step-up failed at the login service's return: the challenge it was for (CO2). */
 export const STEP_UP_FAILED = 'stepUpFailed';
+/** Beside it, why, where the API names it: `spent`, the person's step-ups for the day used up (S210 TR-7). */
+export const STEP_UP_WHY = 'stepUpWhy';
 
 const isPending = (value: unknown): value is PendingChange =>
   typeof value === 'object' &&
@@ -116,6 +118,7 @@ export function ownQuery(search: string): URLSearchParams {
   const query = new URLSearchParams(search);
   query.delete(STEPPED);
   query.delete(STEP_UP_FAILED);
+  query.delete(STEP_UP_WHY);
   return query;
 }
 

@@ -42,11 +42,19 @@ type Database = Kysely<OauthTables>;
 type Handle = Database | Transaction<OauthTables>;
 
 /**
- * The most flows not yet ended at once, every browser together (lead's review, 6E3a): anyone can open one with an
- * anonymous GET, and an image on a busy page beats any per-address limit, so the table is held here whatever comes.
- * Far above any real day: a flow lives 15 minutes.
+ * The flows not yet ended at once, every browser together, past which only a quiet network's open (lead's review,
+ * 6E3a; S210 TR-7): anyone can open one with an anonymous GET, and an image on a busy page beats any per-address
+ * limit, so the table is held here whatever comes, but never as a lockout, as the sign-ins' backstop (login-flows.ts,
+ * S206 V8). Far above any real day: a flow lives 15 minutes.
  */
 export const MOST_OPEN_FLOWS = 20_000;
+
+/**
+ * How few flows not ended make a network quiet: let in even while MOST_OPEN_FLOWS are open (S210 TR-7), so a crowd of
+ * networks filling the table can't stop everyone else connecting an app; the table then grows only with each new
+ * network's few.
+ */
+export const QUIET_NETWORK_FLOWS = 3;
 
 /** The most flows one browser (its flow cookie) holds open and undecided at once: a person connects a few apps. */
 export const MOST_OPEN_FLOWS_A_BROWSER = 5;
@@ -76,8 +84,9 @@ export type FlowOpened = 'opened' | 'full' | 'network_full' | 'source_full' | 'b
 
 /**
  * Whether the flows of either kind not ended at `now` are at a cap: every source's together (MOST_OPEN_FLOWS, the ends
- * index), this network's (MOST_OPEN_FLOWS_A_NETWORK, the network index), or this source's own
- * (MOST_OPEN_FLOWS_A_SOURCE, the source index), each count stopping at its cap.
+ * index) with this network not quiet (QUIET_NETWORK_FLOWS, S210 TR-7), this network's (MOST_OPEN_FLOWS_A_NETWORK, the
+ * network index), or this source's own (MOST_OPEN_FLOWS_A_SOURCE, the source index), each count stopping at its cap.
+ * A quiet network is counted on its own few alone: a source holds no more than its network, so no other cap is near.
  */
 async function flowsFull(
   tx: Transaction<OauthTables>,
@@ -94,6 +103,7 @@ async function flowsFull(
       .executeTakeFirstOrThrow();
     return flows >= most;
   };
+  if (!(await atCap(QUIET_NETWORK_FLOWS, ['network_key', network]))) return undefined;
   if (await atCap(MOST_OPEN_FLOWS)) return 'full';
   if (await atCap(MOST_OPEN_FLOWS_A_NETWORK, ['network_key', network])) return 'network_full';
   if (await atCap(MOST_OPEN_FLOWS_A_SOURCE, ['source_key', source])) return 'source_full';
@@ -102,7 +112,7 @@ async function flowsFull(
 
 /**
  * Opens the flow from `from` (its client address's source and network, 6F1 G4, AG8), for FLOW_SECONDS from its
- * creation, unless MOST_OPEN_FLOWS have not ended, or this network holds MOST_OPEN_FLOWS_A_NETWORK or this source
+ * creation, unless MOST_OPEN_FLOWS have not ended and this network holds QUIET_NETWORK_FLOWS (S210 TR-7), or this network holds MOST_OPEN_FLOWS_A_NETWORK or this source
  * MOST_OPEN_FLOWS_A_SOURCE not ended, or this browser holds MOST_OPEN_FLOWS_A_BROWSER open and undecided, in a
  * transaction of its own whose statements are limited to 10 seconds, each count stopping at its cap (the ends index,
  * the network index, the source index, the browser index). Best effort, with no lock (lead's re-review: one would make
@@ -348,8 +358,8 @@ export interface DeviceFlow {
 export type DeviceFlowOpened = 'opened' | 'full' | 'network_full' | 'source_full' | 'collided';
 
 /**
- * Opens the device's flow from `from` (6F1 G4, AG8), for FLOW_SECONDS, unless MOST_OPEN_FLOWS have not ended or this
- * network holds MOST_OPEN_FLOWS_A_NETWORK or this source MOST_OPEN_FLOWS_A_SOURCE (the code flows' own caps, best
+ * Opens the device's flow from `from` (6F1 G4, AG8), for FLOW_SECONDS, unless MOST_OPEN_FLOWS have not ended and this
+ * network holds QUIET_NETWORK_FLOWS (S210 TR-7), or this network holds MOST_OPEN_FLOWS_A_NETWORK or this source MOST_OPEN_FLOWS_A_SOURCE (the code flows' own caps, best
  * effort, as openCodeFlow's), in a transaction of its own whose statements are limited to 10 seconds. A user code
  * another flow holds, ended or not, opens no flow: `collided`, and nothing kept.
  */

@@ -5,7 +5,9 @@
 // A challenge with nothing kept for it (another tab's, already confirmed,
 // storage cleared) is said: the change wasn't made, and can be asked again.
 // Back with `?stepUpFailed=<challenge>` instead (CO2: the API refused the
-// fresh sign-in), the change kept for it is forgotten and that is said. A
+// fresh sign-in), the change kept for it is forgotten and that is said; with
+// `&stepUpWhy=spent`, that the person's step-ups for the day are used up
+// (S210 TR-7), so trying again now won't help. A
 // confirm refused for words that changed since they were read (CO3) says so:
 // asked again, the person reads them as they are now.
 // A confirm that answers with a new agent key (6D1: registering, rotating,
@@ -32,6 +34,7 @@ import {
   type PendingChange,
   pendingFor,
   STEP_UP_FAILED,
+  STEP_UP_WHY,
   STEPPED,
 } from '../step-up.ts';
 import { t, type TextKey } from '../text.ts';
@@ -106,7 +109,7 @@ export function SteppedUp() {
   if (failedFor !== undefined) {
     return (
       <section className="notice stepped" role="alert">
-        <p>{t('stepUp.signInFailed')}</p>
+        <p>{t(params.get(STEP_UP_WHY) === 'spent' ? 'stepUp.spent' : 'stepUp.signInFailed')}</p>
         <button type="button" className="secondary" onClick={close}>
           {t('stepUp.close')}
         </button>

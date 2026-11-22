@@ -538,6 +538,17 @@ export const PLAIN_WORDS = {
     broke: 'People on a busy network were asked to try again shortly; everyone else signs in as usual.',
     next: 'Look for many addresses starting sign-ins over and over. They end within ten minutes.',
   },
+  'auth.person_sessions_spent': {
+    happened: 'One person signed in more than a hundred times in a day, so this sign-in was refused.',
+    broke: 'Only that person waits; sessions they hold go on, and everyone else signs in as usual.',
+    next: 'Find the person by the ID on this line and ask them; if it was not them, end their sessions and reset their sign-in.',
+  },
+  'auth.person_step_ups_spent': {
+    happened:
+      'One person confirmed more than two hundred changes by signing in again in a day, so this one was refused.',
+    broke: "Only that person's change waits; they stay signed in, and everyone else carries on.",
+    next: 'Find the person by the ID on this line and ask them; a busy approver may need more, else end their sessions.',
+  },
   'auth.sign_ins_gave_way': {
     happened:
       'One address or network had more sign-ins under way than its share, so its oldest unfinished ones were let go.',
@@ -632,13 +643,16 @@ export const PLAIN_WORDS = {
     next: 'It stops by itself 15 minutes after a key rotation. If not, restore the retired key version.',
   },
   'oauth.registrations_capped': {
-    happened: 'MCP apps registered more times today than Agent X allows in all, so this one was refused.',
-    broke: 'No new app can register until the day rolls on; registered apps still connect.',
+    happened:
+      "Today's MCP app registrations passed Agent X's total, so a network that had registered a few was refused.",
+    broke: "Only busy networks wait; a network's first few apps still register, and registered apps still connect.",
     next: 'Look for many networks registering over and over: a spread-out attack.',
   },
   'oauth.flows_capped': {
-    happened: 'So many OAuth sign-ins were under way at once that Agent X refused new ones.',
-    broke: 'People connecting an app were told to try again soon; connected apps carry on.',
+    happened:
+      'So many OAuth sign-ins were under way that Agent X refused new ones from networks already holding a few.',
+    broke:
+      'Only people on those networks were told to try again soon; others still connect, and connected apps carry on.',
     next: 'Look for many addresses opening sign-ins over and over. They end within minutes.',
   },
   'oauth.source_capped': {

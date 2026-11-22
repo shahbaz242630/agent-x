@@ -321,7 +321,7 @@ export function registerOauth(
     },
     async (request, reply) => {
       if (authorizing === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
-      const answer = await authorizing.register(request.body, request.id, rawClientIp(request, trust));
+      const answer = await authorizing.register(request.body, rawClientIp(request, trust));
       if (answer.outcome === 'invalid') return sendOauthError(reply, 400, answer.error, answer.description);
       if (answer.outcome === 'capped') return sendErrorBody(reply, 429, 'RATE_LIMITED', request.id);
       const { client } = answer;

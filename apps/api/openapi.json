@@ -747,6 +747,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "STEP_UPS_SPENT",
+                    "description": "You've confirmed as many changes by signing in again as one person may in 24 hours (200), so this one wasn't confirmed. Try again later; if you didn't make all of them, tell your admins at once."
+                  },
+                  {
+                    "type": "string",
                     "const": "STEP_UP_FAILED",
                     "description": "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver."
                   },
