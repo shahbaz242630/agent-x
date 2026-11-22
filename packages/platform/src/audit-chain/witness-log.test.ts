@@ -516,7 +516,8 @@ describe('SEC-DB-20 the witness log: reading', () => {
     await slow.log.now(CHAIN, head(5n, 1));
     // The store's time asked before the first file.
     expect(calls).toEqual(['list', 'put']);
-    // Noted before then, by its slow clock; the next, by the store's.
+    // Noted before then, yet dated at its file's time by the store's clock, never by its slow one; here as there.
+    expect(slow.log.pending(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: START.getTime() + MINUTE }]);
     await slow.log.now(CHAIN, head(6n, 1));
     // Noted before its clock was set: dated at its file's name, never past it, so the file stays sound.
     await fast.log.now(OTHER, head(2n, 1));
@@ -524,7 +525,7 @@ describe('SEC-DB-20 the witness log: reading', () => {
     await reader.log.refresh();
     expect(reader.log.pending(CHAIN)).toEqual([
       { seq: 6n, hash: hash(1), at: START.getTime() + MINUTE },
-      { seq: 5n, hash: hash(1), at: START.getTime() - 19 * MINUTE },
+      { seq: 5n, hash: hash(1), at: START.getTime() + MINUTE },
     ]);
     expect(reader.log.pending(OTHER)).toEqual([{ seq: 2n, hash: hash(1), at: START.getTime() + MINUTE }]);
     expect(integrity(reader.capture)).toEqual([]);
@@ -536,6 +537,48 @@ describe('SEC-DB-20 the witness log: reading', () => {
     await fast.log.now(OTHER, head(3n, 1));
     expect(skews(fast.capture)).toHaveLength(1);
     expect(skews(reader.capture)).toEqual([]);
+  });
+
+  it('TR-12: freshAt is by this copy’s own clock: a right clock against a Date in whole seconds passes a read-after-walk check, and stays fresh', async () => {
+    const time = clock(START.getTime() + 999);
+    // Azure's Date: whole seconds, rounded down, so the offset is nearly a second back with a right clock.
+    const store = createFakeWriteOnceStore({ now: () => Math.floor(time.held.at / 1000) * 1000 });
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    time.held.at += 10;
+    // The anchor check: a read that began after its walk began.
+    const walkBegan = time.now().getTime();
+    await log.refresh();
+    expect(log.freshAt()?.getTime()).toBeGreaterThanOrEqual(walkBegan);
+    // The hand-off: how long ago, by its own clock.
+    expect(time.now().getTime() - (log.freshAt()?.getTime() ?? 0)).toBe(0);
+  });
+
+  it('TR-12: a copy ten minutes slow reads its newest snapshot at start by the store’s time: no `future` alarm', async () => {
+    const at = START.getTime();
+    const snapshots = createFakeWriteOnceStore();
+    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 7n, 1)], { at });
+    const heads = createFakeWriteOnceStore({ now: () => at + MINUTE });
+    const { log, capture } = witnessOn(heads, { snapshots, time: clock(at - 10 * MINUTE) });
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([7n]);
+    // Its own clock said, as it is wrong; the snapshot not.
+    expect(integrity(capture).map(({ reason }) => reason)).toEqual(['clock_skew']);
+  });
+
+  it('TR-12: the store’s time not to be had, no file is written and nothing is told it went; back, it goes', async () => {
+    const time = clock();
+    const store = createFakeWriteOnceStore({ now: () => time.held.at });
+    store.instead.list = () => Promise.reject(new Error('store away'));
+    const { log, capture } = witnessOn(store, { time });
+    await expect(log.now(CHAIN, head(5n, 1))).rejects.toBeInstanceOf(WitnessUnconfirmed);
+    expect(store.calls.puts).toBe(0);
+    expect(log.writesSound()).toBe(false);
+    expect(capture.lines().map(({ event }) => event)).toContain('audit.witness_write_failed');
+    delete store.instead.list;
+    time.held.at += 1000;
+    await expect(log.settled([CHAIN])).resolves.toBeUndefined();
+    expect(store.calls.puts).toBe(1);
   });
 
   it('TR-12: a file read whose name is past the clocks’ spread from when the store says it landed is said; one within it, not', async () => {

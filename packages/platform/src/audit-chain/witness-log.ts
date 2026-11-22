@@ -76,7 +76,10 @@ import { type Chain, chainName } from './chain.ts';
 import { timeIn } from './rebase.ts';
 import { bodyLines, fileName, type FileKind, isSoundFile, namesIn, signedFile, timeOfName } from './signed-files.ts';
 
-/** A head a copy wrote, as witnessed: its place, its event's hash, and when it was noted (the writer's clock). */
+/**
+ * A head a copy wrote, as witnessed: its place, its event's hash, and when it was noted, by the store's clock as its
+ * writer kept it (TR-12: the clock file names go by, never to be set against this process's own).
+ */
 export interface WitnessedHead {
   readonly seq: bigint;
   readonly hash: Buffer;
@@ -141,7 +144,10 @@ export interface WitnessLog extends ChainWitness {
    * past the wait (TR-1, plan §1.4 #2: hand-offs wait while the store takes no writes, rather than commit and be held).
    */
   writesSound(): boolean;
-  /** When the last refresh that ended whole began: none before one has. */
+  /**
+   * When the last refresh that ended whole began, none before one has: by this process's own clock (the `now` it was
+   * given), as its callers compare it with theirs (TR-12: never the store's clock, which names the files).
+   */
   freshAt(): Date | undefined;
   /** Those heads let go: each confirmed on the chain (the anchor check's walk passed through it, or its probe read it). */
   prune(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void;
@@ -441,6 +447,8 @@ interface Queued {
   readonly chain: string;
   readonly head: WitnessedHead;
   readonly klass: WitnessClass;
+  /** The head itself where it was noted before this copy had the store's time: dated at its file's (TR-12). */
+  readonly undated: { at: number } | undefined;
   readonly confirmed: Promise<void>;
   readonly done: () => void;
 }
@@ -562,6 +570,16 @@ export function createWitnessLog({
     offset = at - localNow().getTime();
     clockAsked = true;
     if (Math.abs(offset) > MOST_AHEAD_MS) skewed({ offsetMs: offset });
+  };
+
+  /**
+   * The store's time asked where it gives one and none was heard yet: before this copy's first file, so even that one is
+   * named by it, and before its first read, so the snapshots' names are judged by it too (TR-12). Throws as a list does.
+   */
+  const askClock = async (): Promise<void> => {
+    if (clockAsked || store.serverTime === undefined) return;
+    await timed.list(ownFolder, 1);
+    clockAsked = true;
   };
 
   /** The heads' store, each Put and list setting this copy's clock by the store's answer. */
@@ -857,12 +875,10 @@ export function createWitnessLog({
   const writeOnce = async (): Promise<boolean> => {
     const taking = nextFile();
     try {
-      // The store's time asked before this copy's first file, so even that one is named by it (TR-12).
-      if (!clockAsked && store.serverTime !== undefined) {
-        await timed.list(ownFolder, 1);
-        clockAsked = true;
-      }
+      await askClock();
       const at = now().getTime();
+      // Noted before the store's time was known: dated at its file's, never by a clock perhaps slow (never earlier).
+      for (const { undated } of taking) if (undated !== undefined) undated.at = at;
       const name = fileName(ownFolder, at);
       const bytes = await signedFile(
         keys,
@@ -940,13 +956,19 @@ export function createWitnessLog({
     const name = nameOf(chain);
     // Written by this process already (a replay's kept head): outside the database, nothing to wait for.
     if (writtenHere.has(writtenKey(name, { seq, hash }))) return;
-    const head: WitnessedHead = { seq, hash: Buffer.from(hash), at: now().getTime() };
+    // Kept as given, its time set once its file is named where the store's time wasn't known yet.
+    const head: { readonly seq: bigint; readonly hash: Buffer; at: number } = {
+      seq,
+      hash: Buffer.from(hash),
+      at: now().getTime(),
+    };
     keep(name, head);
     let done = (): void => undefined;
     const confirmed = new Promise<void>((resolve) => {
       done = resolve;
     });
-    const queued: Queued = { chain: name, head, klass, confirmed, done };
+    const undated = !clockAsked && store.serverTime !== undefined ? head : undefined;
+    const queued: Queued = { chain: name, head, klass, undated, confirmed, done };
     queue.push(queued);
     if (klass !== 'now') return;
     const waiting = unconfirmed.get(name) ?? new Set<Queued>();
@@ -1107,9 +1129,12 @@ export function createWitnessLog({
   };
 
   const refreshOnce = async (): Promise<Refreshed> => {
-    const began = now();
+    // When it began by this process's clock, as freshAt gives it; `began`, by the store's, as file names go.
+    const beganHere = localNow();
     const gained = new Set<string>();
     try {
+      await askClock();
+      const began = now();
       let newest: number | undefined;
       if (state === 'read') {
         // From the older of the newest file the last whole pass read and when it began, so nothing it didn't reach is
@@ -1135,7 +1160,7 @@ export function createWitnessLog({
         if (timeOfName(countdown) < keepFrom) namesRead.delete(name);
       }
       readFailingSince = undefined;
-      freshAt = began;
+      freshAt = beganHere;
       return { chains: [...gained].map(chainOfName), whole: true };
     } catch (error) {
       failed('read', error);
