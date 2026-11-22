@@ -893,7 +893,6 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'contacts-none',
   'contacts-other',
   'set-aside',
-  'set-aside-unrecorded',
   'set-aside-unwitnessed',
   'set-aside-other',
 ]);
@@ -3421,10 +3420,11 @@ describe("TR-14 a witness writer set aside, on the operator's job (playbook H)",
   });
 
   it('says a set-aside not yet recorded on the platform audit log, or recorded with its head not yet witnessed', async () => {
+    // TR-7 C3: in the store but not recorded is no "done": 1, as the job ends Failed, and a run again finishes it.
     const done = await setAsideRun({ ending: 'set-aside-unrecorded' });
-    expect(done.status).toBe(0);
+    expect(done.status).toBe(1);
     expect(done.said.at(-1)).toBe(
-      "It isn't recorded on the platform audit log yet: once the database answers, run the same command again to record it.",
+      "It isn't recorded on the platform audit log yet, so this run is not done: once the database answers, run the same command again. It finds its line, writes no second one, and records it.",
     );
     const unwitnessed = await setAsideRun({ ending: 'set-aside-unwitnessed' });
     expect(unwitnessed.status).toBe(0);
