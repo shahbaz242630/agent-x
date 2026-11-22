@@ -1237,6 +1237,8 @@ describe('TR-14 a witness writer set aside, typed or from a file (playbook H)', 
   });
   const requestFile = requestFilesIn(folder);
   const WRITER = 'a1b2c3d4e5f6';
+  const REASON = 'INC-2026-11-21';
+  const asked = ['witness-set-aside', '--writer', WRITER, '--reason', REASON];
   let made = 0;
   const witnessDir = (): string => {
     made += 1;
@@ -1244,16 +1246,21 @@ describe('TR-14 a witness writer set aside, typed or from a file (playbook H)', 
   };
 
   it.each([
-    ['typed', ['witness-set-aside', '--writer', WRITER]],
-    ['from a file, as the launcher writes it', ['--request', requestFile(witnessSetAsideRequest(WRITER))]],
+    ['typed', asked],
+    ['from a file, as the launcher writes it', ['--request', requestFile(witnessSetAsideRequest(WRITER, REASON))]],
   ])(
-    "reads it %s and signs one line to the witness store, which the API's copies take, without a database",
+    "reads it %s and signs one line to the witness store, which the API's copies take; no database, said as not recorded",
     async (_how, argv) => {
       const dir = witnessDir();
       const { code, events, line } = await run(argv, { ...ENV, AGENTX_AUDIT_WITNESS_DIR: dir });
       expect(code).toBe(0);
-      expect(events).not.toContain('operator.starting');
+      expect(events).toEqual([
+        'operator.witness_writer_set_aside',
+        'operator.database_unavailable',
+        'operator.not_recorded',
+      ]);
       expect(line('operator.witness_writer_set_aside')).toMatchObject({ writer: WRITER });
+      expect(line('operator.not_recorded')).toMatchObject({ level: 'error', writer: WRITER });
       expect(readdirSync(path.join(dir, 'e1', 'set-aside'))).toHaveLength(1);
       // Under the operator's own key, as the API's copies check it: sound, so no alarm.
       const errorsRead = async (): Promise<unknown[]> => {
@@ -1286,33 +1293,34 @@ describe('TR-14 a witness writer set aside, typed or from a file (playbook H)', 
     },
   );
 
+  const shape = `the command is ${WITNESS_SET_ASIDE_USAGE}, and nothing else`;
   it.each([
-    ['no writer', ['witness-set-aside'], `the command is ${WITNESS_SET_ASIDE_USAGE}, and nothing else`],
+    ['no writer', ['witness-set-aside'], [shape]],
+    ['no reason', ['witness-set-aside', '--writer', WRITER], [shape]],
+    ['a word more', [...asked, 'x'], [shape]],
     [
-      'a word more',
-      ['witness-set-aside', '--writer', WRITER, 'x'],
-      `the command is ${WITNESS_SET_ASIDE_USAGE}, and nothing else`,
-    ],
-    [
-      'an ID not 12 lower-case hex',
-      ['witness-set-aside', '--writer', WRITER.toUpperCase()],
-      "the writer's ID must be 12 hex characters, in lower case",
+      'an ID not 12 lower-case hex and a reason no reference',
+      ['witness-set-aside', '--writer', WRITER.toUpperCase(), '--reason', 'x'],
+      [
+        "the writer's ID must be 12 hex characters, in lower case",
+        "the reason is the incident's reference: 3 to 64 letters, digits and . _ / -",
+      ],
     ],
   ])('refuses %s, naming why', async (_what, argv, why) => {
     const { code, line } = await run(argv, { ...ENV, AGENTX_AUDIT_WITNESS_DIR: witnessDir() });
     expect(code).toBe(1);
-    expect(line('operator.refused')?.problems).toEqual([why]);
+    expect(line('operator.refused')?.problems).toEqual(why);
   });
 
   it('refuses with no witness store, and says a store that fails as the command failing', async () => {
-    const none = await run(['witness-set-aside', '--writer', WRITER]);
+    const none = await run(asked);
     expect(none.code).toBe(1);
     expect(none.line('operator.refused')?.problems).toEqual([
       expect.stringMatching(/^AGENTX_AUDIT_WITNESS_URL is not set: a writer is set aside in the witness store/),
     ]);
     const blocked = path.join(folder, 'not-a-folder');
     writeFileSync(blocked, 'x');
-    const failing = await run(['witness-set-aside', '--writer', WRITER], { ...ENV, AGENTX_AUDIT_WITNESS_DIR: blocked });
+    const failing = await run(asked, { ...ENV, AGENTX_AUDIT_WITNESS_DIR: blocked });
     expect(failing.code).toBe(1);
     expect(failing.line('operator.failed')).toMatchObject({ command: 'witness-set-aside' });
   });

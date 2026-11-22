@@ -403,14 +403,14 @@ export const countingContactsRequest = (orgId: string): string => JSON.stringify
 export const WITNESS_SET_ASIDE = 'witness-set-aside';
 
 /** What sets one aside: typed, or as a request file's JSON list. */
-export const WITNESS_SET_ASIDE_USAGE = `${WITNESS_SET_ASIDE} --writer <writer ID, 12 hex>`;
+export const WITNESS_SET_ASIDE_USAGE = `${WITNESS_SET_ASIDE} --writer <writer ID, 12 hex> --reason <incident reference>`;
 
 /** A witness writer's ID, as the witness log makes them (signed-files.ts: WRITER_ID). */
 export const WITNESS_WRITER = /^[0-9a-f]{12}$/;
 
 /** The request to set a witness writer aside, as its file holds it. */
-export const witnessSetAsideRequest = (writer: string): string =>
-  JSON.stringify([WITNESS_SET_ASIDE, '--writer', writer]);
+export const witnessSetAsideRequest = (writer: string, reason: string): string =>
+  JSON.stringify([WITNESS_SET_ASIDE, '--writer', writer, '--reason', reason]);
 
 /** The command word that tells an organisation our team is resetting a person's second factor (OR2; playbook K). */
 export const FACTOR_RESET_NOTICE = 'factor-reset-notice';

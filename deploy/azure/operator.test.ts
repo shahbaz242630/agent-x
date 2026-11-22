@@ -276,6 +276,7 @@ type Ending =
   | 'contacts-refused'
   | 'contacts-other'
   | 'set-aside'
+  | 'set-aside-unrecorded'
   | 'set-aside-other'
   | 'person-exported'
   | 'person-exported-sealed'
@@ -830,7 +831,16 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     TERMINATED,
   ],
   // A set-aside's line names its writer, the request's only ID.
-  'set-aside': (writer) => [said({ event: 'operator.witness_writer_set_aside', writer }), TERMINATED],
+  'set-aside': (writer) => [
+    said({ event: 'operator.witness_writer_set_aside', writer }),
+    said({ event: 'operator.witness_writer_recorded', writer }),
+    TERMINATED,
+  ],
+  'set-aside-unrecorded': (writer) => [
+    said({ event: 'operator.witness_writer_set_aside', writer }),
+    said({ event: 'operator.not_recorded', writer }),
+    TERMINATED,
+  ],
   'set-aside-other': () => [said({ event: 'operator.witness_writer_set_aside', writer: '0123456789ab' }), TERMINATED],
   'resumed-other': () => [
     said({ event: 'operator.handoff_resumed', platformEventId: OTHER_ID }),
@@ -876,6 +886,7 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'contacts-none',
   'contacts-other',
   'set-aside',
+  'set-aside-unrecorded',
   'set-aside-other',
 ]);
 
@@ -3346,14 +3357,15 @@ describe("PL-29 follow-up: an organisation's authority rows planned and repaired
 
 describe("TR-14 a witness writer set aside, on the operator's job (playbook H)", () => {
   const WRITER = 'a1b2c3d4e5f6';
-  const shape = 'say witness-set-aside --writer <writer ID, 12 hex>, and nothing else';
+  const REASON = 'INC-2026-11-21';
+  const shape = 'say witness-set-aside --writer <writer ID, 12 hex> --reason <incident reference>, and nothing else';
 
   async function setAsideRun(script: Script = {}) {
     const az = new FakeAzure({ ending: 'set-aside', ...script });
     const lines: string[] = [];
     let now = START.getTime();
     const status = await witnessSetAside(
-      { writer: WRITER },
+      { writer: WRITER, reason: REASON },
       {
         az,
         say: (line) => lines.push(line),
@@ -3368,28 +3380,43 @@ describe("TR-14 a witness writer set aside, on the operator's job (playbook H)",
   }
 
   it('reads the writer alone, 12 lower-case hex, and refuses anything else before writing anything', () => {
-    expect(parseWitnessSetAside(['witness-set-aside', '--writer', WRITER])).toEqual({ writer: WRITER });
+    expect(parseWitnessSetAside(['witness-set-aside', '--writer', WRITER, '--reason', REASON])).toEqual({
+      writer: WRITER,
+      reason: REASON,
+    });
     for (const argv of [
       ['witness-set-aside'],
-      ['witness-set-aside', '--id', WRITER],
-      ['witness-set-aside', '--writer', WRITER, '--id', EARLIER_ID],
+      ['witness-set-aside', '--writer', WRITER],
+      ['witness-set-aside', '--id', WRITER, '--reason', REASON],
+      ['witness-set-aside', '--writer', WRITER, '--reason', REASON, '--id', EARLIER_ID],
     ]) {
       expect(() => parseWitnessSetAside(argv)).toThrow(shape);
     }
     for (const writer of [WRITER.toUpperCase(), `${WRITER}0`, 'a1b2c3d4e5fg']) {
-      expect(() => parseWitnessSetAside(['witness-set-aside', '--writer', writer])).toThrow(
+      expect(() => parseWitnessSetAside(['witness-set-aside', '--writer', writer, '--reason', REASON])).toThrow(
         "the writer's ID is 12 hex characters in lower case",
       );
     }
+    expect(() => parseWitnessSetAside(['witness-set-aside', '--writer', WRITER, '--reason', 'x'])).toThrow(
+      "--reason takes the incident's reference",
+    );
   });
 
   it("writes the operator's request, runs it, puts [] back, and says the next steps once the line is in the store", async () => {
     const done = await setAsideRun();
     expect(done.status).toBe(0);
-    expect(done.az.heldAtStart).toBe(witnessSetAsideRequest(WRITER));
+    expect(done.az.heldAtStart).toBe(witnessSetAsideRequest(WRITER, REASON));
     expect(done.az.request).toBe(NO_REQUEST);
     expect(done.said.at(-1)).toBe(
-      `Writer ${WRITER} is set aside: every copy of the API passes over its witness files from its next read, each said as the alarm. Restart its copy, wait five minutes, then rebase each chain held (playbook H).`,
+      `Writer ${WRITER} is set aside: every copy of the API passes over the witness files it named until now from its next read, each said as the alarm. Restart its copy, wait five minutes, then rebase each chain held (playbook H).`,
+    );
+  });
+
+  it('says a set-aside not yet recorded on the platform audit log, which it still is in the store', async () => {
+    const done = await setAsideRun({ ending: 'set-aside-unrecorded' });
+    expect(done.status).toBe(0);
+    expect(done.said.at(-1)).toBe(
+      "It isn't recorded on the platform audit log yet: once the database answers, run the same command again to record it.",
     );
   });
 
