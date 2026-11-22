@@ -626,6 +626,21 @@ describe('SEC-DB-20 the witness log: reading', () => {
     expect(log.pending(CHAIN)[0]?.at).toBe(dated);
   });
 
+  it('TR-7 D5: witnessed finds a head noted here by its own, though the offset fell by minutes since', async () => {
+    const truth = clock();
+    const time = clock(START.getTime() - 20 * MINUTE);
+    const store = createFakeWriteOnceStore({ now: () => truth.held.at });
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    log.soon(CHAIN, head(5n, 1));
+    const noted = time.held.at;
+    // The store's Date now ten minutes behind what it said: the least offset falls from twenty minutes to ten.
+    truth.held.at -= 10 * MINUTE;
+    await log.refresh();
+    expect(log.witnessed(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: noted }]);
+    expect(log.witnessed(CHAIN, 1)).toEqual([{ seq: 5n, hash: hash(1), at: noted }]);
+  });
+
   it('TR-12: the first Date arriving on a Put re-dates the heads in it, and witnessed still gives them as noted here', async () => {
     const fake = createFakeWriteOnceStore();
     let date: number | undefined;

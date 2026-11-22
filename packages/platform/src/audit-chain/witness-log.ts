@@ -1715,9 +1715,12 @@ export function createWitnessLog({
   };
 
   /** heldTo (the interface): the heads held and the compact ones, the highest first, at most `most`. */
-  const heldTo = (chain: Chain, most = Number.POSITIVE_INFINITY): readonly WitnessedHead[] => {
-    const name = nameOf(chain);
-    const heads = standing(name, most).map(bare);
+  const heldTo = (chain: Chain, most = Number.POSITIVE_INFINITY): readonly WitnessedHead[] =>
+    heldOf(nameOf(chain), most).map(bare);
+
+  /** heldTo's heads as kept, the very objects (TR-7 D5: witnessed finds a head noted here by its own). */
+  const heldOf = (name: string, most: number): readonly WitnessedHead[] => {
+    const heads = standing(name, most);
     // Most chains hold no compact head: their pending heads as they are, no merge.
     const compact = compactOf(name);
     if (compact.length === 0) return heads;
@@ -1741,7 +1744,10 @@ export function createWitnessLog({
       // A head noted here, as noted by this clock. One read from a file, or compact, as its store-clock time less the
       // least offset: that is never below the true one, so this errs early by at most that call's trip and the Date's
       // second, well inside the digest's ACCEPT_MARGIN_MS (a minute) it is set against.
-      return heldTo(chain, most).map((head) => ({ ...head, at: notedHere.get(head) ?? head.at - leastOffset }));
+      return heldOf(nameOf(chain), most ?? Number.POSITIVE_INFINITY).map((head) => ({
+        ...bare(head),
+        at: notedHere.get(head) ?? head.at - leastOffset,
+      }));
     },
     async flush(): Promise<void> {
       await write(true);
