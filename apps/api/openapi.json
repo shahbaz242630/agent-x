@@ -752,6 +752,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "STEP_UPS_SPENT",
+                    "description": "You've confirmed as many changes by signing in again as one person may in 24 hours (200), so this one wasn't confirmed. Try again later; if you didn't make all of them, tell your admins at once."
+                  },
+                  {
+                    "type": "string",
                     "const": "SUPPLIER_ADDS_SPENT",
                     "description": "The organisation has added as many suppliers as it may in 24 hours, so this one wasn't added. Try again tomorrow; if no one at the organisation added them, tell its admins at once."
                   },

@@ -18,7 +18,7 @@ import {
   type Subject,
 } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
-import { LogCapture, SequentialIds } from '@agentx/testing';
+import { FixedClock, LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -28,6 +28,7 @@ import './route-server.helper.test.ts';
 import { type FindMembership, ORGANIZATION_HEADER, SESSION_CHALLENGE } from './access.ts';
 import { errorBody } from './errors.ts';
 import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
+import { personCapWarning } from './oauth-authorizing.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
 import { clientSite } from './rate-limit.ts';
 import { buildServer } from './server.ts';
@@ -39,6 +40,7 @@ const FLOW_ID = 'F'.repeat(43);
 const SESSION_ID = 'S'.repeat(43);
 const NEW_SESSION = 'N'.repeat(43);
 const USER_ID = '0199a0f0-0000-7000-8000-000000000011';
+const OTHER_USER = '0199a0f0-0000-7000-8000-000000000012';
 const RECORD_ID = '0199a0f0-0000-7000-8000-000000000022';
 const SESSION_SECONDS = 43_200;
 const SUBJECT = { issuer: 'https://auth.agentx.example', subject: '312000000000000042' };
@@ -1201,8 +1203,12 @@ describe("SEC-LIM-13 S210 TR-7 a person's day's sessions and step-ups", () => {
       `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
     ]);
     await app.inject(coming());
+    // Said once a minute a person, naming them by Agent X's own ID: another person's refusal is a line of its own.
+    standIn.failWith = new SessionsSpent(OTHER_USER);
+    await app.inject(coming());
     expect(capture.lines().filter((line) => line.event === 'auth.person_sessions_spent')).toEqual([
-      expect.objectContaining({ level: 'warn', most: MOST_SESSIONS_A_DAY, refused: 1 }),
+      expect.objectContaining({ level: 'warn', most: MOST_SESSIONS_A_DAY, userId: USER_ID, refused: 1 }),
+      expect.objectContaining({ level: 'warn', most: MOST_SESSIONS_A_DAY, userId: OTHER_USER, refused: 1 }),
     ]);
     // Nothing about the sign-in was wrong: no failed sign-in noted or logged.
     expect(noted).toEqual([]);
@@ -1217,7 +1223,7 @@ describe("SEC-LIM-13 S210 TR-7 a person's day's sessions and step-ups", () => {
     expect(standIn.signedOut).toEqual([SESSION_ID]);
   });
 
-  it('refuses a step-up past the day’s step-ups at its start as STEP_UP_FAILED, warned once a minute, no security event', async () => {
+  it('refuses a step-up past the day’s step-ups at its start as STEP_UPS_SPENT, 429 with Retry-After, warned once a minute, no security event', async () => {
     const standIn = new StandIn();
     standIn.live.set(SESSION_ID, LIVE);
     standIn.beginFailsWith = new StepUpFailed('step_ups_spent', 'test', USER_ID);
@@ -1229,21 +1235,22 @@ describe("SEC-LIM-13 S210 TR-7 a person's day's sessions and step-ups", () => {
 
     const response = await app.inject(starting);
 
-    expect(response.statusCode).toBe(403);
-    expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
+    expect(response.statusCode).toBe(429);
+    expect(response.json()).toEqual(errorBody('STEP_UPS_SPENT', response.headers['x-correlation-id'] as string));
+    expect(response.headers['retry-after']).toBe('3600');
     expect(response.headers['set-cookie']).toBeUndefined();
     await app.inject(starting);
     expect(capture.lines().filter((line) => line.event === 'auth.person_step_ups_spent')).toEqual([
-      expect.objectContaining({ level: 'warn', most: MOST_STEP_UPS_A_DAY, refused: 1 }),
+      expect.objectContaining({ level: 'warn', most: MOST_STEP_UPS_A_DAY, userId: USER_ID, refused: 1 }),
     ]);
     expect(capture.lines().map((line) => line.event)).not.toContain('auth.step_up_failed');
     expect(noted).toEqual([]);
   });
 
-  it('sends a step-up refused past the day’s step-ups as it comes back to its page, failed', async () => {
+  it('sends a step-up refused past the day’s step-ups as it comes back to its page, failed and saying why', async () => {
     const standIn = new StandIn();
     standIn.failWith = new StepUpFailed('step_ups_spent', 'test', USER_ID, {
-      returnTo: '/members/confirm',
+      returnTo: `/members/confirm?stepped=${CHALLENGE}&stepUpWhy=other`,
       challengeId: CHALLENGE,
     });
     const { app, capture, noted } = await server(standIn);
@@ -1251,12 +1258,44 @@ describe("SEC-LIM-13 S210 TR-7 a person's day's sessions and step-ups", () => {
     const response = await app.inject(coming());
 
     expect(response.statusCode).toBe(302);
-    expect(response.headers.location).toBe(`/members/confirm?stepUpFailed=${CHALLENGE}`);
+    expect(response.headers.location).toBe(`/members/confirm?stepUpFailed=${CHALLENGE}&stepUpWhy=spent`);
     expect(setCookies(response.headers['set-cookie'])).toEqual([
       `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
     ]);
     expect(capture.lines().filter((line) => line.event === 'auth.person_step_ups_spent')).toHaveLength(1);
     expect(noted).toEqual([]);
+  });
+
+  it('says each person’s refusals once a minute with how many, never losing a count to another’s line', () => {
+    const capture = new LogCapture();
+    const clock = new FixedClock(new Date('2026-12-01T09:00:00Z'));
+    const logger = createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 10_000 } },
+      destination: capture,
+    });
+    const refused = personCapWarning(logger, clock, 'auth.person_sessions_spent', { most: 2 });
+    const said = () => capture.lines().map(({ userId, refused: count }) => ({ userId, refused: count }));
+    refused(USER_ID);
+    refused(USER_ID);
+    refused(USER_ID);
+    clock.advanceBy(60_000);
+    // Another's line, a minute on, forgets no one with refusals still unsaid.
+    refused(OTHER_USER);
+    expect(said()).toEqual([
+      { userId: USER_ID, refused: 1 },
+      { userId: OTHER_USER, refused: 1 },
+    ]);
+    refused(USER_ID);
+    expect(said().at(-1)).toEqual({ userId: USER_ID, refused: 3 });
+    // Quiet for a minute with nothing unsaid, a person is forgotten: their next refusal starts a count of its own.
+    clock.advanceBy(60_000);
+    refused(OTHER_USER);
+    refused(USER_ID);
+    expect(said().slice(-2)).toEqual([
+      { userId: OTHER_USER, refused: 1 },
+      { userId: USER_ID, refused: 1 },
+    ]);
   });
 });
 

@@ -140,6 +140,33 @@ export function capWarning(
   };
 }
 
+/**
+ * A person's refusals by a cap of their own (TR-7), said with their ID (Agent X's own, as `auth.signed_in` says it) at
+ * most once a minute a person, with how many were refused since: one person's flood is a line a minute, and the line
+ * names whom to look at. Those quiet for the minute are forgotten as others are said.
+ */
+export function personCapWarning(
+  logger: Logger,
+  clock: Clock,
+  event: ProblemEvent,
+  fields: Readonly<Record<string, unknown>>,
+): (userId: string) => void {
+  const said = new Map<string, { at: number; refused: number }>();
+  return (userId: string): void => {
+    const now = clock.now().getTime();
+    const last = said.get(userId);
+    if (last !== undefined && now - last.at < CAP_WARNING_EVERY_MS) {
+      last.refused += 1;
+      return;
+    }
+    // Forgotten only with no refusal left unsaid, so a count is never lost.
+    for (const [person, was] of said)
+      if (now - was.at >= CAP_WARNING_EVERY_MS && was.refused === 0) said.delete(person);
+    logger.warn(event, { ...fields, userId, refused: (last?.refused ?? 0) + 1 });
+    said.set(userId, { at: now, refused: 0 });
+  };
+}
+
 /** The most characters of a client's `state` kept and sent back (0093). */
 const MOST_STATE = 512;
 

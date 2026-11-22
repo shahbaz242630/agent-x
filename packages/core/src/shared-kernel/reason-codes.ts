@@ -291,6 +291,8 @@ export const REASON_CODES = {
     "The words this change is confirmed with aren't the ones Agent X confirms it with now (they changed, or none were named), so this request changed nothing. Read them again (GET /v1/statements) and confirm with the version shown. A retry sent after a release changed the words is refused this way even if its first try went through: check what was done before trying again.",
   STEP_UP_FAILED:
     "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
+  STEP_UPS_SPENT:
+    "You've confirmed as many changes by signing in again as one person may in 24 hours (200), so this one wasn't confirmed. Try again later; if you didn't make all of them, tell your admins at once.",
   SUPPLIER_ADDS_SPENT:
     "The organisation has added as many suppliers as it may in 24 hours, so this one wasn't added. Try again tomorrow; if no one at the organisation added them, tell its admins at once.",
   SUPPLIER_CALL_NOTE_NEEDED:

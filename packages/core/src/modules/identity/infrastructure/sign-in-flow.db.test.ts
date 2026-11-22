@@ -15,7 +15,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -42,7 +42,7 @@ import {
   sessionsEndedAt,
   sessionsEndedEvent,
 } from './sessions.ts';
-import { sessionsSpent } from './person-chain-caps.ts';
+import { PERSON_CHAIN_LOCK, sessionsSpent } from './person-chain-caps.ts';
 import { createSignIn, SessionsSpent, type SignIn, SignInBusy, StepUpFailed } from './sign-in-flow.ts';
 import { createSignedEnds } from './signed-ends.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
@@ -1852,6 +1852,47 @@ describe(`SEC-LIM-13 S210 TR-7 a person's sessions and step-ups held to a day's 
     // Counted once the other committed: two kept, so refused.
     expect(await settled).toBe('spent');
     expect(await sessionsOf(first.userId)).toHaveLength(2);
+  });
+
+  it('two step-ups racing for the day’s last place: one completes, the other is refused, nothing rotated for it (ADR-006 §6)', async () => {
+    const one = capped({ mostStepUps: 1 });
+    const done = await signedIn(one);
+    client.proves = FRESH;
+    const begun = async (n: number) => {
+      const challenge = await challenges.open(app, {
+        sessionId: done.sessionId,
+        action: 'members.invite',
+        changeHash: CHANGE(n),
+      });
+      if (challenge === undefined) throw new Error('no challenge');
+      const { url, flowId } = await one.beginStepUp(done.sessionId, challenge.challengeId, '/members/confirm');
+      return { flowId, state: new URL(url).searchParams.get('state') ?? '' };
+    };
+    // Both begun under the cap, then both come back at once while the person's lock is held elsewhere: each waits on it.
+    const [first, second] = [await begun(1), await begun(2)];
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+      lockName(PERSON_CHAIN_LOCK, done.userId),
+    ]);
+    const outcome = (flow: { flowId: string; state: string }) =>
+      within(20_000, one.complete({ ...flow, code: 'a-code', previousCookie: done.cookie }), 'the step-up').then(
+        () => 'stepped',
+        (error: unknown) => (error instanceof StepUpFailed ? error.failure : 'other'),
+      );
+    const racing = Promise.all([outcome(first), outcome(second)]);
+    await waitUntilQueued(database.as('admin'), 2);
+    await holder.query('commit');
+    await holder.end();
+
+    // One took the last place; the other, counting after it committed, was refused.
+    expect((await racing).toSorted()).toEqual(['step_ups_spent', 'stepped']);
+    const rotations = await (app as unknown as Kysely<PlatformControlsTables>)
+      .selectFrom('platform_controls.audit_events')
+      .select('details')
+      .where('action', '=', SESSION_ROTATED)
+      .execute();
+    expect(rotations.filter(({ details }) => details.includes(done.sessionId))).toHaveLength(1);
   });
 
   it('counts the sessions kept only from the last 24 hours of the app’s clock', async () => {

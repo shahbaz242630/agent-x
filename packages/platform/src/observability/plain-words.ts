@@ -531,13 +531,13 @@ export const PLAIN_WORDS = {
   'auth.person_sessions_spent': {
     happened: 'One person signed in more than a hundred times in a day, so this sign-in was refused.',
     broke: 'Only that person waits; sessions they hold go on, and everyone else signs in as usual.',
-    next: 'Someone may be signing in over and over to fill the shared audit chain: find who.',
+    next: 'Find the person by the ID on this line and ask them; if it was not them, end their sessions and reset their sign-in.',
   },
   'auth.person_step_ups_spent': {
     happened:
       'One person confirmed more than two hundred changes by signing in again in a day, so this one was refused.',
     broke: "Only that person's change waits; they stay signed in, and everyone else carries on.",
-    next: 'A busy approver may need more; else someone may be filling the shared audit chain: find who.',
+    next: 'Find the person by the ID on this line and ask them; a busy approver may need more, else end their sessions.',
   },
   'auth.sign_ins_gave_way': {
     happened:
