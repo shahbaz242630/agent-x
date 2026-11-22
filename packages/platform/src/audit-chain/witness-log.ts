@@ -116,7 +116,7 @@
 //      If that copy led the jobs, wait for the new leader's first snapshot before adding copies: it writes one at its
 //      first flush after a whole read once it holds any head, never while its reads fail (TR-7 D2), so not always
 //      within the hour; check for a new name under snapshots/. Until then a start passes over the old leader's and
-//      reads heads files back a day at most (TR-7 D3, `audit.witness_read_back_capped`): what is older, step 5 covers.
+//      reads heads files back a day at most (TR-7 D3, the alarm `read_back_capped`): what is older, step 5 covers.
 //   5. Rebase each chain held (chain-rebase). A writer with new IDs each file (no `audit.witness_writer` line for
 //      them) can't be set aside by ID: restart every copy and rotate the `audit-anchor` key before rebasing.
 import { randomBytes } from 'node:crypto';
@@ -318,7 +318,7 @@ const MOST_SPOILED_SNAPSHOTS = 24;
 
 /**
  * How far back a start goes past a set-aside writer's snapshots (TR-7 D3): a day, as with none sound. Older state is not
- * read again: said (`audit.witness_read_back_capped`), and the operator rebases the chains held (playbook H, step 5).
+ * read again: the alarm (`read_back_capped`), and the operator rebases the chains held (playbook H, step 5).
  */
 const SET_ASIDE_READ_BACK_MS = NO_SNAPSHOT_READ_BACK_MS;
 
@@ -1422,15 +1422,20 @@ export function createWitnessLog({
   const readSetAside = async (began: number, since: number | undefined): Promise<void> => {
     const at = folder('set-aside');
     const { waiting, misdated } = await setAsideNames(at, since);
-    // A start's reach so far (setAsideDownTo), and where its next pass looks back to if this one stops short.
+    // A start's reach so far (setAsideDownTo).
     if (since !== undefined && state === 'unread') setAsideFloor = Math.min(setAsideFloor ?? since, since);
+    // A start fetches every one (TR-7 review): a snapshot it takes, or a heads file it reads, must never be one a
+    // set-aside it left unfetched passes over, and a flood ahead of the real one would leave it so. Each is at most
+    // MOST_SET_ASIDE_BYTES, within the start's own look back; later passes take at most MOST_SET_ASIDE_READS.
+    const most = state === 'unread' || since === undefined ? waiting.length : MOST_SET_ASIDE_READS;
     // Listed newest first.
-    for (const file of waiting.toReversed().slice(0, MOST_SET_ASIDE_READS)) {
+    for (const file of waiting.toReversed().slice(0, most)) {
       await readSetAsideFile(at, file);
       setAsideRead.add(file.name);
     }
     if (misdated > 0) alarm('set_aside_misdated', { folder: at, files: misdated });
-    if (waiting.length <= MOST_SET_ASIDE_READS) setAsideWhole(began);
+    // With no `since` (the operator's whole folder), every one was fetched.
+    if (waiting.length <= most || since === undefined) setAsideWhole(began);
     else setAsideShort(began, at, since);
     if (setAside.has(writer)) ownSetAside();
   };
@@ -1463,11 +1468,9 @@ export function createWitnessLog({
   };
 
   /** A set-aside pass stopped short: the next looks back as far as this one did, and the flood is said. */
-  const setAsideShort = (began: number, at: string, since: number | undefined): void => {
-    if (since !== undefined) {
-      setAsideFrom = undefined;
-      setAsideFloor = since;
-    }
+  const setAsideShort = (began: number, at: string, since: number): void => {
+    setAsideFrom = undefined;
+    setAsideFloor = since;
     floodSaid(began, at);
   };
 
@@ -1508,15 +1511,32 @@ export function createWitnessLog({
    * further back than a day, nor past a day's of them, as a long-lived leader's would otherwise have a start read
    * months of heads files before it reads at all.
    */
-  const pastSetAsideReach = (
-    at: number,
-    kind: 'aside' | 'late' | undefined,
-    asideSoFar: number,
+  const pastSetAsideReach = (at: number, asideSoFar: number, began: number): boolean =>
+    at < began - SET_ASIDE_READ_BACK_MS || asideSoFar >= MOST_SET_ASIDE_SNAPSHOTS;
+
+  /**
+   * Where a start reads heads files back from (TR-7 D3): a snapshot's time less the lag; with none, a day back (and to
+   * the oldest set-aside one passed over, itself within a day). Once a set-aside writer's snapshots were passed over,
+   * never past a day back: an honest older snapshot found under them is still taken whole, its state complete, but the
+   * heads files named between it and a day back are not read, which is the alarm (SEV-1: a stop among them is not held
+   * here until the chains are rebased, playbook H step 5), as is a walk stopped at a day's set-aside snapshots.
+   */
+  const startReadBack = (
+    snapshot: { readonly at?: number | undefined; readonly asideFrom?: number | undefined; readonly capped: boolean },
     began: number,
-  ): boolean => {
-    const old = at < began - SET_ASIDE_READ_BACK_MS;
-    if (kind === 'aside') return old || asideSoFar >= MOST_SET_ASIDE_SNAPSHOTS;
-    return old && asideSoFar > 0;
+  ): number => {
+    const readBack = began - SET_ASIDE_READ_BACK_MS;
+    const passedAside = snapshot.asideFrom !== undefined || snapshot.capped;
+    let from = Math.min(began - NO_SNAPSHOT_READ_BACK_MS, (snapshot.asideFrom ?? Infinity) - LAG_MS);
+    if (snapshot.at !== undefined) from = passedAside ? Math.max(snapshot.at - LAG_MS, readBack) : snapshot.at - LAG_MS;
+    if (snapshot.capped || (passedAside && snapshot.at !== undefined && snapshot.at - LAG_MS < readBack)) {
+      alarm('read_back_capped', {
+        folder: 'snapshots',
+        snapshotAt: snapshot.at === undefined ? undefined : new Date(snapshot.at).toISOString(),
+        readBackFrom: new Date(from).toISOString(),
+      });
+    }
+    return from;
   };
 
   /**
@@ -1529,8 +1549,12 @@ export function createWitnessLog({
   const readSnapshot = async (
     gained: Set<string>,
     began: number,
-  ): Promise<{ readonly at?: number | undefined; readonly asideFrom?: number | undefined }> => {
-    if (snapshots === undefined) return {};
+  ): Promise<{
+    readonly at?: number | undefined;
+    readonly asideFrom?: number | undefined;
+    readonly capped: boolean;
+  }> => {
+    if (snapshots === undefined) return { capped: false };
     let spoiled = 0;
     const aside = { count: 0, from: undefined as number | undefined, writers: new Set<string>() };
     let found: number | undefined;
@@ -1538,11 +1562,11 @@ export function createWitnessLog({
     for await (const file of namesOf(snapshots, folder('snapshots'))) {
       await setAsideDownTo(file.at, began);
       const kind = asideOf(file);
-      if (pastSetAsideReach(file.at, kind, aside.count, began)) {
-        capped = true;
-        break;
-      }
       if (kind === 'aside') {
+        if (pastSetAsideReach(file.at, aside.count, began)) {
+          capped = true;
+          break;
+        }
         aside.count += 1;
         aside.from = file.at;
         aside.writers.add(writerOfName(file.name));
@@ -1559,13 +1583,7 @@ export function createWitnessLog({
       if (spoiled >= MOST_SPOILED_SNAPSHOTS) break;
     }
     if (aside.count > 0) alarm('set_aside', { writers: [...aside.writers], folder: 'snapshots', files: aside.count });
-    if (capped) {
-      logger.error('audit.witness_read_back_capped', {
-        setAsideSnapshots: aside.count,
-        readBackFrom: new Date(began - SET_ASIDE_READ_BACK_MS).toISOString(),
-      });
-    }
-    return { at: found, asideFrom: aside.from };
+    return { at: found, asideFrom: aside.from, capped };
   };
 
   /** A snapshot's mark of heads let go for memory, kept as the higher of what is held and what it says. */
@@ -1639,8 +1657,7 @@ export function createWitnessLog({
       } else {
         const snapshot = await readSnapshot(gained, began.getTime());
         if (snapshot.at !== undefined) lastSnapshotAt = snapshot.at;
-        const dayBack = Math.min(began.getTime() - NO_SNAPSHOT_READ_BACK_MS, (snapshot.asideFrom ?? Infinity) - LAG_MS);
-        newest = await readHeads(snapshot.at === undefined ? dayBack : snapshot.at - LAG_MS, gained);
+        newest = await readHeads(startReadBack(snapshot, began.getTime()), gained);
         state = 'read';
       }
       // Ended whole: only now does the next pass look back from here.
