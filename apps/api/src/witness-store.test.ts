@@ -165,7 +165,9 @@ describe('TR-1 the witness log’s job', () => {
     expect(Math.floor(witnessMostBytes(300, heap) / WITNESS_HEAD_BYTES)).toBeGreaterThanOrEqual(burst);
     expect(witnessMostBytes(300, 64 * 1024 * 1024)).toBe(Math.floor(6.4 * 1024 * 1024));
     expect(witnessMostBytes(1, 4 * 1024 * 1024 * 1024)).toBe(Math.floor(4 * 1024 * 1024 * 1024 * 0.005));
-    // The burst itself, one organisation's, into a log of that size: none let go.
+    // The burst itself, one organisation's, into a log of that size: none let go. Noted from its top down, each at the
+    // list's end (highest first): the same count against the same cap, without ~100k inserts at the front, quadratic,
+    // which ran past 5 s on a loaded CI runner (TR-21, S211). The insert's own cost at production load is TR-8's.
     const log = createWitnessLog({
       store: createFakeWriteOnceStore().store,
       keys,
@@ -175,7 +177,7 @@ describe('TR-1 the witness log’s job', () => {
       alertAfterMs: 1,
       mostBytes: witnessMostBytes(300, heap),
     });
-    for (let seq = 1; seq <= burst; seq += 1) log.soon(CHAIN, { seq: BigInt(seq), hash: Buffer.alloc(32, seq % 256) });
+    for (let seq = burst; seq >= 1; seq -= 1) log.soon(CHAIN, { seq: BigInt(seq), hash: Buffer.alloc(32, seq % 256) });
     expect(log.beyondMemory(CHAIN)).toBe(false);
     expect(log.pending(CHAIN, 1)[0]?.seq).toBe(BigInt(burst));
   });

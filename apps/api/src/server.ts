@@ -410,16 +410,6 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // Again for the work after the answer (the activity row): when pipelined answers queue on a connection, Node finishes
   // one from inside the one before, so its hooks would run as that other request's. api-sockets.test.ts proves it.
   app.addHook('onResponse', inRequestScope);
-  // The login service's public host (SA1): a plain 404, before any other hook or route can answer. The Host as it
-  // reached the server, never X-Forwarded-Host, which the client writes.
-  app.addHook('onRequest', (request, reply, done) => {
-    if (!onLoginHost(request.headers.host)) {
-      done();
-      return;
-    }
-    void reply.headers(SECURITY_HEADERS).header(CORRELATION_HEADER, request.id);
-    void sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
-  });
   // First, so no route escapes it.
   await registerContract(app);
   // Right after it, so every route is recorded as the contract left it: each MCP tool reads its twin there (6E2).
@@ -446,6 +436,16 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
   // Every request is counted, 404s and refusals included, before anything else can refuse it.
   app.addHook('onRequest', countRequest);
+  // The login service's public host (SA1): a plain 404, before any other hook or route can answer but the count
+  // above (Shannon p6 MISC-01: ahead of it, a flood naming this host went uncounted). The Host as it reached the
+  // server, never X-Forwarded-Host, which the client writes.
+  app.addHook('onRequest', (request, reply, done) => {
+    if (!onLoginHost(request.headers.host)) {
+      done();
+      return;
+    }
+    void sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+  });
   // done() only for a request let through, as in access.ts: a refusal the client
   // hangs up on must not go on to the route.
   app.addHook('onRequest', (request, reply, done) => {
