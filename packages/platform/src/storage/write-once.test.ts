@@ -406,6 +406,77 @@ describe('SEC-ANC-01 4D2e E3 the write-once store on Azure', () => {
     expect(page).toEqual({ names: ['e1/deltas/1'], foreign: 1, next: undefined });
   });
 
+  it('gives each file’s landing by the store’s clock, as its Properties say it (TR-12); none where they don’t', async () => {
+    const page = await answering(
+      '<EnumerationResults><Blobs>' +
+        '<Blob><Name>e1/heads/1</Name><Properties><Creation-Time>Fri, 20 Nov 2026 09:00:00 GMT</Creation-Time><Last-Modified>Fri, 20 Nov 2026 09:00:01 GMT</Last-Modified></Properties></Blob>' +
+        '<Blob><Name>e1/heads/2</Name><Properties><Last-Modified>Fri, 20 Nov 2026 09:05:00 GMT</Last-Modified></Properties></Blob>' +
+        '<Blob><Name>e1/heads/3</Name><Properties><Creation-Time>not a time</Creation-Time></Properties></Blob>' +
+        '<Blob><Name>../odd</Name><Properties><Creation-Time>Fri, 20 Nov 2026 09:00:00 GMT</Creation-Time></Properties></Blob>' +
+        '</Blobs><NextMarker /></EnumerationResults>',
+    ).list('e1/', 10);
+
+    expect(page.names).toEqual(['e1/heads/1', 'e1/heads/2', 'e1/heads/3']);
+    expect(page.created).toEqual(
+      new Map([
+        ['e1/heads/1', Date.parse('2026-11-20T09:00:00Z')],
+        ['e1/heads/2', Date.parse('2026-11-20T09:05:00Z')],
+      ]),
+    );
+  });
+
+  it('keeps the service’s Date from its latest answer that gave one, for a writer to name files by (TR-12)', async () => {
+    const dates = ['Fri, 20 Nov 2026 09:00:00 GMT', 'not a date', 'Fri, 20 Nov 2026 09:20:00 GMT'];
+    const store = azureWriteOnceStore({
+      settings: SETTINGS,
+      fetch: (url) =>
+        Promise.resolve(
+          new URL(url).origin === 'http://localhost:42356'
+            ? Response.json({ access_token: ISSUED })
+            : new Response('<EnumerationResults><Blobs /><NextMarker /></EnumerationResults>', {
+                headers: { date: dates.shift() ?? '' },
+              }),
+        ),
+    });
+    expect(store.serverTime?.()).toBeUndefined();
+    await store.list('e1/', 10);
+    expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:00:00Z'));
+    // One with no readable Date leaves the last.
+    await store.list('e1/', 10);
+    expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:00:00Z'));
+    await store.list('e1/', 10);
+    expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:20:00Z'));
+  });
+
+  it('never takes its Date back when an older answer of overlapping calls is handled last (TR-12)', async () => {
+    const answers: ((date: string) => void)[] = [];
+    const store = azureWriteOnceStore({
+      settings: SETTINGS,
+      fetch: (url) =>
+        new URL(url).origin === 'http://localhost:42356'
+          ? Promise.resolve(Response.json({ access_token: ISSUED }))
+          : new Promise((resolve) => {
+              answers.push((date) => {
+                resolve(
+                  new Response('<EnumerationResults><Blobs /><NextMarker /></EnumerationResults>', {
+                    headers: { date },
+                  }),
+                );
+              });
+            }),
+    });
+    const older = store.list('e1/', 10);
+    const newer = store.list('e1/', 10);
+    await vi.waitFor(() => {
+      expect(answers).toHaveLength(2);
+    });
+    answers[1]?.('Fri, 20 Nov 2026 09:05:00 GMT');
+    await newer;
+    answers[0]?.('Fri, 20 Nov 2026 09:00:00 GMT');
+    await older;
+    expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:05:00Z'));
+  });
+
   it('refuses a continuation of another form rather than send it on', async () => {
     await expect(
       answering('<EnumerationResults><NextMarker>a&amp;b</NextMarker></EnumerationResults>').list('e1/', 10),

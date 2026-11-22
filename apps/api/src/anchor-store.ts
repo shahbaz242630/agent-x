@@ -157,7 +157,7 @@ function keptIn(
     forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
     // No session is used longer than this past its sign-in (AT13g): so its signed ends needn't be kept past it.
     forgetSessionEndsAfterMs: LONGEST_ABSOLUTE_SECONDS * 1000,
-    witnessed: witness && ((chain, most) => witness.heldTo(chain, most)),
+    witnessed: witness && ((chain, most) => witness.witnessed(chain, most)),
   });
   kept.digest = digest;
   // The witness log sets a head aside by the rebases the log read, and lets it go once anchored past (TR-1).

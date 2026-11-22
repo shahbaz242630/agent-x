@@ -53,6 +53,11 @@ export interface WriteOncePage {
   readonly foreign: number;
   /** What to give the next call to go on; none at the end. */
   readonly next: string | undefined;
+  /**
+   * When each listed file landed, by the store's own clock (Azure's Creation-Time), where the store says: never the
+   * writer's clock, which a file's name carries (TR-12). Left out where the store keeps none.
+   */
+  readonly created?: ReadonlyMap<string, number>;
 }
 
 export interface WriteOnceStore {
@@ -68,6 +73,12 @@ export interface WriteOnceStore {
    * the add token could make huge, or put beyond a plain read (PL-65): never a failure of the store for that alone.
    */
   getAtMost(name: string, mostBytes: number): Promise<Buffer | 'missing' | 'too-large' | 'unreadable'>;
+  /**
+   * The latest of the service's own times it has answered with (Azure's `Date` header, over TLS), where it gives one
+   * (TR-12): read after a call, never earlier than that call's. A writer names its files by it, so its own clock being
+   * off hides none. None from a store with no service.
+   */
+  readonly serverTime?: () => number | undefined;
 }
 
 /** A body read only as far as `mostBytes`: past it, the rest is never fetched, and it is `too-large`. */
@@ -143,13 +154,32 @@ function pageIn(xml: string): WriteOncePage {
   if (!/<EnumerationResults[\s>]/.test(xml) || !xml.includes('</EnumerationResults>')) {
     throw new BlobStoreFailed(STORE, 'the blob service answered a list with something that is not a whole list');
   }
-  const listed = [...xml.matchAll(/<Blob>\s*<Name>([^<]*)<\/Name>/g)].map((match) => match[1] ?? '');
+  // Each blob as its name and what follows it up to the next blob: its Properties.
+  const blobs = xml
+    .split('<Blob>')
+    .slice(1)
+    .flatMap((part) => {
+      const name = /^\s*<Name>([^<]*)<\/Name>/.exec(part)?.[1];
+      return name === undefined ? [] : [{ name, part }];
+    });
+  const listed = blobs.map(({ name }) => name);
   const names = listed.filter(isBlobName);
+  // Each file's landing, as its Properties give it (Creation-Time; Last-Modified is the same for a file never changed).
+  const created = new Map<string, number>();
+  for (const { name, part } of blobs) {
+    const at = Date.parse(/<(Creation-Time|Last-Modified)>([^<]*)<\/\1>/.exec(part)?.[2] ?? '');
+    if (isBlobName(name) && Number.isFinite(at)) created.set(name, at);
+  }
   const marker = /<NextMarker>([^<]*)<\/NextMarker>/.exec(xml)?.[1] ?? '';
   if (marker !== '' && !MARKER.test(marker)) {
     throw new BlobStoreFailed(STORE, 'the blob service answered a list with a continuation of another form');
   }
-  return { names, foreign: listed.length - names.length, next: marker === '' ? undefined : marker };
+  return {
+    names,
+    foreign: listed.length - names.length,
+    next: marker === '' ? undefined : marker,
+    ...(created.size > 0 ? { created } : {}),
+  };
 }
 
 export function azureWriteOnceStore({
@@ -162,13 +192,22 @@ export function azureWriteOnceStore({
   /** The clock a kept token is timed by. */
   readonly now?: () => number;
 }): WriteOnceStore {
-  const call = blobServiceCaller({
+  const caller = blobServiceCaller({
     settings,
     fetch,
     store: STORE,
     timeoutMs: CALL_TIMEOUT_MS,
     ...(now === undefined ? {} : { now }),
   });
+  // The latest `Date` the service has answered with (serverTime): calls overlap, so an older answer handled last never
+  // takes it back, and a caller reading it after its own call gets that call's Date or a later one, never an earlier.
+  let serverAt: number | undefined;
+  const call: typeof caller = async (path, init) => {
+    const response = await caller(path, init);
+    const said = Date.parse(response.headers.get('date') ?? '');
+    if (Number.isFinite(said)) serverAt = Math.max(serverAt ?? said, said);
+    return response;
+  };
 
   /** An answer other than `expected` as the failure it is: nothing of it read but its status and code. */
   const failed = async (response: Response): Promise<BlobStoreFailed> => {
@@ -180,6 +219,8 @@ export function azureWriteOnceStore({
   };
 
   return {
+    serverTime: () => serverAt,
+
     async put(name, bytes) {
       const response = await call(`/${checkedBlobName(name)}`, {
         method: 'PUT',

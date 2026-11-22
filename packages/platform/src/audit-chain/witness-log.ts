@@ -22,7 +22,8 @@
 // key could otherwise date heads in 2099, which no rebase would ever set aside).
 //
 // Writing (group commit): a `now` head (a stop, an approval, every class but the decision path's: witness-class.ts) is
-// written at once, at most one Put in flight a process, each taking every head waiting; `now` resolves once a Put holding
+// written at once, at most one Put in flight a process, each taking every head waiting, `now` ones first (TR-11: a stop
+// never queues behind a backlog of decisions, which still fill what a file has left); `now` resolves once a Put holding
 // it succeeded. A `soon` head (an agent's decision) waits for the next flush, every few seconds while any waits, and at
 // a stop. A Put that fails is tried again, backing off; a `now` waiter gives up after `waitMs` (`WitnessUnconfirmed`,
 // the request answered 503), but its head stays queued, and every later wait for that chain on this process waits for
@@ -35,6 +36,15 @@
 // snapshot first (passing over at most a day's spoiled ones), then every heads file since, less the same; with no sound
 // snapshot, a day of heads files back (a head older than that above its chain's anchor means the anchor check has been
 // stalled a day, its own alarm).
+//
+// Clocks (TR-12): a name carries its writer's clock, and readers look back only minutes, so a copy whose clock ran slow
+// would name its files behind every look back (never read), and one running fast past every name a reader takes. So
+// every time this log names or dates goes by the store's: each Put and list sets an offset from the service's `Date` on
+// its answer (Azure's, over TLS), the first file waiting on a list for it: none within a minute of it (an honest clock
+// dates as it always did), else set late, never early (a head dated early could fall before a rebase it came after). An honest copy with a wrong clock lands in
+// every reader's next pass, however far off. More than the clocks' spread off is said (`audit.witness_clock_skew`, the
+// alarm `clock_skew`): this copy's offset, or a file read whose name is that far from when the store says it landed
+// (its Creation-Time), a copy the store's time didn't set. A line is never dated past its own file's name.
 //
 // Held: every head read or noted (`pending`, a list per chain, never only the highest: a stale copy's head on a cut
 // branch must not bury the honest one below it), set aside by a rebase dated after it. Let go only once confirmed on the
@@ -74,7 +84,10 @@ import { COMPACT_HASH_BYTES } from './digest-log.ts';
 import { timeIn } from './rebase.ts';
 import { bodyLines, fileName, type FileKind, isSoundFile, namesIn, signedFile, timeOfName } from './signed-files.ts';
 
-/** A head a copy wrote, as witnessed: its place, its event's hash, and when it was noted (the writer's clock). */
+/**
+ * A head a copy wrote, as witnessed: its place, its event's hash, and when it was noted, by the store's clock as its
+ * writer kept it (TR-12: the clock file names go by, never to be set against this process's own).
+ */
 export interface WitnessedHead {
   readonly seq: bigint;
   readonly hash: Buffer;
@@ -113,6 +126,11 @@ export interface WitnessAnchors {
 }
 
 export interface WitnessLog extends ChainWitness {
+  /**
+   * heldTo, each head's time (compact ones' too) on this process's own clock (TR-12): for setting against a time it took
+   * itself (the digest's accepts), where heldTo's are the store's clock, as file names go.
+   */
+  witnessed(chain: Chain, most?: number): readonly WitnessedHead[];
   /** note(chain, head, 'now') and a wait for it (settled): for a writer outside the API's requests, the operator's. */
   now(chain: Chain, head: { readonly seq: bigint; readonly hash: Buffer }): Promise<void>;
   /** note(chain, head, 'soon'). */
@@ -139,7 +157,10 @@ export interface WitnessLog extends ChainWitness {
    * past the wait (TR-1, plan §1.4 #2: hand-offs wait while the store takes no writes, rather than commit and be held).
    */
   writesSound(): boolean;
-  /** When the last refresh that ended whole began: none before one has. */
+  /**
+   * When the last refresh that ended whole began, none before one has: by this process's own clock (the `now` it was
+   * given), as its callers compare it with theirs (TR-12: never the store's clock, which names the files).
+   */
   freshAt(): Date | undefined;
   /** Those heads let go: each confirmed on the chain (the anchor check's walk passed through it, or its probe read it). */
   prune(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void;
@@ -206,6 +227,15 @@ const MOST_AHEAD_MS = 5 * 60_000;
 /** How far before the newest file read a later read looks again: a file named earlier may land later. */
 const LAG_MS = MOST_AHEAD_MS;
 
+/** How finely Azure's Date tells the store's time: whole seconds, rounded down. */
+const DATE_STEP_MS = 1000;
+
+/** How near the store's Date a clock is left as it stands (TR-12): an NTP-synced one always, so it dates as before. */
+const RIGHT_ENOUGH_MS = 60_000;
+
+/** The most names a list call asks of the heads' folders: Azure's most, one call where a hundred names took one each. */
+const LIST_PAGE = 5000;
+
 /** How far back a start with no sound snapshot reads heads files: a day, far past any anchor's turn. */
 const NO_SNAPSHOT_READ_BACK_MS = 24 * 60 * 60_000;
 
@@ -238,6 +268,9 @@ const MOST_WRITTEN_REMEMBERED = 10_000;
 
 /** The most lines one heads file carries: more wait for the next Put. */
 const MOST_LINES_A_FILE = 10_000;
+
+/** The lines of a file kept for `soon` heads where any wait, however many `now` heads do (TR-11): a tenth. */
+const SOON_RESERVED = MOST_LINES_A_FILE / 10;
 
 /** The most a heads file or snapshot may hold to be fetched. */
 const MOST_FILE_BYTES = 64 * 1024 * 1024;
@@ -398,6 +431,13 @@ const lostText = (chain: string, { seq, low, at }: LostMark): string =>
 const compactText = (chain: string, field: 'x' | 'r', { seq, hash, at }: Compact): string =>
   JSON.stringify({ c: chain, s: seq.toString(), [field]: hash.toString('hex'), t: new Date(at).toISOString() });
 
+/**
+ * A line's time held to its file's (TR-12): a head noted before this copy first heard the store's time, by a clock
+ * running fast, would otherwise be dated past the file it goes in, which spoils it.
+ */
+const datedBy = <T extends { readonly at: number }>(one: T, fileAt: number): T =>
+  one.at > fileAt ? { ...one, at: fileAt } : one;
+
 const lineText = (chain: string, { seq, hash, at }: WitnessedHead): string =>
   JSON.stringify({ c: chain, s: seq.toString(), h: hash.toString('hex'), t: new Date(at).toISOString() });
 
@@ -430,7 +470,8 @@ interface Refreshed {
 /** A head noted here, waiting for its Put. */
 interface Queued {
   readonly chain: string;
-  readonly head: WitnessedHead;
+  /** Its time re-dated by the store's clock once that is first known, where noted before (TR-12). */
+  readonly head: { readonly seq: bigint; readonly hash: Buffer; at: number };
   readonly klass: WitnessClass;
   readonly confirmed: Promise<void>;
   readonly done: () => void;
@@ -441,7 +482,7 @@ export function createWitnessLog({
   snapshots,
   keys,
   logger,
-  now,
+  now: localNow,
   epoch,
   signer = 'app',
   writes,
@@ -499,6 +540,8 @@ export function createWitnessLog({
 
   // Heads waiting for their Put, and each chain's `now` heads not yet written.
   let queue: Queued[] = [];
+  // The heads of the Put in flight, out of the queue (redate reaches them too).
+  let inFlight: readonly Queued[] = [];
   const unconfirmed = new Map<string, Set<Queued>>();
   let writing: Promise<void> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -527,6 +570,85 @@ export function createWitnessLog({
 
   const alarm = (reason: string, more: Record<string, unknown>): void => {
     logger.error('audit.integrity_failed', { chain: 'store', check: 'witness_store', reason, ...more });
+  };
+
+  // This copy's clock as the store's (TR-12): how far the store's Date was from the local clock on its latest answer,
+  // whether one was asked yet, and when a clock far off was last said.
+  let offset = 0;
+  let clockAsked = false;
+  let offsetKnown = false;
+  // The least offset worked out since this clock was last left as it stands: each is never below the true one, so the
+  // least is the nearest (witnessed: a time read from a file put on this clock).
+  let leastOffset = 0;
+  // Each head noted here, by this clock as noted (witnessed gives it back as such, whatever the offset since).
+  const notedHere = new WeakMap<object, number>();
+  let skewSaidAt: number | undefined;
+  /** Every time this log names or dates: the local clock set by the store's (the header). */
+  const nowMs = (): number => localNow().getTime() + offset;
+  const now = (): Date => new Date(nowMs());
+
+  /** A clock more than the clocks' spread off the store's, said and the alarm, at most once a SAY_EVERY_MS. */
+  const skewed = (fields: Record<string, unknown>): void => {
+    const said = now().getTime();
+    if (skewSaidAt !== undefined && said - skewSaidAt < SAY_EVERY_MS) return;
+    skewSaidAt = said;
+    logger.error('audit.witness_clock_skew', fields);
+    alarm('clock_skew', fields);
+  };
+
+  /**
+   * The store's Date on the answer to a call sent at `sent` (this clock), where it gives one: this copy's clock set by
+   * it, and said if far off. Within RIGHT_ENOUGH_MS of it, left as it stands: an honest clock dates as before TR-12.
+   */
+  const heard = (sent: number): void => {
+    const at = store.serverTime?.();
+    if (at === undefined) return;
+    // Else set late, never early (a head dated early could fall before a rebase it came after): the store stamped its
+    // Date after the call left, at a true time below at + DATE_STEP_MS (whole seconds, rounded down), so the true
+    // offset at `sent` is below at + DATE_STEP_MS - sent; this one is never less, and later by at most the trip and 1 s.
+    offset = Math.abs(localNow().getTime() - at) <= RIGHT_ENOUGH_MS ? 0 : at + DATE_STEP_MS - sent;
+    leastOffset = offset === 0 || leastOffset === 0 ? offset : Math.min(leastOffset, offset);
+    clockAsked = true;
+    if (!offsetKnown) {
+      offsetKnown = true;
+      redate();
+    }
+    if (Math.abs(offset) > MOST_AHEAD_MS) skewed({ offsetMs: offset });
+  };
+
+  /**
+   * Every head waiting, each noted before the store's time was first known, dated as noted by the store's clock now it
+   * is (TR-12): so a Put failing after, or a snapshot, never carries the local clock's time.
+   */
+  const redate = (): void => {
+    for (const { head } of [...queue, ...inFlight]) head.at += offset;
+  };
+
+  /**
+   * The store's time asked where it gives one and none was heard yet: before this copy's first file, so even that one is
+   * named by it, and before its first read, so the snapshots' names are judged by it too (TR-12). Throws as a list does.
+   */
+  const askClock = async (): Promise<void> => {
+    if (clockAsked || store.serverTime === undefined) return;
+    await timed.list(ownFolder, 1);
+    clockAsked = true;
+  };
+
+  /** The heads' store, each Put and list setting this copy's clock by the store's answer. */
+  const timed: WriteOnceStore = {
+    async put(name, bytes) {
+      const sent = localNow().getTime();
+      await store.put(name, bytes);
+      heard(sent);
+    },
+    async list(start, most, after) {
+      const sent = localNow().getTime();
+      const page = await store.list(start, most, after);
+      heard(sent);
+      return page;
+    },
+    get: (name) => store.get(name),
+    getAtMost: (name, most) => store.getAtMost(name, most),
   };
 
   /** A failed read or write: a warning, and past `alertAfterMs` of failing, the alert. */
@@ -791,17 +913,36 @@ export function createWitnessLog({
       timer.unref();
     });
     try {
-      await Promise.race([store.put(name, bytes), late]);
+      await Promise.race([timed.put(name, bytes), late]);
     } finally {
       clearTimeout(timer);
     }
   };
 
-  /** The queue's first file's worth written: whether it was. Taken back into the queue where it wasn't. */
+  /**
+   * The next file's heads, taken from the queue (TR-11): every `now` head first, so a stop never waits behind a backlog
+   * of decisions, then `soon` ones to fill it; past a file's worth of `now` heads, SOON_RESERVED lines still go to `soon`
+   * ones, so neither class waits for good.
+   */
+  const nextFile = (): Queued[] => {
+    const nowHeads: Queued[] = [];
+    const soonHeads: Queued[] = [];
+    for (const queued of queue) (queued.klass === 'now' ? nowHeads : soonHeads).push(queued);
+    const nowTaken = nowHeads.slice(0, MOST_LINES_A_FILE - Math.min(soonHeads.length, SOON_RESERVED));
+    const taking = [...nowTaken, ...soonHeads.slice(0, MOST_LINES_A_FILE - nowTaken.length)];
+    const taken = new Set(taking);
+    queue = queue.filter((queued) => !taken.has(queued));
+    return taking;
+  };
+
+  /** The next file's worth written: whether it was. Taken back into the queue where it wasn't. */
   const writeOnce = async (): Promise<boolean> => {
-    const taking = queue.slice(0, MOST_LINES_A_FILE);
-    queue = queue.slice(taking.length);
+    let taking: Queued[] = [];
     try {
+      // The store's time first, so heads noted before it are re-dated while still in the queue.
+      await askClock();
+      taking = nextFile();
+      inFlight = taking;
       const at = now().getTime();
       const name = fileName(ownFolder, at);
       const bytes = await signedFile(
@@ -809,7 +950,7 @@ export function createWitnessLog({
         ownKind,
         name,
         epoch,
-        taking.map(({ chain, head }) => lineText(chain, head)),
+        taking.map(({ chain, head }) => lineText(chain, datedBy(head, at))),
       );
       await putWithin(name, bytes);
       namesRead.add(name);
@@ -830,6 +971,8 @@ export function createWitnessLog({
       lastFailedAt = now().getTime();
       failed('write', error);
       return false;
+    } finally {
+      inFlight = [];
     }
   };
 
@@ -880,7 +1023,13 @@ export function createWitnessLog({
     const name = nameOf(chain);
     // Written by this process already (a replay's kept head): outside the database, nothing to wait for.
     if (writtenHere.has(writtenKey(name, { seq, hash }))) return;
-    const head: WitnessedHead = { seq, hash: Buffer.from(hash), at: now().getTime() };
+    // Kept as given, its time set once its file is named where the store's time wasn't known yet.
+    const head: { readonly seq: bigint; readonly hash: Buffer; at: number } = {
+      seq,
+      hash: Buffer.from(hash),
+      at: nowMs(),
+    };
+    notedHere.set(head, localNow().getTime());
     keep(name, head);
     let done = (): void => undefined;
     const confirmed = new Promise<void>((resolve) => {
@@ -973,7 +1122,25 @@ export function createWitnessLog({
       (fileAt) => {
         alarm('future', { folder: at, fileAt: new Date(fileAt).toISOString() });
       },
+      LIST_PAGE,
     );
+
+  /**
+   * A file read whose name is further than the clocks' spread from when the store says it landed (TR-12): a copy naming
+   * files by a clock the store's time didn't set (an older build, or one whose store gave no time), said.
+   */
+  const judgeLanding = (
+    at: string,
+    { at: fileAt, created }: { readonly at: number; readonly created: number | undefined },
+  ): void => {
+    if (created === undefined || Math.abs(fileAt - created) <= MOST_AHEAD_MS) return;
+    skewed({
+      folder: at,
+      fileAt: new Date(fileAt).toISOString(),
+      landedAt: new Date(created).toISOString(),
+      skewMs: fileAt - created,
+    });
+  };
 
   /** The newest sound snapshot taken in, and its time; none with no snapshots' store, or none sound a day back. */
   const readSnapshot = async (gained: Set<string>): Promise<number | undefined> => {
@@ -1014,12 +1181,13 @@ export function createWitnessLog({
       [folder('heads'), HEADS_FILE],
       [folder('operator'), OPERATOR_FILE],
     ] as const) {
-      for await (const file of namesOf(store, at)) {
+      for await (const file of namesOf(timed, at)) {
         if (file.at < since) break;
         if (namesRead.has(file.name)) continue;
         if (!(await takeFile(store, file, kind, gained))) {
           alarm('spoiled', { folder: at, fileAt: new Date(file.at).toISOString() });
         }
+        judgeLanding(at, file);
         namesRead.add(file.name);
         newest = Math.max(newest ?? file.at, file.at);
       }
@@ -1028,9 +1196,12 @@ export function createWitnessLog({
   };
 
   const refreshOnce = async (): Promise<Refreshed> => {
-    const began = now();
+    // When it began by this process's clock, as freshAt gives it; `began`, by the store's, as file names go.
+    const beganHere = localNow();
     const gained = new Set<string>();
     try {
+      await askClock();
+      const began = now();
       let newest: number | undefined;
       if (state === 'read') {
         // From the older of the newest file the last whole pass read and when it began, so nothing it didn't reach is
@@ -1056,7 +1227,7 @@ export function createWitnessLog({
         if (timeOfName(countdown) < keepFrom) namesRead.delete(name);
       }
       readFailingSince = undefined;
-      freshAt = began;
+      freshAt = beganHere;
       return { chains: [...gained].map(chainOfName), whole: true };
     } catch (error) {
       failed('read', error);
@@ -1087,20 +1258,24 @@ export function createWitnessLog({
     return refreshNext;
   };
 
-  /** Every head held, and what was let go for memory or released, as a snapshot's lines. */
-  const snapshotLines = (): string[] => {
+  /** Every head held, and what was let go for memory or released, as the lines of a snapshot named at `at`. */
+  const snapshotLines = (at: number): string[] => {
     const lines: string[] = [];
-    for (const name of held.keys()) for (const head of standing(name)) lines.push(lineText(name, head));
+    for (const name of held.keys()) {
+      for (const head of standing(name)) lines.push(lineText(name, datedBy(head, at)));
+    }
     // What was let go for memory, so a start from it still holds those chains as missing heads (never quietly).
     for (const [name, mark] of lost) {
       if (!beyond(name)) continue;
-      lines.push(lostText(name, mark));
-      for (const print of printsOf(name)) lines.push(compactText(name, 'x', print));
+      lines.push(lostText(name, datedBy(mark, at)));
+      for (const print of printsOf(name)) lines.push(compactText(name, 'x', datedBy(print, at)));
     }
     for (const name of [...released.keys()]) {
-      for (const one of releasedOf(name)) lines.push(compactText(name, 'r', one));
+      for (const one of releasedOf(name)) lines.push(compactText(name, 'r', datedBy(one, at)));
     }
-    for (const name of [...bases.keys()]) for (const base of basesOf(name)) lines.push(baseText(name, base));
+    for (const name of [...bases.keys()]) {
+      for (const base of basesOf(name)) lines.push(baseText(name, datedBy(base, at)));
+    }
     return lines;
   };
 
@@ -1113,13 +1288,23 @@ export function createWitnessLog({
     if (since < SNAPSHOT_EVERY_MS && !early) return;
     try {
       const name = fileName(folder('snapshots'), at);
-      await snapshots.put(name, await signedFile(keys, SNAPSHOT_FILE, name, epoch, snapshotLines()));
+      await snapshots.put(name, await signedFile(keys, SNAPSHOT_FILE, name, epoch, snapshotLines(at)));
       lastSnapshotAt = at;
       changedSinceSnapshot = false;
       prunedSinceSnapshot = 0;
     } catch (error) {
       failed('write', error);
     }
+  };
+
+  /** heldTo (the interface): the heads held and the compact ones, the highest first, at most `most`. */
+  const heldTo = (chain: Chain, most = Number.POSITIVE_INFINITY): readonly WitnessedHead[] => {
+    const name = nameOf(chain);
+    const heads = standing(name, most);
+    // Most chains hold no compact head: their pending heads as they are, no merge.
+    const compact = compactOf(name);
+    if (compact.length === 0) return heads;
+    return [...heads, ...compact].toSorted((one, other) => (one.seq > other.seq ? -1 : 1)).slice(0, most);
   };
 
   return Object.freeze({
@@ -1134,6 +1319,12 @@ export function createWitnessLog({
     },
     pending(chain: Chain, most?: number): readonly WitnessedHead[] {
       return standing(nameOf(chain), most);
+    },
+    witnessed(chain: Chain, most?: number): readonly WitnessedHead[] {
+      // A head noted here, as noted by this clock. One read from a file, or compact, as its store-clock time less the
+      // least offset: that is never below the true one, so this errs early by at most that call's trip and the Date's
+      // second, well inside the digest's ACCEPT_MARGIN_MS (a minute) it is set against.
+      return heldTo(chain, most).map((head) => ({ ...head, at: notedHere.get(head) ?? head.at - leastOffset }));
     },
     async flush(): Promise<void> {
       await write(true);
@@ -1206,14 +1397,7 @@ export function createWitnessLog({
     fingerprints(chain: Chain): readonly { readonly seq: bigint; readonly hash: Buffer }[] {
       return compactOf(nameOf(chain)).map(({ seq, hash }) => ({ seq, hash }));
     },
-    heldTo(chain: Chain, most = Number.POSITIVE_INFINITY): readonly WitnessedHead[] {
-      const name = nameOf(chain);
-      const heads = standing(name, most);
-      // Most chains hold no compact head: their pending heads as they are, no merge.
-      const compact = compactOf(name);
-      if (compact.length === 0) return heads;
-      return [...heads, ...compact].toSorted((one, other) => (one.seq > other.seq ? -1 : 1)).slice(0, most);
-    },
+    heldTo,
     baseBelow(chain: Chain, seq: bigint): { readonly seq: bigint; readonly hash: Buffer } | undefined {
       let best: Compact | undefined;
       for (const base of basesOf(nameOf(chain)))

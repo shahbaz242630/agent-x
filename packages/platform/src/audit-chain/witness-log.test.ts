@@ -233,6 +233,45 @@ describe('SEC-DB-20 the witness log: writing', () => {
     expect(seqs(reader.log.pending(PLATFORM))).toEqual([9n]);
     expect(integrity(reader.capture)).toEqual([]);
   });
+
+  // Twenty thousand heads signed into three files: slow on a busy runner.
+  it(
+    'TR-11: a `now` head goes in the next Put ahead of a queued `soon` backlog, which still drains after it',
+    { timeout: 30_000 },
+    async () => {
+      // Two files' worth of decisions and more (10,000 lines a file), so a queue taken in order would write the stop third.
+      const backlog = 20_001;
+      const { log, heads } = witnessOn(undefined, { waitMs: 60_000, mostBytes: forHeads(backlog + 10) });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let putStarted: () => void = () => undefined;
+      const started = new Promise<void>((resolve) => {
+        putStarted = resolve;
+      });
+      heads.instead.put = async (name, bytes) => {
+        putStarted();
+        await gate;
+        return heads.real.put(name, bytes);
+      };
+      // Highest first, so each goes to the end of the chain's list (highest first) rather than shifting it all.
+      for (let seq = backlog; seq >= 1; seq -= 1) log.soon(CHAIN, head(BigInt(seq), seq % 250));
+      const flushed = log.flush();
+      await started;
+      // The first file of decisions is in flight; a stop is noted behind the rest of them.
+      const stop = log.now(OTHER, head(1n, 7));
+      release();
+      await stop;
+      expect(heads.calls.puts).toBe(2);
+      await flushed;
+      await log.flush();
+      // Every decision went too: three files, and nothing left waiting for another.
+      expect(namesUnder(heads.files, 'heads')).toHaveLength(3);
+      await log.flush();
+      expect(heads.calls.puts).toBe(3);
+    },
+  );
 });
 
 describe('SEC-DB-20 the witness log: reading', () => {
@@ -452,6 +491,238 @@ describe('SEC-DB-20 the witness log: reading', () => {
     time.held.at = at + 11 * MINUTE;
     await log.refresh();
     expect(seqs(log.pending(CHAIN))).toEqual([4n]);
+  });
+
+  const skews = (capture: LogCapture) => capture.lines().filter((one) => one.event === 'audit.witness_clock_skew');
+
+  it('TR-12: copies 20 minutes slow and 20 minutes fast name by the store’s time, asked before their first file: read by the next pass, said', async () => {
+    const reading = clock();
+    // The store's clock is the honest reader's; its answers carry it, as Azure's Date.
+    const store = createFakeWriteOnceStore({ now: () => reading.held.at });
+    const reader = witnessOn(store, { time: reading });
+    await reader.log.refresh();
+    const slow = witnessOn(store, { time: clock(START.getTime() - 20 * MINUTE) });
+    const fast = witnessOn(store, { time: clock(START.getTime() + 20 * MINUTE) });
+    for (const one of [reading, slow.time, fast.time]) one.held.at += MINUTE;
+    const calls: string[] = [];
+    store.instead.list = (...asked) => {
+      calls.push('list');
+      return store.real.list(...asked);
+    };
+    store.instead.put = (name, bytes) => {
+      calls.push('put');
+      return store.real.put(name, bytes);
+    };
+    await slow.log.now(CHAIN, head(5n, 1));
+    // The store's time asked before the first file.
+    expect(calls).toEqual(['list', 'put']);
+    // Noted before then, yet dated at its file's time by the store's clock, never by its slow one; here as there.
+    expect(slow.log.pending(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: START.getTime() + MINUTE + 1000 }]);
+    await slow.log.now(CHAIN, head(6n, 1));
+    // Noted before its clock was set: dated at its file's name, never past it, so the file stays sound.
+    await fast.log.now(OTHER, head(2n, 1));
+    reading.held.at += 10_000;
+    await reader.log.refresh();
+    expect(reader.log.pending(CHAIN)).toEqual([
+      { seq: 6n, hash: hash(1), at: START.getTime() + MINUTE + 1000 },
+      { seq: 5n, hash: hash(1), at: START.getTime() + MINUTE + 1000 },
+    ]);
+    // Each set late, never early: the latest the store's whole-second Date allows after the call left.
+    expect(reader.log.pending(OTHER)).toEqual([{ seq: 2n, hash: hash(1), at: START.getTime() + MINUTE + 1000 }]);
+    expect(integrity(reader.capture)).toEqual([]);
+    // Each wrong clock said by its own copy, as its offset from the store's.
+    expect(skews(slow.capture)).toEqual([expect.objectContaining({ level: 'error', offsetMs: 20 * MINUTE + 1000 })]);
+    expect(skews(fast.capture)).toEqual([expect.objectContaining({ offsetMs: -20 * MINUTE + 1000 })]);
+    expect(integrity(fast.capture).map(({ reason }) => reason)).toEqual(['clock_skew']);
+    // Said at most once a minute however many Puts tell it again.
+    await fast.log.now(OTHER, head(3n, 1));
+    expect(skews(fast.capture)).toHaveLength(1);
+    expect(skews(reader.capture)).toEqual([]);
+  });
+
+  it('TR-12: freshAt is by this copy’s own clock: a right clock against a Date in whole seconds passes a read-after-walk check, and stays fresh', async () => {
+    const time = clock(START.getTime() + 999);
+    // Azure's Date: whole seconds, rounded down, so the offset is nearly a second back with a right clock.
+    const store = createFakeWriteOnceStore({ now: () => Math.floor(time.held.at / 1000) * 1000 });
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    time.held.at += 10;
+    // The anchor check: a read that began after its walk began.
+    const walkBegan = time.now().getTime();
+    await log.refresh();
+    expect(log.freshAt()?.getTime()).toBeGreaterThanOrEqual(walkBegan);
+    // The hand-off: how long ago, by its own clock.
+    expect(time.now().getTime() - (log.freshAt()?.getTime() ?? 0)).toBe(0);
+    // A right clock is left as it stands: heads dated by it exactly, as before, so a rebase just before stays before.
+    log.soon(CHAIN, head(1n, 1));
+    expect(log.pending(CHAIN)[0]?.at).toBe(time.held.at);
+  });
+
+  /**
+   * A copy whose clock is `off` from the store's true time, its store's Date in whole seconds rounded down, every list
+   * taking 1.5 s (both clocks run on).
+   */
+  function offBy(off: number) {
+    const truth = clock(START.getTime() + 400);
+    const time = clock(truth.held.at + off);
+    const store = createFakeWriteOnceStore({ now: () => Math.floor(truth.held.at / 1000) * 1000 });
+    store.instead.list = (...asked) => {
+      truth.held.at += 1500;
+      time.held.at += 1500;
+      return store.real.list(...asked);
+    };
+    return { truth, ...witnessOn(store, { time }) };
+  }
+
+  it.each([
+    ['right', 0],
+    ['59 seconds slow', -59_000],
+    ['59 seconds fast', 59_000],
+  ])(
+    'TR-12: a clock %s, within a minute of the store’s Date, is left as it stands, however long its list took',
+    async (_, off) => {
+      const { log, time, capture } = offBy(off);
+      await log.refresh();
+      log.soon(CHAIN, head(1n, 1));
+      expect(log.pending(CHAIN)[0]?.at).toBe(time.held.at);
+      expect(skews(capture)).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['slow', -20 * MINUTE],
+    ['fast', 20 * MINUTE],
+  ])(
+    'TR-12: a clock 20 minutes %s is set late, never early: its heads dated at or after the store’s true time',
+    async (_, off) => {
+      const { log, truth, capture } = offBy(off);
+      await log.refresh();
+      log.soon(CHAIN, head(1n, 1));
+      const at = log.pending(CHAIN)[0]?.at ?? 0;
+      expect(at).toBeGreaterThanOrEqual(truth.held.at);
+      // Late by no more than the list's trip and the Date's second.
+      expect(at - truth.held.at).toBeLessThanOrEqual(1500 + 1000);
+      expect(skews(capture)).toHaveLength(1);
+    },
+  );
+
+  it('TR-12: witnessed gives a head noted here as noted by this clock, though a slow call raised the offset since', async () => {
+    const truth = clock();
+    const time = clock(START.getTime() - 20 * MINUTE);
+    const store = createFakeWriteOnceStore({ now: () => truth.held.at });
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    log.soon(CHAIN, head(5n, 1));
+    const noted = time.held.at;
+    const dated = log.pending(CHAIN)[0]?.at;
+    // A list answered 30 s after it was sent: the offset worked out from it 30 s larger.
+    store.instead.list = (...asked) => {
+      truth.held.at += 30_000;
+      time.held.at += 30_000;
+      return store.real.list(...asked);
+    };
+    await log.refresh();
+    expect(log.witnessed(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: noted }]);
+    expect(log.pending(CHAIN)[0]?.at).toBe(dated);
+  });
+
+  it('TR-12: the first Date arriving on a Put re-dates the heads in it, and witnessed still gives them as noted here', async () => {
+    const fake = createFakeWriteOnceStore();
+    let date: number | undefined;
+    // The store's time on no answer until the Put's.
+    const heads = { ...fake, store: { ...fake.store, serverTime: () => date } };
+    fake.instead.put = (name, bytes) => {
+      date = START.getTime() + 20 * MINUTE;
+      return fake.real.put(name, bytes);
+    };
+    const { log } = witnessOn(heads);
+    await log.now(CHAIN, head(5n, 1));
+    expect(log.pending(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: START.getTime() + 20 * MINUTE + 1000 }]);
+    expect(log.witnessed(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: START.getTime() }]);
+  });
+
+  it('TR-12: a head noted before the store’s time was known is re-dated by it once known: a failed Put after, then a snapshot, carries that', async () => {
+    const time = clock(START.getTime() - 10 * MINUTE);
+    const heads = createFakeWriteOnceStore({ now: () => time.held.at + 10 * MINUTE });
+    const { log, snapshots } = witnessOn(heads, { time, leads: true });
+    log.soon(CHAIN, head(5n, 1));
+    await log.refresh();
+    heads.instead.put = () => Promise.reject(new Error('store away'));
+    await log.flush();
+    expect(heads.calls.puts).toBe(1);
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    const reader = witnessOn(createFakeWriteOnceStore(), { snapshots });
+    await reader.log.refresh();
+    // Noted at nine o'clock by the store's clock (set late by its Date's second), ten minutes on from this copy's.
+    expect(reader.log.pending(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: START.getTime() + 1000 }]);
+  });
+
+  it('TR-12: witnessed gives the heads on this copy’s own clock, for its own accepts to set against: a copy three minutes fast', async () => {
+    const time = clock(START.getTime() + 3 * MINUTE);
+    const store = createFakeWriteOnceStore({ now: () => time.held.at - 3 * MINUTE });
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    log.soon(CHAIN, head(5n, 1));
+    expect(log.witnessed(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: time.held.at }]);
+    // heldTo's whole set, a released compact head too, each shifted the same.
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    log.soon(CHAIN, head(6n, 6));
+    log.release(CHAIN, [head(5n, 1)]);
+    expect(log.witnessed(CHAIN)).toEqual(
+      log.heldTo(CHAIN).map((one) => ({ ...one, at: one.at - (START.getTime() + 1000 - time.held.at) })),
+    );
+    expect(log.witnessed(CHAIN).map(({ seq, hash: part, at }) => [seq, part.length, at])).toEqual([
+      [6n, 32, time.held.at],
+      [5n, 16, time.held.at],
+    ]);
+    // pending's, by the store's clock (set late: the latest its whole-second Date allows).
+    expect(log.pending(CHAIN)[0]?.at).toBe(START.getTime() + 1000);
+  });
+
+  it('TR-12: a copy ten minutes slow reads its newest snapshot at start by the store’s time: no `future` alarm', async () => {
+    const at = START.getTime();
+    const snapshots = createFakeWriteOnceStore();
+    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 7n, 1)], { at });
+    const heads = createFakeWriteOnceStore({ now: () => at + MINUTE });
+    const { log, capture } = witnessOn(heads, { snapshots, time: clock(at - 10 * MINUTE) });
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([7n]);
+    // Its own clock said, as it is wrong; the snapshot not.
+    expect(integrity(capture).map(({ reason }) => reason)).toEqual(['clock_skew']);
+  });
+
+  it('TR-12: the store’s time not to be had, no file is written and nothing is told it went; back, it goes', async () => {
+    const time = clock();
+    const store = createFakeWriteOnceStore({ now: () => time.held.at });
+    store.instead.list = () => Promise.reject(new Error('store away'));
+    const { log, capture } = witnessOn(store, { time });
+    await expect(log.now(CHAIN, head(5n, 1))).rejects.toBeInstanceOf(WitnessUnconfirmed);
+    expect(store.calls.puts).toBe(0);
+    expect(log.writesSound()).toBe(false);
+    expect(capture.lines().map(({ event }) => event)).toContain('audit.witness_write_failed');
+    delete store.instead.list;
+    time.held.at += 1000;
+    await expect(log.settled([CHAIN])).resolves.toBeUndefined();
+    expect(store.calls.puts).toBe(1);
+  });
+
+  it('TR-12: a file read whose name is past the clocks’ spread from when the store says it landed is said; one within it, not', async () => {
+    const at = START.getTime();
+    for (const [namedAt, said] of [
+      [at + 4 * MINUTE, [6 * MINUTE]],
+      [at - 8 * MINUTE, [-6 * MINUTE]],
+      [at - 3 * MINUTE, []],
+    ] as const) {
+      const store = createFakeWriteOnceStore();
+      const name = await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 4n, 1, new Date(namedAt))], {
+        at: namedAt,
+      });
+      store.created.set(name, at - 2 * MINUTE);
+      const { log, capture } = witnessOn(store);
+      await log.refresh();
+      expect(seqs(log.pending(CHAIN))).toEqual([4n]);
+      expect(skews(capture).map(({ skewMs }) => skewMs)).toEqual(said);
+    }
   });
 
   it('a read failing is a warning, and past alertAfterMs of failing the alert; freshAt moves only on a whole read', async () => {

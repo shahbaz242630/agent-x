@@ -32,6 +32,25 @@ describe('the fake write-once store', () => {
     expect(await fake.store.getAtMost('none', 9)).toBe('missing');
   });
 
+  it('lists when each file landed by its own clock where given one, and those a test set (TR-12); none, nothing', async () => {
+    const fake = createFakeWriteOnceStore({ now: () => 7 });
+    await fake.store.put('p/1', Buffer.from('one'));
+    fake.files.set('p/2', Buffer.from('planted'));
+    expect((await fake.store.list('p/', 5)).created).toEqual(new Map([['p/1', 7]]));
+    expect(fake.store.serverTime?.()).toBe(7);
+    fake.created.set('p/2', 3);
+    expect((await fake.store.list('p/', 5)).created).toEqual(
+      new Map([
+        ['p/1', 7],
+        ['p/2', 3],
+      ]),
+    );
+    const plain = createFakeWriteOnceStore();
+    await plain.store.put('p/1', Buffer.from('one'));
+    expect(await plain.store.list('p/', 5)).toEqual({ names: ['p/1'], foreign: 0, next: undefined });
+    expect(plain.store.serverTime).toBeUndefined();
+  });
+
   it('hands a call to `instead` when one is set, and the real store stays reachable', async () => {
     const fake = createFakeWriteOnceStore();
     await fake.real.put('a', Buffer.from('one'));
