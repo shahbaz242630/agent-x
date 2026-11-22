@@ -66,6 +66,14 @@ export async function tellAdminsOfRemoval(
 }
 
 /**
+ * The notice about a change to how the person signs in told to them alone, as themselves (S210 R2-2: a password reset
+ * asked for, which anyone knowing their login's name can ask for, so never to the admins).
+ */
+export const toldThePersonAlone = (orgId: string, kind: NoticeKind, personUserId: string): Notice[] => [
+  { orgId, kind, membershipId: null, role: null, aboutId: personUserId, recipientUserId: personUserId },
+];
+
+/**
  * The notices about a reset of the person's second factor (or a change to
  * how they sign in, never sent to the contacts): to them, as
  * themselves, and to the organisation's admins but them, found as they are

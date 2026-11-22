@@ -7,9 +7,13 @@
 // - a change to a person's sign-in, told to them and their organisations'
 //   admins: a second factor removed (an authenticator app, a security key, a
 //   passkey, recovery codes) or added (once ready to use: an app or a key
-//   verified, an SMS or email code added; the S68 audit), a password changed or a reset asked for, the
+//   verified, an SMS or email code added; the S68 audit), a password changed, the
 //   login's email changed, the login locked, deactivated or removed, or it
 //   unlocked or reactivated;
+// - a reset of a person's password asked for (S210 R2-2): told to the person
+//   alone, at most once an hour, never to the admins, and no session ended, as
+//   anyone who knows a login's name can ask for one on the open login app and
+//   nothing changes until the reset is used (which is a password changed);
 // - a token issued for a login (a machine user's): recorded, and logged;
 // - impersonation, which the stack never turns on (ADR-003 §4): an alarm;
 // - someone given, changed or removed rights in the login service itself (its
@@ -23,6 +27,7 @@ export type IdpEventClass =
   | 'second_factor_removed'
   | 'second_factor_added'
   | 'password_changed'
+  | 'password_reset_asked'
   | 'sign_in_email_changed'
   | 'sign_in_blocked'
   | 'sign_in_restored'
@@ -49,7 +54,10 @@ const BY_CLASS: Readonly<Record<IdpEventClass, readonly string[]>> = {
     'user.human.mfa.u2f.token.verified',
     'user.human.passwordless.token.verified',
   ],
-  password_changed: ['user.human.password.changed', 'user.human.password.code.added'],
+  password_changed: ['user.human.password.changed'],
+  // A reset code sent (Zitadel's internal/repository/user/human_password.go): asked for by anyone at the login app's
+  // "forgot password", knowing only the login's name. No credential changes until the code is used.
+  password_reset_asked: ['user.human.password.code.added'],
   sign_in_email_changed: ['user.human.email.changed'],
   sign_in_blocked: ['user.locked', 'user.deactivated', 'user.removed'],
   sign_in_restored: ['user.unlocked', 'user.reactivated'],
@@ -108,8 +116,18 @@ export const classOfIdpEvent = (type: string): IdpEventClass | undefined =>
 /** Whether a class is told to the person and their organisations' admins. */
 export const isToldToThePerson = (
   eventClass: IdpEventClass,
-): eventClass is Exclude<IdpEventClass, 'token_issued' | 'impersonated' | 'rights_changed'> =>
-  eventClass !== 'token_issued' && eventClass !== 'impersonated' && eventClass !== 'rights_changed';
+): eventClass is Exclude<IdpEventClass, 'token_issued' | 'impersonated' | 'rights_changed' | 'password_reset_asked'> =>
+  eventClass !== 'token_issued' &&
+  eventClass !== 'impersonated' &&
+  eventClass !== 'rights_changed' &&
+  eventClass !== 'password_reset_asked';
+
+/**
+ * Whether a class is told to the person alone, at most once an hour, and never to the admins (S210 R2-2): a request
+ * anyone can make that changes no credential. A flood of them is also copied once a person a page (idp-copier.ts).
+ */
+export const isToldOnlyToThePerson = (eventClass: IdpEventClass): eventClass is 'password_reset_asked' =>
+  eventClass === 'password_reset_asked';
 
 /**
  * Who makes our own routine changes in the login service, as the deployment names them (SA2): the logins allowed to
