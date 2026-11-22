@@ -888,7 +888,15 @@ describe('TR-3 heads released on a probe’s finding', () => {
   it('leave the list as compact heads every walk is held to; the same head noted again stays released, another at its place is a fork', () => {
     const { log, capture } = witnessOn();
     for (const seq of [3n, 4n, 5n]) log.soon(CHAIN, head(seq, Number(seq)));
+    // No anchor known for the chain (never anchored, or its shard let go): nothing released.
     log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    expect(seqs(log.pending(CHAIN))).toEqual([5n, 4n, 3n]);
+    // Anchored at 3: those above it alone.
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 3n]])));
+    log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    expect(seqs(log.pending(CHAIN))).toEqual([5n, 3n]);
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    log.release(CHAIN, [head(3n, 3)]);
     expect(seqs(log.pending(CHAIN))).toEqual([5n]);
     expect(log.beyondMemory(CHAIN)).toBe(false);
     expect(log.fingerprints(CHAIN).map(({ seq, hash: prefix }) => [seq, prefix.toString('hex')])).toEqual([
@@ -907,6 +915,7 @@ describe('TR-3 heads released on a probe’s finding', () => {
 
   it('a walk from the anchor held to them that passes them lets them go; one that began at or above, stopped below, or wasn’t held to them, none', () => {
     const { log } = witnessOn();
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
     for (const seq of [3n, 4n, 5n]) log.soon(CHAIN, head(seq, Number(seq)));
     log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
     const asked = log.fingerprints(CHAIN);
@@ -926,7 +935,7 @@ describe('TR-3 heads released on a probe’s finding', () => {
     const rebases = new Map<string, Date>();
     // Room for 2 heads and 1 compact one.
     const { log } = witnessOn(undefined, { mostBytes: forHeads(2), snapshots, leads: true, time });
-    log.useAnchors(anchorsWith(rebases));
+    log.useAnchors(anchorsWith(rebases, new Map([[ORG, 2n]])));
     log.soon(CHAIN, head(3n, 3));
     log.soon(CHAIN, head(4n, 4));
     log.release(CHAIN, [head(3n, 3), head(4n, 4)]);

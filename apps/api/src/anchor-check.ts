@@ -1391,10 +1391,14 @@ export function createAnchorCheck({
    * statement (TR-3), released but the highest: compact, and every later walk held to them until one from the anchor
    * passes them (the log's release), so a burst between anchor runs never fills what may be held. Never let go outright:
    * the probe reads no link between them, so rows put back beside a cut branch for its statement alone would pass it.
-   * Those at or below the anchor wait for their own linked walk (lateHeadsHold).
+   * Those at or below the anchor wait for their own linked walk (lateHeadsHold). With no anchor known (never anchored,
+   * or its shard let go: PL-65), none released.
    */
   const letGoBelowHighest = (chain: Chain, heldTo: readonly Witnessed[]): void => {
-    const anchored = anchors.latest(chain)?.seq ?? -1n;
+    // The anchor as held (its shard read, as withAnchors asks it): with none known, nothing released.
+    const anchored = (durable !== undefined && anchors === durable ? durable.heldAnchor(chain) : anchors.latest(chain))
+      ?.seq;
+    if (anchored === undefined) return;
     const [, ...below] = heldTo
       .filter(({ seq }) => seq > anchored)
       .toSorted((one, other) => (one.seq > other.seq ? -1 : 1));

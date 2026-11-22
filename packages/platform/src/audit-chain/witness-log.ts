@@ -160,7 +160,8 @@ export interface WitnessLog extends ChainWitness {
   fingerprints(chain: Chain): readonly { readonly seq: bigint; readonly hash: Buffer }[];
   /**
    * Those heads out of the list as released (TR-3, the header): a probe found them on the chain, which no link proves, so
-   * every walk stays held to them (fingerprints) until one from the anchor passes them (walkedPast). Past the compact
+   * every walk stays held to them (fingerprints) until one from the anchor passes them (walkedPast). Only those above
+   * the chain's anchor, where the anchors' log holds it now (its base); none with no anchor known. Past the compact
    * heads' share, the rest stay held.
    */
   release(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void;
@@ -618,14 +619,19 @@ export function createWitnessLog({
     tidyBases(name);
   };
 
-  /** The chain's latest anchor kept as one its compact heads went above, where the anchors' log gives its whole hash. */
-  const keepBase = (name: string): void => {
+  /**
+   * The chain's latest anchor kept as one its compact heads went above, where the anchors' log gives it whole: its place,
+   * or none where the log holds none for the chain now (never anchored, or its shard let go: PL-65).
+   */
+  const keepBase = (name: string): bigint | undefined => {
     const anchor = anchors?.latest(chainOfName(name));
-    if (anchor?.hash === undefined) return;
+    if (anchor?.hash === undefined) return undefined;
     const kept = bases.get(name) ?? [];
-    if (kept.some(({ seq, hash }) => seq === anchor.seq && hash.equals(anchor.hash ?? hash))) return;
-    bases.set(name, [...kept, { seq: anchor.seq, hash: Buffer.from(anchor.hash), at: now().getTime() }]);
-    changedSinceSnapshot = true;
+    if (!kept.some(({ seq, hash }) => seq === anchor.seq && hash.equals(anchor.hash ?? hash))) {
+      bases.set(name, [...kept, { seq: anchor.seq, hash: Buffer.from(anchor.hash), at: now().getTime() }]);
+      changedSinceSnapshot = true;
+    }
+    return anchor.seq;
   };
 
   /** A chain's bases let go once it holds no compact head. */
@@ -1188,11 +1194,13 @@ export function createWitnessLog({
       const name = nameOf(chain);
       const list = held.get(name);
       if (list === undefined || heads.length === 0) return;
+      // Only above an anchor the log holds whole, kept as their base: with none known, nothing is released.
+      const anchored = keepBase(name);
+      if (anchored === undefined) return;
       const going = new Set(heads.map((one) => writtenKey(name, one)));
       const room = Math.max(0, mostPrints - printCount);
-      const leaving = list.filter((one) => going.has(writtenKey(name, one))).slice(0, room);
+      const leaving = list.filter((one) => one.seq > anchored && going.has(writtenKey(name, one))).slice(0, room);
       if (leaving.length === 0) return;
-      keepBase(name);
       setReleased(name, [...releasedOf(name), ...leaving.map(({ seq, hash, at }) => ({ seq, hash, at }))]);
       setList(
         name,

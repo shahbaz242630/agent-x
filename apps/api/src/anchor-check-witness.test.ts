@@ -341,8 +341,12 @@ describe('TR-1 the anchor check held to the witness log', () => {
     await run.check.probeWitnessed([]);
     expect(probed).toEqual([]);
     run.pending.set('platform', [witnessed(9n), witnessed(4n)]);
+    // No anchor known for it yet: probed, nothing released.
     await run.check.probeWitnessed([]);
     expect(probed).toEqual([[9n, 4n]]);
+    expect(run.released).toEqual([]);
+    run.anchors.keep(signAnchor(keys, { kind: 'platform' }, point(1n), AT));
+    await run.check.probeWitnessed([]);
     expect(run.released).toEqual([['platform', [4n]]]);
     expect(run.pruned).toEqual([]);
     answer = witnessed(9n);
@@ -373,11 +377,16 @@ describe('TR-1 the anchor check held to the witness log', () => {
     });
     run.pending.set(ORG, [witnessed(9n), witnessed(4n), witnessed(2n)]);
     run.pending.set(OTHER_ORG, [witnessed(5n), witnessed(2n)]);
+    // No anchor known (never anchored, or its shard let go: PL-65): nothing released.
+    await run.check.probeWitnessed([ORG, OTHER_ORG]);
+    expect(run.released).toEqual([]);
+    run.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(1n), AT));
     await run.check.probeWitnessed([ORG, OTHER_ORG]);
     expect(run.released).toEqual([[ORG, [4n, 2n]]]);
     expect(run.pruned).toEqual([]);
     // A chain the probe didn't answer for: nothing let go.
     const missed = withWitness({ answers: { [ORG]: { kind: 'missed', error: new Error('away') } } });
+    missed.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(1n), AT));
     missed.pending.set(ORG, [witnessed(9n), witnessed(4n)]);
     await missed.check.probeWitnessed([ORG]);
     expect(missed.released).toEqual([]);
@@ -389,6 +398,7 @@ describe('TR-1 the anchor check held to the witness log', () => {
     expect(anchored.released).toEqual([[ORG, [7n]]]);
     // One head alone: kept, as it stands for the chain's length.
     const one = withWitness({ answers: { [ORG]: { kind: 'same' } } });
+    one.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(1n), AT));
     one.pending.set(ORG, [witnessed(9n)]);
     await one.check.probeWitnessed([ORG]);
     expect(one.released).toEqual([]);

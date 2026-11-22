@@ -103,6 +103,8 @@ describe('TR-3 heads a probe found released, never let go', () => {
       alertAfterMs: 60_000,
       mostBytes: 1024 * 1024,
     });
+    // Anchored at the chain's start: every head above it may be released (none is, with no anchor known).
+    log.useAnchors({ rebasedAfter: () => false, latest: () => CHAIN_START });
     const owner = await tamperAsOwner(database, TARGET, ORG);
     try {
       await record(1, 2, 3, 4, 5);
