@@ -42,10 +42,10 @@ describe('SEC-DB-20 TR-1 a walk held to the witnessed heads', () => {
     expect(heldToWitnessed(walk, [head(6n, 6)], found, 2n)).toMatchObject({ ok: false });
   });
 
-  it('TR-3: a fingerprint (a place and its hash’s first 8 bytes) is held to by those bytes, at a place read and at the head', () => {
-    const found = new Map([[5n, Buffer.concat([Buffer.alloc(8, 5), Buffer.alloc(24, 7)])]]);
+  it('TR-3: a fingerprint (a place and its hash’s first 16 bytes) is held to by those bytes, at a place read and at the head', () => {
+    const found = new Map([[5n, Buffer.concat([Buffer.alloc(16, 5), Buffer.alloc(16, 7)])]]);
     const walk = reached(8n, 8);
-    const print = (seq: bigint, fill: number) => ({ seq, hash: Buffer.alloc(8, fill) });
+    const print = (seq: bigint, fill: number) => ({ seq, hash: Buffer.alloc(16, fill) });
     expect(heldToWitnessed(walk, [print(5n, 5), print(8n, 8)], found, 2n)).toBe(walk);
     expect(heldToWitnessed(walk, [print(5n, 6)], found, 2n)).toEqual({
       ok: false,
@@ -54,6 +54,8 @@ describe('SEC-DB-20 TR-1 a walk held to the witnessed heads', () => {
     expect(heldToWitnessed(walk, [print(8n, 9)], found, 2n)).toMatchObject({ ok: false });
     // A full head is still held to all 32 bytes.
     expect(heldToWitnessed(walk, [{ seq: 5n, hash: Buffer.alloc(32, 5) }], found, 2n)).toMatchObject({ ok: false });
+    // Shorter than a compact head keeps (TR-9): never held, as an empty hash would hold anything.
+    expect(heldToWitnessed(walk, [{ seq: 5n, hash: Buffer.alloc(8, 5) }], found, 2n)).toMatchObject({ ok: false });
   });
 
   it('leaves to the next walk a head at or below where it began, or past where a capped step stopped short of its goal', () => {

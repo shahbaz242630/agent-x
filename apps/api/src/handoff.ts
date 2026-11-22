@@ -453,7 +453,7 @@ export function createHandoff({
   readonly witnessing?: {
     readonly witness: Pick<
       WitnessLog,
-      'now' | 'settled' | 'refreshWhole' | 'pending' | 'beyondMemory' | 'freshAt' | 'writesSound'
+      'now' | 'settled' | 'refreshWhole' | 'pending' | 'heldTo' | 'beyondMemory' | 'freshAt' | 'writesSound'
     >;
     readonly frontier: ChainFrontier;
     /** The gate (handoff-witness-gate.ts) unless a test gives its own. */
@@ -635,10 +635,10 @@ export function createHandoff({
       return (await states.anchorKept(tx, orgId, anchor)).outcome === 'kept' ? undefined : 'hold_tampered';
     }
     // TR-1 F.3: the walk from the frontier to the head just locked, on the anchor's trip, held to every head witnessed
-    // (asked first, so each was committed before it).
+    // (asked first, so each was committed before it); the compact ones too (TR-9: heads released on a probe's finding).
     const start = witnessing.frontier.startOf(chain);
     if (start === undefined) return 'anchor_pending';
-    const witnessed = witnessing.witness.pending(chain);
+    const witnessed = witnessing.witness.heldTo(chain);
     const kept = await states.anchorKeptWithin(tx, orgId, anchor, { start, witnessed, most: mostWalked });
     if (kept.outcome === 'tampered') return 'hold_tampered';
     if (kept.outcome === 'unverified') return 'chain_unverified';
@@ -672,7 +672,7 @@ export function createHandoff({
     const start = witnessing.frontier.startOf(PLATFORM);
     return start === undefined
       ? null
-      : { within: { start, witnessed: witnessing.witness.pending(PLATFORM), most: mostWalked }, ...witnessing };
+      : { within: { start, witnessed: witnessing.witness.heldTo(PLATFORM), most: mostWalked }, ...witnessing };
   };
 
   /**

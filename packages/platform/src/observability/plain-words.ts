@@ -18,6 +18,11 @@ export const PLAIN_WORDS = {
       'Activity rows still get a country and city, but places from newer internet addresses may be missing or wrong.',
     next: 'Check the monthly place file refresh ran, open its branch as a pull request and merge it.',
   },
+  'activity.person_exports_day_spent': {
+    happened: 'A person asked for more downloads of their own activity log than the 20 a day allowed.',
+    broke: 'Those downloads were refused and nothing was recorded; their other downloads and everyone else are fine.',
+    next: 'Nothing if rare. If one person keeps at it, look at whether the account is being misused.',
+  },
   'console.browser_error': {
     happened: "The console failed in a person's browser and sent the error here.",
     broke: 'That screen may not have shown or done what they asked; the server is fine.',
@@ -255,6 +260,11 @@ export const PLAIN_WORDS = {
     happened: 'Tamper checks are working, but some organisations waited too long for their turn.',
     broke: 'Those audit histories are checked late, so a change goes unseen for longer. Nobody is held.',
     next: 'Add capacity: more check lanes with a bigger database pool, or more CPU for long histories.',
+  },
+  'audit.platform_chain_fast': {
+    happened: 'The shared platform audit history grew past half of what a payment check reads between tamper checks.',
+    broke: "Nothing yet. If it grows twice as fast, every organisation's payments wait for the next check.",
+    next: 'Find who adds sign-outs, step-ups or own-log downloads so fast and block them.',
   },
   'audit.anchor_check_over_size': {
     happened: 'More organisations are listed than the tamper check is set to keep notes on.',

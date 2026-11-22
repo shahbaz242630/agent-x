@@ -693,6 +693,48 @@ describe('a person’s own page and download (6E1a)', () => {
     );
   });
 
+  it('TR-13 counts twenty downloads a day per person, past the hour’s five, warned once a minute', async () => {
+    // Twenty of Ana's, recorded now on the platform chain as the app records them.
+    await app.transaction().execute(async (tx) => {
+      for (let one = 1; one <= 20; one += 1) {
+        await createPlatformChain({ keys, ids }).record(tx, {
+          actor: API,
+          action: PERSON_LOG_EXPORTED,
+          details: {
+            person: ANA,
+            from: RANGE.from.toISOString(),
+            to: RANGE.to.toISOString(),
+            format: 'csv',
+            requests: 0,
+            writtenUpTo: null,
+          },
+        });
+      }
+    });
+    const at = (hoursOn: number) =>
+      createMyActivity({
+        database: app,
+        keys,
+        ids,
+        clock: new FixedClock(new Date(Date.now() + hoursOn * 60 * 60_000)),
+        logger: testLogger(capture),
+      });
+    const exportOn = (activity: ReturnType<typeof at>, key: string, userId = ANA) =>
+      activity.export(userId, keyed(userId, key), { ...RANGE, format: 'ndjson' }, CORRELATION);
+
+    // Two hours on, the hour holds none of them, the day all twenty.
+    const later = at(2);
+    expect(await exportOn(later, 'k-21')).toEqual({ outcome: 'refused', status: 409, code: 'ACTIVITY_EXPORTS_SPENT' });
+    expect(await exportOn(later, 'k-22')).toEqual({ outcome: 'refused', status: 409, code: 'ACTIVITY_EXPORTS_SPENT' });
+    expect((await exportOn(later, 'k-1', BEN)).outcome).toBe('exported');
+    expect(await recordsOf(ANA)).toBe(20);
+    expect(capture.lines().filter((line) => line.event === 'activity.person_exports_day_spent')).toEqual([
+      expect.objectContaining({ level: 'warn', most: 20, refused: 1 }),
+    ]);
+    // A day on, they are spent no more.
+    expect((await exportOn(at(25), 'k-23')).outcome).toBe('exported');
+  });
+
   it('FX-RACE counts a download recorded under the person’s lock meanwhile: the sixth waits, then is refused', async () => {
     for (let one = 1; one <= 4; one += 1) await exportOf(ANA, `k-${String(one)}`);
     // A fifth, of another server, recorded under Ana's lock and held open before it commits.

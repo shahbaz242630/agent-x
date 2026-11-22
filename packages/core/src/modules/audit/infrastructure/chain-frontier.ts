@@ -25,6 +25,7 @@ import {
   type ChainEdges,
   type ChainProblem,
   type CheckedPoint,
+  hashHolds,
   type HeadSeen,
   type SignedSeen,
   type StoredEntry,
@@ -249,7 +250,8 @@ export function judgeWitnessed(
       unjudged.push(seq);
       continue;
     }
-    if (hashOnPath(seq, start, walk)?.equals(hash) !== true && (cut === undefined || seq > cut)) cut = seq;
+    // A compact head (TR-9: released, or a fingerprint) by its hash's first bytes: another event there is a cut.
+    if (!hashHolds(hashOnPath(seq, start, walk), hash) && (cut === undefined || seq > cut)) cut = seq;
   }
   if (cut !== undefined) return { kind: 'cut', seq: cut };
   return unjudged.length === 0 ? { kind: 'held' } : { kind: 'unjudged', seqs: unjudged };

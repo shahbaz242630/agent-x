@@ -541,6 +541,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     loginSessions: options.signIn?.loginSessions,
     logger,
     securityEvents,
+    trust,
+    copies: config.http.webCopies,
   });
   registerMyOrganizations(app, options.myOrganizations);
   registerStatements(app);

@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { chainWitness, checkStatesWith, statesDigest, witnessWith } from '@agentx/core/modules/audit';
 import { LONGEST_ABSOLUTE_SECONDS } from '@agentx/core/modules/identity';
 import { APPROVAL_HORIZON_MS } from '@agentx/core/modules/spend-requests';
-import { createWitnessLog, type DigestLog, subjectKey } from '@agentx/platform/audit-chain';
+import { createWitnessLog, type DigestLog, subjectKey, type WitnessLog } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { loadConfig } from '@agentx/platform/config';
 import { createLogger } from '@agentx/platform/observability';
@@ -201,7 +201,7 @@ describe('the integrity passes as the jobs side wires them, each bound (4D2e D11
 });
 
 describe('TR-1 the witness log on every copy, as the config names its store', () => {
-  it('lists its job on the jobs side and a web copy, holds every read to its heads, and writes what waits as the job stops', async () => {
+  it('SEC-DB-20 TR-9 (and TR-1): lists its job on the jobs side and a web copy, holds every read to its heads (released ones too), and writes what waits as the job stops', async () => {
     const heads = mkdtempSync(join(tmpdir(), 'job-list-witness-'));
     try {
       const env = { ...BASE, AGENTX_AUDIT_WITNESS_DIR: heads };
@@ -216,6 +216,20 @@ describe('TR-1 the witness log on every copy, as the config names its store', ()
       const head = { seq: 4n, hash: Buffer.alloc(32, 4) };
       witness.note(chain, head, 'soon');
       expect((statesDigest() as DigestLog).heads(chain)?.heldTo).toEqual([head]);
+      // TR-9: a head released on a probe's finding still holds the digest's reads, by its first 16 bytes.
+      const higher = { seq: 6n, hash: Buffer.alloc(32, 6) };
+      witness.note(chain, higher, 'soon');
+      // An anchor below both, whole, as the anchor check's probe releases above (memory anchors hold none here).
+      (witness as WitnessLog).useAnchors({
+        rebasedAfter: () => false,
+        latest: () => ({ seq: 2n, hash: Buffer.alloc(32, 2) }),
+      });
+      (witness as WitnessLog).release(chain, [head]);
+      expect(witness.pending(chain)).toEqual([expect.objectContaining(higher)]);
+      expect((statesDigest() as DigestLog).heads(chain)?.heldTo).toEqual([
+        higher,
+        { seq: 4n, hash: head.hash.subarray(0, 16) },
+      ]);
       // The job's first run writes it, and reads the store; another copy's head found there goes to the leader's probe.
       const other = createWitnessLog({
         store: folderWriteOnceStore(heads),
