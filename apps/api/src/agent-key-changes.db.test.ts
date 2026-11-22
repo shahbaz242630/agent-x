@@ -779,7 +779,7 @@ describe('a rotation’s answer, made before the chain head (ADR-006 §6, 4D2e)'
 });
 
 describe(`ending the old key at once, as chosen (E8, decision 22, Postgres ${server.version})`, () => {
-  it('revokes the old key in the confirm: refused at once, the new one works, the choice on both events', async () => {
+  it('SEC-AG-15 revokes the old key in the confirm: refused at once, the new one works, the choice on both events', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
     const old = await agentWithKey(org, developer);
@@ -809,7 +809,7 @@ describe(`ending the old key at once, as chosen (E8, decision 22, Postgres ${ser
     });
   });
 
-  it('binds the step-up to the choice: one signed for the overlap can’t end the key at once, nor the other way', async () => {
+  it('SEC-AG-15 binds the step-up to the choice: one signed for the overlap can’t end the key at once, nor the other way', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
     const old = await agentWithKey(org, developer);

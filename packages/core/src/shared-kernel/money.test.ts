@@ -20,7 +20,7 @@ describe('money', () => {
     ['a lower-case code', () => money(1n, 'aed')],
     ['a code of two letters', () => money(1n, 'AE')],
     ['a numeric code', () => money(1n, '784')],
-  ])('refuses %s', (_what, make) => {
+  ])('SEC-LIM-07 refuses %s', (_what, make) => {
     expect(make).toThrow(MoneyRefused);
   });
 });
@@ -41,7 +41,7 @@ describe('moneyFromJson', () => {
     ['not a number', Number.NaN],
     ['infinity', Number.POSITIVE_INFINITY],
     ['nothing', null],
-  ])('refuses %s, never saying the amount', (_what, value) => {
+  ])('SEC-LIM-07 refuses %s, never saying the amount', (_what, value) => {
     expect(() => moneyFromJson(value, 'AED')).toThrow(MoneyRefused);
     expect(() => moneyFromJson(value, 'AED')).not.toThrow(String(value));
   });
@@ -56,7 +56,7 @@ describe('arithmetic', () => {
     expect(total([], 'AED')).toEqual(aed(0n));
   });
 
-  it('never mixes two currencies', () => {
+  it('SEC-LIM-07 never mixes two currencies', () => {
     const usd = money(1n, 'USD');
 
     expect(() => plus(aed(1n), usd)).toThrow(MoneyRefused);

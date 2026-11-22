@@ -125,7 +125,7 @@ function conformance(...args: readonly string[]): Promise<{ readonly code: numbe
 
 describe('the MCP endpoint passes the official conformance suite (6E2, MCP-Guide §7)', () => {
   it.each(['2026-07-28', '2025-11-25'])(
-    "passes revision %s's requirement set, less the baselined fixtures",
+    "SEC-MCP-01 passes revision %s's requirement set, less the baselined fixtures",
     async (revision) => {
       const { code, output } = await conformance(
         '--requirements',

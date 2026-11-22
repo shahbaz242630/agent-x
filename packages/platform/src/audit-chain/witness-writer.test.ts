@@ -71,7 +71,7 @@ const seqs = (heads: readonly { readonly seq: bigint }[]) => heads.map(({ seq })
 const names = (store: Store, folder: string) =>
   [...store.files.keys()].filter((name) => name.startsWith(`e1/${folder}/`));
 
-describe('TR-14 the witness log: every file names its writer', () => {
+describe('SEC-DB-20 TR-14 the witness log: every file names its writer', () => {
   it("opens each file's name with its process's writer ID, which the closing line signs, and every reader takes it", async () => {
     const store = createFakeWriteOnceStore();
     const copy = copyOn(store);
@@ -110,7 +110,7 @@ describe('TR-14 the witness log: every file names its writer', () => {
   });
 });
 
-describe("TR-14 the operator's set-aside list", () => {
+describe("SEC-DB-20 TR-14 the operator's set-aside list", () => {
   it("passes over every heads file a writer set aside named until then, each said by name; another writer's still read", async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };
@@ -204,7 +204,7 @@ describe("TR-14 the operator's set-aside list", () => {
   });
 });
 
-describe('TR-14 a file written in a process’s own name', () => {
+describe('SEC-DB-20 TR-14 a file written in a process’s own name', () => {
   it('is the alarm, naming the writer and the file, and is read as any other: a detector, never a gate', async () => {
     const store = createFakeWriteOnceStore();
     const copy = copyOn(store);
@@ -253,7 +253,7 @@ const headLine = (seq: bigint, fill: number, at: number, w?: string) =>
     ...(w === undefined ? {} : { w }),
   });
 
-describe('TR-14 a set-aside is fail-closed', () => {
+describe('SEC-DB-20 TR-14 a set-aside is fail-closed', () => {
   it('passes over only what the writer named until the set-aside: a head it writes after is read and held, said late', async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };
@@ -278,7 +278,7 @@ describe('TR-14 a set-aside is fail-closed', () => {
   });
 });
 
-describe('TR-14 attribution through snapshots', () => {
+describe('SEC-DB-20 TR-14 attribution through snapshots', () => {
   it("a fork met from a snapshot names each head's own writer, never the leader that kept it; one before TR-14, `snapshot`", async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
@@ -315,7 +315,7 @@ describe('TR-14 attribution through snapshots', () => {
   });
 });
 
-describe('TR-14 set-aside snapshots at a start', () => {
+describe('SEC-DB-20 TR-14 set-aside snapshots at a start', () => {
   it("goes back past more than a day's of a set-aside leader's snapshots to an older one, its state whole", async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
@@ -354,7 +354,7 @@ describe('TR-14 set-aside snapshots at a start', () => {
   });
 });
 
-describe('TR-14 the set-aside folder read', () => {
+describe('SEC-DB-20 TR-14 the set-aside folder read', () => {
   it('a flood of junk slows no refresh: at most a hundred fetched a pass, said; the rest wait for the next', async () => {
     const store = createFakeWriteOnceStore();
     for (let one = 0; one < 10_000; one += 1)
@@ -395,7 +395,7 @@ describe('TR-14 the set-aside folder read', () => {
   });
 });
 
-describe('TR-14 review: a writer set aside twice, snapshots this release, a copy set aside rewriting', () => {
+describe('SEC-DB-20 TR-14 review: a writer set aside twice, snapshots this release, a copy set aside rewriting', () => {
   it("holds a writer's earliest set-aside: a second line for it never passes over more; the command writes no second", async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };
