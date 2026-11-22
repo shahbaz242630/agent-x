@@ -40,7 +40,7 @@ import { MANDATES } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
-import type { ChainProblem } from '@agentx/platform/audit-chain';
+import type { AnchorPoint, Chain, ChainProblem, HeadSeen, WitnessLog } from '@agentx/platform/audit-chain';
 import {
   type Database,
   type DatabaseTransaction,
@@ -183,6 +183,8 @@ export function createStateNames({
   walked: beforeNaming = () => Promise.resolve(),
   looked = () => Promise.resolve(),
   unnamedTooLongMs = UNNAMED_TOO_LONG_MS,
+  witness,
+  anchors,
 }: {
   /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -196,15 +198,22 @@ export function createStateNames({
   readonly looked?: (at: 'read' | 'judged') => Promise<void>;
   /** How long a naming may go on unended before it is an error (tests: shorter). */
   readonly unnamedTooLongMs?: number;
+  /** The heads copies witnessed (TR-1), the one held set every consumer reads (TR-9): none without a witness log. */
+  readonly witness?: Pick<WitnessLog, 'heldTo'> | undefined;
+  /** The chains' latest anchors: the walk holds to the organisation's too. */
+  readonly anchors?: { latest(chain: Chain): AnchorPoint | undefined } | undefined;
 }): StateNames {
   const trail = createAuditTrail({ keys, ids });
 
-  /** The organisation's whole chain walked from its start, its tracked events kept as read; the problem, if it fails. */
-  const walkedWhole = async (orgId: string): Promise<Walked | ChainProblem> => {
+  /**
+   * The organisation's whole chain walked from its start, its tracked events kept as read; the problem, if it fails.
+   * Held to `heldTo` (TR-7 A2): a chain cut back below one of them is `cut_back`, so no rolled-back state is named.
+   */
+  const walkedWhole = async (orgId: string, heldTo: readonly HeadSeen[]): Promise<Walked | ChainProblem> => {
     let at: CheckedPoint = CHAIN_START;
     const kept = new Map<string, TrailEvent[]>();
     for (;;) {
-      const { step, kept: read } = await trail.walkFrom(database, orgId, at, EVENTS_A_STEP, TRACKED_ACTIONS);
+      const { step, kept: read } = await trail.walkFrom(database, orgId, at, EVENTS_A_STEP, TRACKED_ACTIONS, heldTo);
       if (!step.ok) return step.problem;
       for (const event of read) {
         const at = objectKey(event.subjectType, event.subjectId);
@@ -346,7 +355,12 @@ export function createStateNames({
         return own.outcome !== 'verified' || namedFromStart(own.trail);
       });
       if (done) return;
-      const walked = await walkedWhole(orgId);
+      // Asked before the walk's first statement, as the anchor check's walk asks them: every head a copy witnessed, and
+      // the latest anchor, each a place the chain must still pass through.
+      const chain: Chain = { kind: 'organisation', orgId };
+      const anchor = anchors?.latest(chain);
+      const heldTo = [...(witness?.heldTo(chain) ?? []), ...(anchor === undefined ? [] : [anchor])];
+      const walked = await walkedWhole(orgId, heldTo);
       if (!('kept' in walked)) {
         // A chain that fails its whole walk is tampering, as the anchor check's: the alarm, and the same hold (TR-10).
         log.error('audit.integrity_failed', {

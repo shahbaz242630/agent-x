@@ -24,7 +24,7 @@ import {
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 import { type AuditTrail, createAuditTrail, recordHoldEvent } from './audit-trail.ts';
@@ -511,6 +511,36 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     expect(lines('audit.integrity_failed')).toEqual([
       expect.objectContaining({ level: 'error', chain: 'organisation', check: 'record', orgId: org }),
     ]);
+  });
+
+  it('SEC-DB-11 a head lock reading a database clock too far from the app’s: the write refused, the alarm naming how far (TR-7 A1)', async () => {
+    await newAgent();
+    const before = await attacker.query<{ n: string }>(
+      'select pg_catalog.count(*)::text as n from audit.events where org_id = $1',
+      [org],
+    );
+    // The app's wall clock 10 minutes on stands for the database's moved 10 minutes back: the same gap at the head lock.
+    const wall = Date.now.bind(Date);
+    const skewed = vi.spyOn(Date, 'now').mockImplementation(() => wall() + 10 * 60_000);
+    try {
+      await expect(inOrg((tx, states) => insertAgent(tx, states, newId()))).rejects.toMatchObject({
+        name: 'ChainClockDiffers',
+        chain: { kind: 'organisation', orgId: org },
+      });
+    } finally {
+      skewed.mockRestore();
+    }
+    const [alarm] = lines('audit.integrity_failed');
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', chain: 'organisation', check: 'record', reason: 'clocks_differ' }),
+    ]);
+    expect(Number(alarm?.differsMs)).toBeLessThan(-9 * 60_000);
+    // Nothing sealed with the skewed time; with the clocks agreeing again, writes go on.
+    expect(
+      await attacker.query('select pg_catalog.count(*)::text as n from audit.events where org_id = $1', [org]),
+    ).toEqual(before);
+    await expect(inOrg((tx, states) => insertAgent(tx, states, newId()))).resolves.toBeUndefined();
+    expect(lines('audit.integrity_failed')).toHaveLength(1);
   });
 
   it("names the platform's chain when that is the one refusing, as an operator action's work may meet it (B1c)", async () => {

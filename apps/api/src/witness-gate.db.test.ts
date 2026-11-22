@@ -36,6 +36,7 @@ import {
   createMemoryAnchorStore,
   createWitnessLog,
   type DigestLog,
+  type HeadSeen,
   signAnchor,
   type WitnessedHead,
   type WitnessLog,
@@ -1401,6 +1402,8 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     more: {
       readonly looked?: (w: World, at: 'read' | 'judged') => Promise<void>;
       readonly unnamedTooLongMs?: number;
+      readonly witness?: Pick<WitnessLog, 'heldTo'>;
+      readonly anchors?: { latest(chain: Chain): HeadSeen | undefined };
     } = {},
   ) {
     const { w, acting } = await ready();
@@ -1431,10 +1434,12 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
       );
     }
     capture = new LogCapture();
-    const { looked, unnamedTooLongMs } = more;
+    const { looked, unnamedTooLongMs, witness, anchors } = more;
     /** The job as a process starts it: a new one has none of an earlier one's memory. */
     const started = (tooLongMs = unnamedTooLongMs) =>
       createStateNames({
+        witness,
+        anchors,
         ...(walked === undefined ? {} : { walked: (next: SignedStateTable) => walked(w, next) }),
         ...(looked === undefined ? {} : { looked: (at: 'read' | 'judged') => looked(w, at) }),
         ...(tooLongMs === undefined ? {} : { unnamedTooLongMs: tooLongMs }),
@@ -1510,6 +1515,95 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     expect(lines('state_names.named')).toEqual([]);
     const hold = await signed(w, (tx, states) => states.integrityHold(tx, w.org, 'none'));
     expect(hold.outcome).toBe('held');
+  });
+
+  /**
+   * An unnamed organisation whose agent is stopped, the head then witnessed, and the owner's cut back below it: the stop
+   * and the head gone, the agent's row put back. Named by the job holding the stop as `by` says (none: as before TR-7 A2).
+   */
+  async function cutBelowAWitnessedStop(by: 'witness' | 'anchor' | 'none') {
+    const witnessed: WitnessedHead[] = [];
+    let anchored: HeadSeen | undefined;
+    const legacy = await legacyOrganisation(false, undefined, {
+      witness: { heldTo: () => witnessed },
+      anchors: { latest: () => anchored },
+    });
+    const { w } = legacy;
+    const cut = await savedForCut(w);
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, untracked(AGENTS), { orgId: w.org, id: w.agent }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspended',
+        details: { pendingRequests: 'cancel' },
+      }),
+    );
+    let stop: HeadSeen | undefined;
+    await asOwner(w, async (owner) => {
+      const head = await owner.saveHead();
+      stop = { seq: BigInt(head.seq), hash: head.hash };
+    });
+    if (stop === undefined) throw new Error('the stop should have moved the head');
+    if (by === 'witness') witnessed.push({ ...stop, at: 0 });
+    if (by === 'anchor') anchored = stop;
+    await cut();
+    return legacy;
+  }
+
+  it.each(['witness', 'anchor'] as const)(
+    'SEC-DB-20 TR-7 A2 state names: a chain cut back below a stop held by the %s names nothing, raises the alarm and holds',
+    async (by) => {
+      const { w, job } = await cutBelowAWitnessedStop(by);
+      await job.run();
+      expect(lines('audit.integrity_failed')).toEqual([
+        expect.objectContaining({ orgId: w.org, chain: 'organisation', check: 'state_names', reason: 'cut_back' }),
+      ]);
+      expect(lines('state_names.named')).toEqual([]);
+      expect(await heldNow(w)).toBe('held');
+    },
+  );
+
+  it('TR-7 A2’s positive control: held to nothing, as before, the cut chain checks out whole and its rolled-back states are named', async () => {
+    const { w, job } = await cutBelowAWitnessedStop('none');
+    await job.run();
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 2 })]);
+    expect(await heldNow(w)).not.toBe('held');
+  });
+
+  /**
+   * An unnamed organisation anchored at its head as a rebase leaves it (the rebase's line stands in for its anchor),
+   * its cancel then hidden by the owner, or not. A rebase is only ever signed over a chain that checks out whole from
+   * its first event (chain-rebase.ts's `broken`), and a repair commits only a chain that does (chain-repair.ts), so an
+   * honest rebased chain walks whole: TR-7 D4's re-held organisation was the gap map's worry, not a case that arises.
+   */
+  async function rebasedAtItsHead(tampered: boolean) {
+    let anchored: HeadSeen | undefined;
+    const legacy = await legacyOrganisation(false, undefined, { anchors: { latest: () => anchored } });
+    const { w } = legacy;
+    await asOwner(w, async (owner) => {
+      const head = await owner.saveHead();
+      anchored = { seq: BigInt(head.seq), hash: head.hash };
+    });
+    if (tampered) await hideTheCancel(w);
+    return legacy;
+  }
+
+  it('TR-7 D4: an honest rebased chain walks whole from its start and is named, never held', async () => {
+    const { w, job } = await rebasedAtItsHead(false);
+    await job.run();
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 2 })]);
+    expect(await heldNow(w)).not.toBe('held');
+  });
+
+  it('SEC-DB-20 TR-7 D4: an event edited below a rebase’s anchor is still TR-10’s alarm and hold', async () => {
+    const { w, job } = await rebasedAtItsHead(true);
+    await job.run();
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ orgId: w.org, chain: 'organisation', check: 'state_names', reason: 'hash' }),
+    ]);
+    expect(lines('state_names.named')).toEqual([]);
+    expect(await heldNow(w)).toBe('held');
   });
 
   /** Whether the organisation's and its agent's states carry names where they must (authorityOf's check), and the hold. */

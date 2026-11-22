@@ -466,6 +466,8 @@ export interface AuditTrail {
     from: CheckedPoint,
     most: number,
     actions: readonly string[],
+    /** As checkFromAnchor's (TR-7 A2): a step that doesn't pass through each it can judge is `cut_back`, keeping nothing. */
+    heldTo?: readonly HeadSeen[],
   ): Promise<{ readonly step: ChainStep; readonly kept: readonly WalkedEvent[] }>;
   /**
    * One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's,
@@ -1301,7 +1303,7 @@ function writerFor(
       const row = rows[0];
       if (row === undefined) return undefined;
       hold.held = heldThrough(hold.seen, row.seen_hash);
-      lockedAt = clockOf(row);
+      lockedAt = clockOf(row, chainOf(orgId));
       return { head: headFields(row), now: lockedAt };
     },
 
@@ -2091,14 +2093,16 @@ export function createAuditTrail({
       from: CheckedPoint,
       most: number,
       actions: readonly string[],
+      heldTo: readonly HeadSeen[] = [],
     ) {
       const chain = chainOf(orgId);
       const kept: WalkedEvent[] = [];
-      const step = await withTenant(
+      const found = new Map<bigint, Buffer>();
+      const walk = await withTenant(
         db,
         chain.orgId,
         (tx) => {
-          const reader = readerFor(tx, chain.orgId, keys);
+          const reader = watchingPlaces(readerFor(tx, chain.orgId, keys), heldTo, found);
           // The walk's own reads, each event it read looked at as it goes: no read of their own.
           const keeping: ChainReader & ChainEdgeReader = {
             ...reader,
@@ -2115,6 +2119,8 @@ export function createAuditTrail({
         },
         JOB_LIMITS,
       );
+      // A walk that missed a head it is held to is the chain cut back: nothing it read is kept.
+      const step = heldToWitnessed(walk, heldTo, found, from.seq);
       return { step, kept: step.ok ? kept : [] };
     },
 

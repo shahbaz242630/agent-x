@@ -468,8 +468,8 @@ export const PLAIN_WORDS = {
   'audit.integrity_failed': {
     happened:
       'A tamper check found records, the audit trail or the database set-up changed, or could not check them for too long.',
-    broke: 'Whatever met it was refused or stopped, and an organisation found tampered with is put on hold.',
-    next: 'Treat it as a possible break-in and follow the incident runbook straight away.',
+    broke: 'What met it was refused or stopped; an organisation found tampered with is held.',
+    next: 'Follow the incident runbook as for a break-in; if the clocks differ, check server time first.',
   },
   'audit.hold_not_kept': {
     happened: 'A security hold that could not be recorded could not be written to the waiting list either.',

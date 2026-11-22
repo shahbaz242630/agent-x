@@ -38,7 +38,7 @@ import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { schemaSoundAtStart, whileServerFull } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
-import { ChainBroken } from '@agentx/platform/audit-chain';
+import { ChainBroken, ChainClockDiffers } from '@agentx/platform/audit-chain';
 import {
   type CheckedDeclaration,
   type Config,
@@ -317,7 +317,11 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
     // The platform chain refused the event or the database did: either way no
     // one could later account for this start. A broken chain is tampering, or a
     // key version this process doesn't hold, and raises the integrity alarm.
-    if (error instanceof ChainBroken) logger.error('audit.integrity_failed', { chain: 'platform', check: 'start' });
+    // The database's clock far from the app's (TR-7 A1) is named, by how far: NTP first, not tampering by itself.
+    if (error instanceof ChainBroken) {
+      const why = error instanceof ChainClockDiffers ? { reason: 'clocks_differ', differsMs: error.differsMs } : {};
+      logger.error('audit.integrity_failed', { chain: 'platform', check: 'start', ...why });
+    }
     logger.error('api.start_not_recorded', { err: error });
     await database.destroy();
     logger.flush();
