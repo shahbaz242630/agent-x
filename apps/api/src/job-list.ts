@@ -723,7 +723,13 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // The grant summaries of memberships added before 0085 built from each organisation's history (OR1).
     job('grant_summaries', createGrantSummaryBuilding(organisationJob), GRANT_SUMMARIES_EVERY_MS, LONG_MS),
     // Each tracked object recorded before the names given them, once its chain checks out whole (TR-3 residual 75).
-    job('state_names', createStateNames(organisationJob), STATE_NAMES_EVERY_MS, LONG_MS),
+    // Its whole walk held to the heads witnessed and the latest anchor, as the anchor check's (TR-7 A2).
+    job(
+      'state_names',
+      createStateNames({ ...organisationJob, witness, anchors: anchorStore }),
+      STATE_NAMES_EVERY_MS,
+      LONG_MS,
+    ),
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
     job(
       'holdings_check',
