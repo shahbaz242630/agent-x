@@ -1541,6 +1541,10 @@ export function createWitnessLog({
     const was = writer;
     writer = newWriter();
     alarm('own_writer_set_aside', { writer: was, renamedTo: writer });
+    // Its snapshots under the old ID are passed over at every start now: a leader writes one under the new at its next
+    // flush after a whole read, not up to an hour on (S210 R1-3, playbook H step 4).
+    lastSnapshotAt = undefined;
+    changedSinceSnapshot = true;
     for (const [name, list] of held) {
       list.forEach(({ seq, hash, at, by }, index) => {
         if (by !== was) return;

@@ -784,3 +784,25 @@ describe('SEC-DB-20 S210 R1-1 a heads file misdated by its writer', () => {
     expect(starting.alarms('clock_skew')).toEqual([]);
   });
 });
+
+describe('SEC-DB-20 S210 R1-3 a leader that finds its own ID set aside', () => {
+  it('writes a snapshot under its new ID at its next flush after a whole read, not an hour on', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const leader = copyOn(store, { snapshots, leads: true, time });
+    await leader.log.refresh();
+    leader.log.soon(CHAIN, head(2n, 2));
+    await leader.log.flush();
+    const was = leader.log.writer();
+    expect(names(snapshots, 'snapshots').map(writerOfName)).toEqual([was]);
+    time.at += MINUTE;
+    await copyOn(store, { signer: 'operator', time }).log.setAside(was, REASON);
+    time.at += 1000;
+    await leader.log.refresh();
+    expect(leader.log.writer()).not.toBe(was);
+    await leader.log.refresh();
+    await leader.log.flush();
+    expect(names(snapshots, 'snapshots').map(writerOfName).toSorted()).toEqual([was, leader.log.writer()].toSorted());
+  });
+});
