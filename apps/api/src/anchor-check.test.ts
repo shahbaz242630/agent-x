@@ -15,6 +15,7 @@ import {
   createAnchorCheck,
   MOST_ORGANIZATIONS,
   type OrganisationChains,
+  PLATFORM_GROWTH_SAID,
   scheduleAnchorCheck,
 } from './anchor-check.ts';
 
@@ -1230,5 +1231,50 @@ describe('one organisation anchored now, for the hand-off after a restart (gate 
 
     expect(anchors.latest({ kind: 'organisation', orgId: ORG })).toBeUndefined();
     expect(events()).toEqual([]);
+  });
+});
+
+describe('TR-13 the platform chain growing fast between two anchors', () => {
+  const SAID = BigInt(PLATFORM_GROWTH_SAID);
+  /** The platform chain's lines of fast growth. */
+  const fast = (capture: LogCapture) => capture.lines().filter((line) => line.event === 'audit.platform_chain_fast');
+
+  it('says so in plain words, an error the apps’ error alerts carry, when it grew past half a hand-off’s walk', async () => {
+    const { checked } = chainGiving([ok(3n), ok(3n + SAID + 1n)]);
+    const { check, capture, clock } = checking([checked]);
+    await check.run();
+    clock.advanceBy(10 * 60_000);
+    await check.run();
+
+    expect(fast(capture)).toEqual([
+      expect.objectContaining({
+        level: 'error',
+        grew: PLATFORM_GROWTH_SAID + 1,
+        minutes: 10,
+        fromSeq: '3',
+        toSeq: String(3n + SAID + 1n),
+        said: PLATFORM_GROWTH_SAID,
+        most: PLATFORM_GROWTH_SAID * 2,
+        says: expect.stringContaining('platform audit history') as unknown,
+      }),
+    ]);
+  });
+
+  it('says nothing at half exactly, nor for the first anchor however long the chain', async () => {
+    const { checked } = chainGiving([ok(SAID * 3n), ok(SAID * 4n)]);
+    const { check, capture } = checking([checked]);
+    await check.run();
+    await check.run();
+
+    expect(fast(capture)).toEqual([]);
+  });
+
+  it('says nothing of an organisation’s chain growing as fast: its walks are its own', async () => {
+    const { checked } = chainGiving([ok(3n), ok(3n + SAID * 2n)], { kind: 'organisation', orgId: ORG });
+    const { check, capture } = checking([checked]);
+    await check.run();
+    await check.run();
+
+    expect(fast(capture)).toEqual([]);
   });
 });

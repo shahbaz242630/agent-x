@@ -163,7 +163,7 @@ describe('My activity (6E1a)', () => {
     expect(Object.keys(asked?.body as object).sort()).toEqual(['format', 'from', 'to']);
   });
   it.each([
-    ['ACTIVITY_EXPORTS_SPENT', 409, /5 downloads of your activity in the last hour/],
+    ['ACTIVITY_EXPORTS_SPENT', 409, /downloads of your activity as you may for now: 5 an hour, 20 a day/],
     ['ACTIVITY_EXPORTS_BUSY', 503, /making another download right now/],
   ])('says %s in plain words', async (code, status, words) => {
     answers.set(
