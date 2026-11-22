@@ -467,7 +467,7 @@ export const PLAIN_WORDS = {
   },
   'audit.integrity_failed': {
     happened:
-      'A tamper check found records, the audit trail or the database set-up changed, or could not check them for too long.',
+      "A tamper check found records, the audit trail or the database set-up changed (the database's clock far from the app's among them), or could not check them for too long.",
     broke: 'Whatever met it was refused or stopped, and an organisation found tampered with is put on hold.',
     next: 'Treat it as a possible break-in and follow the incident runbook straight away.',
   },

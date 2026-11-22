@@ -452,7 +452,7 @@ function writerFor(
         accepted: heldThrough(hold.accepted, row.taken_hash),
       };
       // A second head row means someone went round the app: no head can be trusted.
-      return { head: others.length > 0 ? undefined : headFields(row), now: clockOf(row) };
+      return { head: others.length > 0 ? undefined : headFields(row), now: clockOf(row, CHAIN) };
     },
 
     async start(head) {

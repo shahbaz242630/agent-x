@@ -1301,7 +1301,7 @@ function writerFor(
       const row = rows[0];
       if (row === undefined) return undefined;
       hold.held = heldThrough(hold.seen, row.seen_hash);
-      lockedAt = clockOf(row);
+      lockedAt = clockOf(row, chainOf(orgId));
       return { head: headFields(row), now: lockedAt };
     },
 

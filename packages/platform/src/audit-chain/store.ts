@@ -593,11 +593,41 @@ export function headFields(row: Readonly<Record<string, unknown>>): ChainHead | 
   return { seq, hash, mac, macKeyVersion };
 }
 
-/** The clock a writer's lockHead read with the head (its `now`): a time, or the store is failing. */
-export function clockOf(row: Readonly<Record<string, unknown>>): Date {
+/**
+ * How far the database's clock may be from the app's when a head is locked (TR-7 A1). Every sealed time is the
+ * database's, so its owner moving the clock would stretch every horizon read from them (AT13d's 7 days, the decision
+ * waits). Two minutes: far past the drift of servers kept to time, nothing beside any horizon.
+ */
+export const CLOCKS_DIFFER_MS = 120_000;
+
+/**
+ * The database's clock is further from the app's than CLOCKS_DIFFER_MS allows when a head is locked: nothing is
+ * sealed with its time until someone has looked into it (the clock moved, or a server out of time). A ChainBroken, so
+ * every caller refuses and raises the alarm as for a broken head.
+ */
+export class ChainClockDiffers extends ChainBroken {
+  /** The database's clock less the app's, in milliseconds. */
+  readonly differsMs: number;
+
+  constructor(chain: Chain, differsMs: number) {
+    super(chain);
+    this.message = `The database's clock is ${Math.round(Math.abs(differsMs) / 1000)} seconds ${differsMs > 0 ? 'ahead of' : 'behind'} the app's, more than the ${CLOCKS_DIFFER_MS / 1000} seconds allowed, so no event is sealed with its time until someone has looked into it`;
+    this.name = 'ChainClockDiffers';
+    this.differsMs = differsMs;
+  }
+}
+
+/**
+ * The clock a writer's lockHead read with the head (its `now`): a time within CLOCKS_DIFFER_MS of the app's wall clock
+ * (`wallMs`, read once the statement has come back), ChainClockDiffers past it, or the store is failing. The wall
+ * clock, never a test's fixed Clock: the two machines' clocks are what is compared, as in production.
+ */
+export function clockOf(row: Readonly<Record<string, unknown>>, chain: Chain, wallMs: number = Date.now()): Date {
   const { now } = row;
   if (!(now instanceof Date) || !Number.isFinite(now.getTime()))
     throw new ChainStoreError('it read no clock with the head');
+  const differsMs = now.getTime() - wallMs;
+  if (Math.abs(differsMs) > CLOCKS_DIFFER_MS) throw new ChainClockDiffers(chain, differsMs);
   return now;
 }
 

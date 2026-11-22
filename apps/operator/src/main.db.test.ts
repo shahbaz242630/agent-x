@@ -1727,9 +1727,10 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
     const orgId = await madeOrganisation();
     const head = await anchoredAhead({ kind: 'organisation', orgId }, 1n);
     const before = await databaseNow(app);
-    // The job's clock a year ahead: only Date is faked, so the database and its timers go on as they are.
+    // The job's clock a minute ahead, within what the head lock allows (CLOCKS_DIFFER_MS, TR-7 A1; further is refused):
+    // only Date is faked, so the database and its timers go on as they are.
     vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date(Date.now() + 365 * 86_400_000));
+    vi.setSystemTime(new Date(Date.now() + 60_000));
     let done: Awaited<ReturnType<typeof run>>;
     try {
       done = await rebase(orgId, head).running;
