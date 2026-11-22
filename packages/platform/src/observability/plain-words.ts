@@ -836,6 +836,16 @@ export const PLAIN_WORDS = {
     broke: 'Nothing new was built; approvals still work from the full member history.',
     next: 'It is tried again in about an hour. If it keeps failing, check the database.',
   },
+  'state_names.unnamed_since_walk': {
+    happened: 'A record was written without links during the check, likely by the old version in a deploy.',
+    broke: "This organisation's older records were not linked this run; nothing was held.",
+    next: 'It is tried again in about an hour. If it repeats, look for an old version still running.',
+  },
+  'state_names.unnamed_too_long': {
+    happened: "One organisation's older records have not been linked for a day of runs in a row.",
+    broke: 'A missing older event about its records is still not caught as tampering.',
+    next: 'Read its earlier warnings: find an old version still running, or anyone editing the database.',
+  },
   'state_names.failed': {
     happened: "One organisation's older records could not all be given the links that protect their history.",
     broke: 'Those not reached are still read from the log alone; nothing else changed.',

@@ -256,8 +256,8 @@ describe("listing a table's row IDs", () => {
 describe('looking for a row pointing at an event since a place, its details lacking a key (TR-16)', () => {
   /** An organisation of its own, so the rows and events looked at are only this test's. */
   const LOOKED_ORG = '0199a0f0-0000-7000-8000-00000000000e';
-  const lacking = (afterSeq: bigint, org = LOOKED_ORG) =>
-    withTenant(app, LOOKED_ORG, (tx) => signedRowsLackingSince(tx, GRANTS, org, afterSeq, 'named'));
+  const lacking = (afterSeq: bigint, org = LOOKED_ORG, limit = 5) =>
+    withTenant(app, LOOKED_ORG, (tx) => signedRowsLackingSince(tx, GRANTS, org, afterSeq, 'named', limit));
 
   /** An event of the organisation's at `seq`, its details as given, put in past the chain's own checks. */
   async function eventAt(seq: number, details: string): Promise<string> {
@@ -277,18 +277,21 @@ describe('looking for a row pointing at an event since a place, its details lack
     return id;
   }
 
-  it('finds one pointing past the place at an event lacking the key, and none at or before it, or carrying it', async () => {
-    await newGrant(LOOKED_ORG, await eventAt(1, '{}'));
+  it('lists those pointing past the place at an event lacking the key, none at or before it, or carrying it', async () => {
+    const first = await newGrant(LOOKED_ORG, await eventAt(1, '{}'));
     await newGrant(LOOKED_ORG, await eventAt(2, '{"named":"yes"}'));
-    expect(await lacking(0n)).toBe(true);
-    expect(await lacking(1n)).toBe(false);
-    await newGrant(LOOKED_ORG, await eventAt(3, '{"other":"x"}'));
-    expect(await lacking(1n)).toBe(true);
-    expect(await lacking(3n)).toBe(false);
+    expect(await lacking(0n)).toEqual([first]);
+    expect(await lacking(1n)).toEqual([]);
+    const third = await newGrant(LOOKED_ORG, await eventAt(3, '{"other":"x"}'));
+    expect(await lacking(0n)).toEqual([first, third]);
+    expect(await lacking(0n, LOOKED_ORG, 1)).toEqual([first]);
+    expect(await lacking(1n)).toEqual([third]);
+    expect(await lacking(3n)).toEqual([]);
   });
 
-  it('refuses an organisation that is not a UUID, before any SQL', async () => {
+  it('refuses an organisation that is not a UUID, or a limit below one, before any SQL', async () => {
     await expect(lacking(0n, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
+    await expect(lacking(0n, LOOKED_ORG, 0)).rejects.toBeInstanceOf(RangeError);
   });
 });
 

@@ -594,9 +594,10 @@ export async function signedRowIds<Schema>(
 }
 
 /**
- * Whether any of the organisation's rows in the table points at a state event past `afterSeq` whose details carry
- * no `detail`: state-names.ts's look, in its naming transaction, for a state with no names written since its walk
- * (TR-16). The pointer is read, never believed: an answer of true only makes the naming wait for its next run.
+ * The IDs of the organisation's rows in the table (at most `limit`) pointing at an event past `afterSeq` whose details
+ * carry no `detail`: state-names.ts's look for a state with no names written since its walk (TR-16). The pointer is
+ * read, never believed: the caller verifies each row, so one pointed at any other event (another subject's, one not a
+ * state) is found here and refused as tampering there, never taken as a state.
  */
 export async function signedRowsLackingSince<Schema>(
   tx: Transaction<Schema>,
@@ -604,18 +605,20 @@ export async function signedRowsLackingSince<Schema>(
   orgId: string,
   afterSeq: bigint,
   detail: string,
-): Promise<boolean> {
+  limit: number,
+): Promise<string[]> {
   checkTable(table);
   if (!UUID.test(orgId)) throw new RangeError('A signed row is named by UUIDs');
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
   await assertTenant(tx, orgId);
-  const { rows } = await sql<{ found: boolean }>`
-    select exists (
-      select from ${sql.table(table.table)} as target
-      join audit.events as e on e.org_id = target.org_id and e.id = target.state_event_id
-      where target.org_id = ${orgId} and e.seq > ${afterSeq} and (e.details::jsonb -> ${detail}) is null
-    ) as found
+  const { rows } = await sql<{ id: string }>`
+    select target.id::text as id from ${sql.table(table.table)} as target
+    join audit.events as e on e.org_id = target.org_id and e.id = target.state_event_id
+    where target.org_id = ${orgId} and e.seq > ${afterSeq} and (e.details::jsonb -> ${detail}) is null
+    order by target.id
+    limit ${limit}
   `.execute(tx);
-  return rows[0]?.found === true;
+  return rows.map(({ id }) => id);
 }
 
 /**
