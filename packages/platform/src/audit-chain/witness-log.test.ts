@@ -1335,3 +1335,23 @@ describe('SEC-DB-20 TR-9 one held set: heldTo', () => {
     expect(seqs(leader.log.heldTo(CHAIN))).toEqual([5n, 4n, 3n]);
   });
 });
+
+describe('TR-7 C1 a stop below more heads than a read asks', () => {
+  it('witnessed gives the lowest held above the anchor after the highest few, a released one too; none twice', () => {
+    const { log } = witnessOn();
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    // At or below the anchor, still held on the copy that anchors: not the one a read needs.
+    log.soon(CHAIN, head(1n, 1));
+    log.soon(CHAIN, head(5n, 5));
+    // A copy's heads on a cut branch above the stop, more than a read asks.
+    for (let seq = 10n; seq < 20n; seq += 1n) log.soon(CHAIN, head(seq, 9));
+    expect(seqs(log.witnessed(CHAIN, 8))).toEqual([19n, 18n, 17n, 16n, 15n, 14n, 13n, 12n, 5n]);
+    // Released on a probe's finding, the stop is still the lowest held to.
+    log.release(CHAIN, [head(5n, 5)]);
+    expect(seqs(log.witnessed(CHAIN, 8)).at(-1)).toBe(5n);
+    // Within what is asked, nothing added.
+    const all = [19n, 18n, 17n, 16n, 15n, 14n, 13n, 12n, 11n, 10n, 5n, 1n];
+    expect(seqs(log.witnessed(CHAIN, 20))).toEqual(all);
+    expect(seqs(log.witnessed(CHAIN, 12))).toEqual(all);
+  });
+});

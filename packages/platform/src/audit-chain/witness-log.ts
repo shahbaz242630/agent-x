@@ -183,7 +183,8 @@ export interface WitnessAnchors {
 export interface WitnessLog extends ChainWitness {
   /**
    * heldTo, each head's time (compact ones' too) on this process's own clock (TR-12): for setting against a time it took
-   * itself (the digest's accepts), where heldTo's are the store's clock, as file names go.
+   * itself (the digest's accepts), where heldTo's are the store's clock, as file names go. Where `most` leaves heads out,
+   * the lowest held above the chain's anchor follows the highest (TR-7 C1): a stop below many heads still holds reads.
    */
   witnessed(chain: Chain, most?: number): readonly WitnessedHead[];
   /** note(chain, head, 'now') and a wait for it (settled): for a writer outside the API's requests, the operator's. */
@@ -1727,6 +1728,34 @@ export function createWitnessLog({
     return [...heads, ...compact].toSorted((one, other) => (one.seq > other.seq ? -1 : 1)).slice(0, most);
   };
 
+  /**
+   * The lowest head held to above the chain's anchor (any, with none known), compact ones too (TR-7 C1): a read asking
+   * only the highest few is held to it as well, so a stop below more heads than it asks still holds it.
+   */
+  const lowestAbove = (name: string): WitnessedHead | undefined => {
+    const anchored = anchoredAt(name) ?? 0n;
+    const list = held.get(name) ?? [];
+    let lowest: WitnessedHead | undefined;
+    // Held highest first: the last above the anchor that stands.
+    for (let index = firstBelow(list, anchored + 1n) - 1; index >= 0 && lowest === undefined; index -= 1) {
+      const one = list[index];
+      if (one !== undefined && stands(name, one)) lowest = one;
+    }
+    for (const one of compactOf(name)) {
+      if (one.seq > anchored && (lowest === undefined || one.seq < lowest.seq)) lowest = one;
+    }
+    return lowest;
+  };
+
+  /** heldOf, and where `most` left it out, the lowest above the anchor last (TR-7 C1). */
+  const withLowest = (name: string, most: number): readonly WitnessedHead[] => {
+    const heads = heldOf(name, most);
+    const last = heads.at(-1);
+    if (heads.length < most || last === undefined) return heads;
+    const lowest = lowestAbove(name);
+    return lowest === undefined || lowest.seq >= last.seq ? heads : [...heads, lowest];
+  };
+
   return Object.freeze({
     note,
     settled,
@@ -1744,7 +1773,7 @@ export function createWitnessLog({
       // A head noted here, as noted by this clock. One read from a file, or compact, as its store-clock time less the
       // least offset: that is never below the true one, so this errs early by at most that call's trip and the Date's
       // second, well inside the digest's ACCEPT_MARGIN_MS (a minute) it is set against.
-      return heldOf(nameOf(chain), most ?? Number.POSITIVE_INFINITY).map((head) => ({
+      return withLowest(nameOf(chain), most ?? Number.POSITIVE_INFINITY).map((head) => ({
         ...bare(head),
         at: notedHere.get(head) ?? head.at - leastOffset,
       }));

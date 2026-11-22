@@ -1963,7 +1963,7 @@ describe('the heads a read is held to (TR-1: heldTo, the witnessed heads)', () =
       witnessed: (chain) => witnessedHeads.get(chain.kind === 'platform' ? 'platform' : chain.orgId) ?? [],
     });
 
-  it('holds a read to its own head seen and the highest witnessed heads, each once, at most MOST_WITNESSED of them', () => {
+  it('holds a read to its own head seen and the highest witnessed heads, each once, at most MOST_WITNESSED and the lowest', () => {
     const log = witnessedLog();
     const many = Array.from({ length: MOST_WITNESSED + 3 }, (_, at) => ({
       seq: BigInt(30 - at),
@@ -1974,7 +1974,10 @@ describe('the heads a read is held to (TR-1: heldTo, the witnessed heads)', () =
     log.heads(CHAIN)?.saw(headAt(4n));
     const heldTo = log.heads(CHAIN)?.heldTo ?? [];
     expect(heldTo[0]).toEqual(headAt(4n));
-    expect(heldTo.slice(1).map(({ seq }) => seq)).toEqual(many.slice(0, MOST_WITNESSED).map(({ seq }) => seq));
+    // TR-7 C1: the lowest given too, so more heads above a stop than a read asks never hide it.
+    expect(heldTo.slice(1).map(({ seq }) => seq)).toEqual(
+      [...many.slice(0, MOST_WITNESSED), ...many.slice(-1)].map(({ seq }) => seq),
+    );
     // The head seen stays this process's own: the witnessed heads are held to, never raised into it.
     expect(log.heads(CHAIN)?.seen).toEqual(headAt(4n));
     // Seen and witnessed alike, it is held to once.
