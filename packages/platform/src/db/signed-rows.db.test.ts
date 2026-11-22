@@ -15,10 +15,14 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createDatabase, type Database } from './database.ts';
 import {
+  oldestCarryingAgeMs,
+  oldestEventAgeMs,
+  oldestLackingAgeMs,
   pointSignedRow,
   readSignedRow,
   type SignedFieldValues,
   signedRowIds,
+  signedRowsLackingSince,
   type SignedStateTable,
   writeSignedRow,
 } from './signed-rows.ts';
@@ -249,6 +253,88 @@ describe("listing a table's row IDs", () => {
     expect(await newest(1, null)).toEqual([third, second]);
     expect(await newest(5, third)).toEqual([second, first]);
     expect(await newest(5, first)).toEqual([]);
+  });
+});
+
+describe('looking for a row pointing at an event since a place, its details lacking a key (TR-16)', () => {
+  /** An organisation of its own, so the rows and events looked at are only this test's. */
+  const LOOKED_ORG = '0199a0f0-0000-7000-8000-00000000000e';
+  const lacking = (afterSeq: bigint, org = LOOKED_ORG, limit = 5) =>
+    withTenant(app, LOOKED_ORG, (tx) => signedRowsLackingSince(tx, GRANTS, org, afterSeq, 'named', limit));
+
+  /** An event of the organisation's at `seq`, its details as given, put in past the chain's own checks. */
+  async function eventAt(seq: number, details: string): Promise<string> {
+    const id = newId();
+    await admin.query('alter table audit.events disable trigger user');
+    try {
+      await admin.query(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version)
+         values ($1, $2, $3, now(), 'system', 'test', 'grant.noted', 'grant', $3, 1, $4,
+           decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode('00', 'hex'), 1)`,
+        [LOOKED_ORG, seq, id, details],
+      );
+    } finally {
+      await admin.query('alter table audit.events enable trigger user');
+    }
+    return id;
+  }
+
+  it('lists those pointing past the place at an event lacking the key, none at or before it, or carrying it', async () => {
+    const first = await newGrant(LOOKED_ORG, await eventAt(1, '{}'));
+    await newGrant(LOOKED_ORG, await eventAt(2, '{"named":"yes"}'));
+    expect(await lacking(0n)).toEqual([{ id: first, seq: 1n }]);
+    expect(await lacking(1n)).toEqual([]);
+    const third = await newGrant(LOOKED_ORG, await eventAt(3, '{"other":"x"}'));
+    expect(await lacking(0n)).toEqual([
+      { id: first, seq: 1n },
+      { id: third, seq: 3n },
+    ]);
+    expect(await lacking(0n, LOOKED_ORG, 1)).toEqual([{ id: first, seq: 1n }]);
+    expect(await lacking(1n)).toEqual([{ id: third, seq: 3n }]);
+    expect(await lacking(3n)).toEqual([]);
+  });
+
+  it('refuses an organisation that is not a UUID, or a limit below one, before any SQL', async () => {
+    await expect(lacking(0n, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
+    await expect(lacking(0n, LOOKED_ORG, 0)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('says how long ago the oldest event of the actions was recorded, by the database clock, or none', async () => {
+    const age = (org: string, actions: readonly string[]) =>
+      withTenant(app, LOOKED_ORG, (tx) => oldestEventAgeMs(tx, org, actions));
+    await eventAt(4, '{}');
+    await admin.query('alter table audit.events disable trigger user');
+    try {
+      await admin.query(
+        "update audit.events set recorded_at = now() - interval '2 hours' where org_id = $1 and seq = 4",
+        [LOOKED_ORG],
+      );
+    } finally {
+      await admin.query('alter table audit.events enable trigger user');
+    }
+    expect(await age(LOOKED_ORG, ['grant.noted'])).toBeGreaterThanOrEqual(2 * 60 * 60_000);
+    expect(await age(LOOKED_ORG, ['grant.never'])).toBeNull();
+    await expect(age('not-a-uuid', ['grant.noted'])).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('says how long ago the oldest event a row points at lacking the key was recorded, or none', async () => {
+    const lackingAge = (tenant: string, org = tenant) =>
+      withTenant(app, tenant, (tx) => oldestLackingAgeMs(tx, GRANTS, org, 'named'));
+    // The rows above point at events 1 (no key), 2 ("named") and 3 ("other"): 1 and 3 lack it.
+    expect(await lackingAge(LOOKED_ORG)).toBeGreaterThanOrEqual(0);
+    // An organisation with no rows: none.
+    expect(await lackingAge('0199a0f0-0000-7000-8000-0000000000ff')).toBeNull();
+    await expect(lackingAge(LOOKED_ORG, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('says how long ago the first event carrying the key was recorded, or none', async () => {
+    const carryingAge = (detail: string, org = LOOKED_ORG) =>
+      withTenant(app, LOOKED_ORG, (tx) => oldestCarryingAgeMs(tx, org, detail));
+    // Event 2 carries "named" (above); none carries "never".
+    expect(await carryingAge('named')).toBeGreaterThanOrEqual(0);
+    expect(await carryingAge('never')).toBeNull();
+    await expect(carryingAge('named', 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
   });
 });
 

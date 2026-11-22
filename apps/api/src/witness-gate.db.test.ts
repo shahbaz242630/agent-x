@@ -1395,7 +1395,14 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
    * names left off (each table's tracks dropped, as an image from before them wrote), the agent suspended choosing to
    * cancel (E1) and reactivated (E2) the same way. Then, with `named`, the job names them, its chain checked whole.
    */
-  async function legacyOrganisation(named: boolean, walked?: (w: World) => Promise<void>) {
+  async function legacyOrganisation(
+    named: boolean,
+    walked?: (w: World, next: SignedStateTable) => Promise<void>,
+    more: {
+      readonly looked?: (w: World, at: 'read' | 'judged') => Promise<void>;
+      readonly unnamedTooLongMs?: number;
+    } = {},
+  ) {
     const { w, acting } = await ready();
     const LEGACY_ORG = untracked(ORGANIZATIONS);
     const LEGACY_AGENTS = untracked(AGENTS);
@@ -1424,16 +1431,22 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
       );
     }
     capture = new LogCapture();
-    const job = createStateNames({
-      ...(walked === undefined ? {} : { walked: () => walked(w) }),
-      list: () => Promise.resolve([w.org]),
-      database: app,
-      keys,
-      ids,
-      logger: testLogger(capture),
-    });
+    const { looked, unnamedTooLongMs } = more;
+    /** The job as a process starts it: a new one has none of an earlier one's memory. */
+    const started = (tooLongMs = unnamedTooLongMs) =>
+      createStateNames({
+        ...(walked === undefined ? {} : { walked: (next: SignedStateTable) => walked(w, next) }),
+        ...(looked === undefined ? {} : { looked: (at: 'read' | 'judged') => looked(w, at) }),
+        ...(tooLongMs === undefined ? {} : { unnamedTooLongMs: tooLongMs }),
+        list: () => Promise.resolve([w.org]),
+        database: app,
+        keys,
+        ids,
+        logger: testLogger(capture),
+      });
+    const job = started();
     if (named) await job.run();
-    return { w, acting, job };
+    return { w, acting, job, started };
   }
 
   /** The agent's cancel since `decidedSeq` read held to its state and the organisation's: the cancels found, or the refusal. */
@@ -1487,12 +1500,16 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     expect(await cancelsHeld(w, 0n)).toEqual({ value: [] });
   });
 
-  it('state names: a chain that doesn’t check out whole names nothing, and says so', async () => {
+  it('SEC-DB-20 TR-10 state names: a chain that doesn’t check out whole names nothing, raises the alarm and holds the organisation', async () => {
     const { w, job } = await legacyOrganisation(false);
     await hideTheCancel(w);
     await job.run();
-    expect(lines('state_names.chain_unverified')).toEqual([expect.objectContaining({ level: 'warn' })]);
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: w.org, chain: 'organisation', check: 'state_names' }),
+    ]);
     expect(lines('state_names.named')).toEqual([]);
+    const hold = await signed(w, (tx, states) => states.integrityHold(tx, w.org, 'none'));
+    expect(hold.outcome).toBe('held');
   });
 
   /** Whether the organisation's and its agent's states carry names where they must (authorityOf's check), and the hold. */
@@ -1596,6 +1613,222 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
       expect.objectContaining({ left: 1 }),
       expect.objectContaining({ named: 2, left: 0 }),
     ]);
+  });
+
+  /**
+   * TR-16, the deploy overlap: the job names the agent, then the app's older code records it again with no names
+   * before the organisation's own naming. Its state saved as the owner saw it then, and the job's run.
+   */
+  async function olderCodeBeforeOwnNaming() {
+    let saved: Awaited<ReturnType<Awaited<ReturnType<typeof tamperAsOwner>>['saveRow']>> | undefined;
+    const legacy = await legacyOrganisation(true, async (at, next) => {
+      if (next !== ORGANIZATIONS || saved !== undefined) return;
+      await recordedByOlderCode(at);
+      await asOwner(at, async (owner) => {
+        saved = await owner.saveRow(at.agent);
+      });
+    });
+    if (saved === undefined) throw new Error('the older code should have written before the organisation was named');
+    return { ...legacy, saved };
+  }
+
+  it('SEC-DB-20 TR-16 state names: a state with no names written after its page, before the organisation is named, waits a run and holds nothing', async () => {
+    const { w, job } = await olderCodeBeforeOwnNaming();
+    // The agent named, the organisation's naming undone: left for the next run, nothing held.
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 1, left: 1 })]);
+    expect(lines('state_names.unnamed_since_walk')).toEqual([
+      expect.objectContaining({ level: 'warn', orgId: w.org, table: AGENTS.subject, id: w.agent }),
+    ]);
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+    await job.run();
+    expect(lines('state_names.named')).toEqual([
+      expect.objectContaining({ left: 1 }),
+      expect.objectContaining({ named: 2, left: 0 }),
+    ]);
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    // Named whole now: the legacy cancel can't be hidden.
+    await hideTheCancel(w);
+    expect(await cancelsHeld(w, 0n)).toEqual({ refused: expect.stringMatching(/can't be believed/) as string });
+  });
+
+  it('SEC-DB-20 TR-16’s tamper control: that state put back by the owner once the organisation is named holds it', async () => {
+    const { w, job, saved } = await olderCodeBeforeOwnNaming();
+    await job.run();
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+    await asOwner(w, (owner) => owner.withoutStatusGuard(() => owner.restoreRow(saved)));
+    expect(await namesHeld(w)).toEqual({ held: false, onHold: true });
+  });
+
+  type SavedRow = Awaited<ReturnType<Awaited<ReturnType<typeof tamperAsOwner>>['saveRow']>>;
+
+  /** The owner points the agent's row at a newer event of the organisation's that is no state, carrying no names. */
+  async function pointedAtNoState(at: World): Promise<SavedRow> {
+    let saved: SavedRow | undefined;
+    const noted = await signed(at, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, at.org, {
+        actor: OPERATOR,
+        action: 'handoff.held_for_bank',
+        subject: { type: 'handoff_hold', id: ids.next(), version: 1 },
+        details: { hold: 'lane' },
+      }),
+    );
+    await asOwner(at, async (owner) => {
+      saved = await owner.saveRow(at.agent);
+      await owner.query('update agents.agents set state_event_id = $1 where org_id = $2 and id = $3', [
+        noted.id,
+        at.org,
+        at.agent,
+      ]);
+    });
+    if (saved === undefined) throw new Error('the agent row should have been saved');
+    return saved;
+  }
+
+  /** The agent's row put back as saved: a state from before the walk again. */
+  const putBack = (at: World, saved: SavedRow) =>
+    asOwner(at, (owner) => owner.withoutStatusGuard(() => owner.restoreRow(saved)));
+
+  /** The organisation held, the alarm raised for a row moved back, and no warning of a wait. */
+  async function heldForMovedBack(w: World) {
+    expect(lines('state_names.unnamed_since_walk')).toEqual([]);
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({
+        level: 'error',
+        orgId: w.org,
+        check: 'state_names',
+        reason: 'moved_back',
+        id: w.agent,
+      }),
+    ]);
+    const hold = await signed(w, (tx, states) => states.integrityHold(tx, w.org, 'none'));
+    expect(hold.outcome).toBe('held');
+  }
+
+  it('SEC-DB-20 TR-16 review: a row re-pointed by the owner at a newer event with no names before the naming is the tamper hold, never a quiet wait', async () => {
+    let pointed = false;
+    const { w } = await legacyOrganisation(true, async (at, next) => {
+      if (next !== ORGANIZATIONS || pointed) return;
+      pointed = true;
+      await pointedAtNoState(at);
+    });
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ left: 1 })]);
+    expect(lines('state_names.unnamed_since_walk')).toEqual([]);
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ level: 'error', orgId: w.org })]);
+    const hold = await signed(w, (tx, states) => states.integrityHold(tx, w.org, 'none'));
+    expect(hold.outcome).toBe('held');
+  });
+
+  it('SEC-DB-20 TR-16 review: a row re-pointed, then put back before the first look verifies it, is the alarm and the hold', async () => {
+    let saved: SavedRow | undefined;
+    const { w } = await legacyOrganisation(
+      true,
+      async (at, next) => {
+        if (next === ORGANIZATIONS && saved === undefined) saved = await pointedAtNoState(at);
+      },
+      {
+        looked: async (at, when) => {
+          if (when !== 'read' || saved === undefined) return;
+          await putBack(at, saved);
+        },
+      },
+    );
+    await heldForMovedBack(w);
+  });
+
+  it('SEC-DB-20 TR-16 review: a row re-pointed after the first look and put back before the late one verifies it (a lock held, then let go) is the alarm and the hold', async () => {
+    let saved: SavedRow | undefined;
+    const { w } = await legacyOrganisation(true, undefined, {
+      looked: async (at, when) => {
+        if (when === 'judged' && saved === undefined) saved = await pointedAtNoState(at);
+        else if (when === 'read' && saved !== undefined) await putBack(at, saved);
+      },
+    });
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ left: 1 })]);
+    await heldForMovedBack(w);
+  });
+
+  it('TR-16 review: older code writing after the first look undoes the naming, which warns and waits a run, holding nothing', async () => {
+    let once = false;
+    const { w, job } = await legacyOrganisation(true, undefined, {
+      looked: async (at, when) => {
+        if (when !== 'judged' || once) return;
+        once = true;
+        await recordedByOlderCode(at);
+      },
+    });
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 1, left: 1 })]);
+    expect(lines('state_names.unnamed_since_walk')).toEqual([
+      expect.objectContaining({ level: 'warn', table: AGENTS.subject, id: w.agent }),
+    ]);
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+    await job.run();
+    expect(lines('state_names.named').at(-1)).toEqual(expect.objectContaining({ named: 2, left: 0 }));
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('TR-16 review: a naming begun longer ago than its limit and still not ended is an error, read from the chain, so a new process says it too', async () => {
+    const { job, started } = await legacyOrganisation(true, async (at, next) => {
+      if (next === ORGANIZATIONS) await recordedByOlderCode(at);
+    });
+    // Within a day: a wait, no error.
+    expect(lines('state_names.unnamed_since_walk')).toHaveLength(1);
+    expect(lines('state_names.unnamed_too_long')).toEqual([]);
+    // A process started now, that never ran before, with a limit the naming's age is past: the error all the same.
+    await started(0).run();
+    expect(lines('state_names.unnamed_too_long')).toEqual([expect.objectContaining({ level: 'error', hours: 0 })]);
+    await job.run();
+    expect(lines('state_names.unnamed_too_long')).toHaveLength(1);
+  });
+
+  it('TR-16 review: with nothing ever named, the oldest state still carrying no names dates the wait: past its limit, the error from a new process', async () => {
+    // Older code writes the agent before its page every run: it is always left, so nothing is ever named.
+    const { started } = await legacyOrganisation(true, async (at, next) => {
+      if (next === AGENTS) await recordedByOlderCode(at);
+    });
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 0, left: 1 })]);
+    expect(lines('state_names.unnamed_too_long')).toEqual([]);
+    await started(0).run();
+    expect(lines('state_names.named').at(-1)).toEqual(expect.objectContaining({ named: 0 }));
+    expect(lines('state_names.unnamed_too_long')).toEqual([expect.objectContaining({ level: 'error', hours: 0 })]);
+  });
+
+  it('TR-16 review: a busy organisation, nothing named and nothing left without names, dates the wait from its first event with names', async () => {
+    // The app as it is now writes the agent and the organisation before the agent's page every run: each carries names,
+    // not from its start, and each is left, so nothing is ever named and no state lacks names.
+    const { w, started } = await legacyOrganisation(true, async (at, next) => {
+      if (next !== AGENTS) return;
+      await signed(at, async (tx, states) => {
+        for (const [table, id] of [
+          [AGENTS, at.agent],
+          [ORGANIZATIONS, at.org],
+        ] as const) {
+          const state = await states.verifiedState(tx, table, { orgId: at.org, id }, 'change');
+          if (state.outcome !== 'verified') throw new Error('the object should verify');
+          await states.record(
+            tx,
+            table,
+            { orgId: at.org, id },
+            state,
+            {},
+            { actor: OPERATOR, action: 'test.noted', details: {} },
+          );
+        }
+      });
+    });
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 0, left: 1 })]);
+    let lacking: unknown[] = [];
+    await asOwner(w, async (owner) => {
+      lacking = await owner.query(
+        `select 1 from agents.agents t join audit.events e on e.org_id = t.org_id and e.id = t.state_event_id
+          where t.org_id = $1 and (e.details::jsonb -> 'trackedBefore') is null`,
+        [w.org],
+      );
+    });
+    expect(lacking).toEqual([]);
+    expect(lines('state_names.unnamed_too_long')).toEqual([]);
+    await started(0).run();
+    expect(lines('state_names.unnamed_too_long')).toEqual([expect.objectContaining({ level: 'error', hours: 0 })]);
   });
 
   it('state names: an object that can’t be believed is the organisation’s failure, logged, nothing claimed named', async () => {

@@ -852,10 +852,15 @@ export const PLAIN_WORDS = {
     broke: 'Nothing new was built; approvals still work from the full member history.',
     next: 'It is tried again in about an hour. If it keeps failing, check the database.',
   },
-  'state_names.chain_unverified': {
-    happened: "One organisation's audit chain did not check out, so its older records were not linked.",
-    broke: 'Nothing changed, but a failed check may mean someone went round the app.',
-    next: 'Look at the chain problem in this line first. It is tried again in about an hour.',
+  'state_names.unnamed_since_walk': {
+    happened: 'A record was written without links during the check, likely by the old version in a deploy.',
+    broke: "This organisation's older records were not linked this run; nothing was held.",
+    next: 'It is tried again in about an hour. If it repeats, look for an old version still running.',
+  },
+  'state_names.unnamed_too_long': {
+    happened: "The oldest of one organisation's records still waiting to be linked is over a day old.",
+    broke: 'A missing older event about its records is not caught as tampering.',
+    next: 'Read its warnings: an old version still running, database edits, or records changing every run.',
   },
   'state_names.failed': {
     happened: "One organisation's older records could not all be given the links that protect their history.",
