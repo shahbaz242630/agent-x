@@ -818,8 +818,9 @@ const WRITER_SET_ASIDE = 'audit_chain.witness_writer_set_aside';
  * A witness writer set aside (TR-14): one line signed with the operator's own key to the witness store, which every
  * copy of the API reads before its next pass, then the operator's event on the platform chain, its head witnessed.
  * The event is no condition of the set-aside, which stands once in the store: one not recorded is said
- * (`operator.not_recorded`). The exit code: 0 once the line is in the store and the event recorded; 1 where the event
- * wasn't (TR-7 C3), so the run reads as not done: run again, it finds its line, writes no second one, and records it.
+ * (`operator.not_recorded`). The exit code: 0 once the line is in the store and the event recorded and witnessed; 1
+ * where the event or its head was not (TR-7 C3), so the run reads as not done: run again, it finds its line, writes no
+ * second one, and records it.
  */
 async function setWriterAside(
   config: OperatorConfig,
@@ -845,8 +846,10 @@ async function setWriterAside(
   try {
     await witness.drained();
   } catch (error) {
-    // Recorded, its head not yet outside the database: the same request run again records it again, witnessed.
+    // Recorded, its head not yet outside the database: never reported as done, as every request's; the same request
+    // run again records it again, witnessed.
     logger.error('operator.not_witnessed', { command: WITNESS_SET_ASIDE, err: error });
+    return 1;
   }
   return 0;
 }

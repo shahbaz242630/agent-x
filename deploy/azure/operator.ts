@@ -1192,8 +1192,9 @@ function witnessSetAsideOutcome(steps: JobSteps, lines: readonly LogLine[], writ
     }
     if (said.some((line) => line.event === 'operator.not_witnessed')) {
       steps.say(
-        "It is recorded on the platform audit log, but that record's head isn't yet in the witness store: run the same command again once the store answers.",
+        "It is recorded on the platform audit log, but that record's head isn't yet in the witness store, so this run is not done: run the same command again once the store answers.",
       );
+      return 1;
     }
     return 0;
   }

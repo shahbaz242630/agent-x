@@ -615,6 +615,25 @@ describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version}
     await reader.refresh();
     expect(reader.pending({ kind: 'platform' }).map(({ seq }) => seq)).toEqual([BigInt(String(head?.seq))]);
   });
+
+  it('TR-7 C3: a set-aside recorded, its head not witnessed, says so and exits 1, never reported as done; the line stands', async () => {
+    const witnessDir = folder();
+    // The operator's own heads folder a file: the set-aside's line lands, its event's head can't go out.
+    mkdirSync(path.join(witnessDir, 'e1'), { recursive: true });
+    writeFileSync(path.join(witnessDir, 'e1', 'operator'), 'x');
+    const { code, events } = await run(
+      ['witness-set-aside', '--writer', 'b1b2c3d4e5f6', '--reason', 'INC-2026-11-22'],
+      envFor('operator', { AGENTX_AUDIT_WITNESS_DIR: witnessDir }),
+    );
+    // The witness log's own retries said between (audit.witness_*): the operator's lines are these.
+    expect(events.filter((event) => event.startsWith('operator.'))).toEqual([
+      'operator.witness_writer_set_aside',
+      'operator.witness_writer_recorded',
+      'operator.not_witnessed',
+    ]);
+    expect(code).toBe(1);
+    expect(readdirSync(path.join(witnessDir, 'e1', 'set-aside'))).toHaveLength(1);
+  });
 });
 
 describe(`B1c the lock order and the platform head's wait (ADR-006 §6; Postgres ${server.version})`, () => {
