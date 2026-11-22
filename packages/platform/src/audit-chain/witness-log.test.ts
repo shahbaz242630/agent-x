@@ -362,6 +362,29 @@ describe('SEC-DB-20 the witness log: reading', () => {
     expect(seqs(log.pending(CHAIN))).toEqual([13n, 12n, 11n, 2n]);
   });
 
+  it('S210 final F1: a start reads heads files named up to the lag and a minute more before its snapshot, none older', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const snapshotAt = START.getTime() - HOUR;
+    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 1n, 1, new Date(snapshotAt))], {
+      at: snapshotAt,
+    });
+    // Named six and a half minutes before the snapshot, landing after the read it was written after began (up to a
+    // minute before it): past the lag alone, within it and SNAPSHOT_FRESH_MS. Eight minutes before: past both.
+    for (const [seq, before] of [
+      [2n, 6.5 * MINUTE],
+      [3n, 8 * MINUTE],
+    ] as const) {
+      const fileAt = snapshotAt - before;
+      await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, seq, 1, new Date(fileAt))], {
+        at: fileAt,
+      });
+    }
+    const { log } = witnessOn(store, { snapshots });
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([2n, 1n]);
+  });
+
   it('with no sound snapshot, a start reads a day of heads files back', async () => {
     const store = createFakeWriteOnceStore();
     const at = START.getTime();

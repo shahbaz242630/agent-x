@@ -159,8 +159,10 @@ function pageIn(xml: string): WriteOncePage {
     .split('<Blob>')
     .slice(1)
     .flatMap((part) => {
-      const name = /^\s*<Name>([^<]*)<\/Name>/.exec(part)?.[1];
-      return name === undefined ? [] : [{ name, part }];
+      const sliced = /^\s*<Name>([^<]*)<\/Name>/.exec(part)?.[1];
+      // A copy of its own: a regex capture is a slice that keeps the whole page alive while any caller holds the name
+      // (the witness log holds names for as long as their heads: ~5 MB a page each).
+      return sliced === undefined ? [] : [{ name: Buffer.from(sliced, 'utf8').toString('utf8'), part }];
     });
   const listed = blobs.map(({ name }) => name);
   const names = listed.filter(isBlobName);
