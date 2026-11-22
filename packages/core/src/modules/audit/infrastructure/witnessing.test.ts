@@ -76,15 +76,31 @@ describe('SEC-DB-20 TR-1 each transaction’s chain heads to the witness log', (
   });
 
   it('TR-3 notes a head again on commit only where a witness log is given and the transaction wrote there', async () => {
-    // A stand-in for a transaction on another driver: afterCommit keeps no hook there (the DB test runs the real one).
-    const tx = { isTransaction: false } as unknown as Parameters<typeof noteAgainOnCommit>[0];
-    await expect(noteAgainOnCommit(tx, ORG)).resolves.toBeUndefined();
+    // A stand-in transaction that counts the hooks asked of it: a connection of another driver keeps none (afterCommit;
+    // the DB test runs the real one through a commit).
+    const asked: number[] = [];
+    const tx = {
+      isTransaction: true,
+      getExecutor: () => ({
+        provideConnection: (use: (connection: object) => Promise<boolean>) => {
+          asked.push(1);
+          return use({});
+        },
+      }),
+    } as unknown as Parameters<typeof noteAgainOnCommit>[0];
+    // No witness log: no hook.
+    await noteAgainOnCommit(tx, ORG);
+    expect(asked).toEqual([]);
     const { witness, notes } = recording();
     witnessWith(witness);
+    // A witness log, but nothing written there by the transaction: no hook.
     await noteAgainOnCommit(tx, ORG);
+    expect(asked).toEqual([]);
+    // Written there: the hook asked for, once, and nothing noted before the commit.
     witnessedWrite(tx, ORG, 'now');
     wroteTo(tx, ORG, head(4n));
     await noteAgainOnCommit(tx, ORG);
+    expect(asked).toEqual([1]);
     expect(notes).toEqual([]);
   });
 

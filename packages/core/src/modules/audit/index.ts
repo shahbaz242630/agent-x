@@ -67,6 +67,7 @@ export {
 } from './infrastructure/chain-rows.ts';
 export {
   type AuditTrail,
+  readBelowWalk,
   type AuditTransaction,
   type CheckedEventFacts,
   createAuditTrail,

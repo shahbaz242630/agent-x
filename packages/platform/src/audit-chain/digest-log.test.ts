@@ -584,7 +584,12 @@ describe('SEC-DB-11 the digest within its memory: one organisation’s growth ne
     expect(log.factsKept(CHAIN)).toBe(0);
     log.record(OTHER, seen(['agent', AGENT, 2n]), START, stretch(0n, 2n));
     log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 3n));
-    expect(log.factsKept(CHAIN)).toBe(0);
+    const mark = log.factsKept(CHAIN);
+    const other = log.factsKept(OTHER);
+    expect(mark).toBeDefined();
+    expect(mark).not.toBe(other);
+    log.record(CHAIN, seen(['agent', AGENT, 4n]), START);
+    expect(log.factsKept(CHAIN)).toBe(mark);
     // Not leading: nothing a walk read is kept, so no mark.
     leads.now = false;
     expect(log.factsKept(CHAIN)).toBeUndefined();
@@ -592,7 +597,20 @@ describe('SEC-DB-11 the digest within its memory: one organisation’s growth ne
     // Its payments outgrowing what may be held: given way, no mark, the other chain's untouched.
     log.record(CHAIN, requests(400), START, stretch(3n, 500n));
     expect(log.factsKept(CHAIN)).toBeUndefined();
-    expect(log.factsKept(OTHER)).toBe(0);
+    expect(log.factsKept(OTHER)).toBe(other);
+  });
+
+  it('TR-3 factsKept moves when a rebase sets the chain aside: a stretch kept before it stands for nothing', async () => {
+    const rebases = new Map<string, Date>();
+    const { log } = digestOn(undefined, { anchors: anchorsWith(rebases) });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 3n));
+    const before = log.factsKept(CHAIN);
+    rebases.set(ORG, new Date(START.getTime() + MINUTE));
+    // Set aside: not held, then held anew by the next walk, under a mark of its own.
+    log.record(CHAIN, seen(['agent', AGENT, 2n]), new Date(START.getTime() + 2 * MINUTE), stretch(0n, 2n));
+    expect(log.factsKept(CHAIN)).toBeDefined();
+    expect(log.factsKept(CHAIN)).not.toBe(before);
   });
 
   it('the largest chain gives way, its payments first, then all of it, each with its own alarm; the small one keeps all', async () => {
@@ -1013,6 +1031,7 @@ describe('SEC-DB-11 the digest’s fair share: many small organisations never pu
     const { log } = digestOn(undefined, { capture, mostBytes: 12_000 });
     await log.read();
     log.record(PLATFORM, seen(['platform.handoff_pause', 'pause', 3n]), START);
+    const mark = log.factsKept(PLATFORM);
     const ends = new Map(
       Array.from({ length: 400 }, (_, at) => [subjectKey('identity.session_ended', `p/${String(at)}`), BigInt(at + 4)]),
     );
@@ -1023,6 +1042,11 @@ describe('SEC-DB-11 the digest’s fair share: many small organisations never pu
     expect(line?.orgId).toBeUndefined();
     expect(log.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(3n);
     expect(log.latest(PLATFORM, 'identity.session_ended', 'p/0')).toBeUndefined();
+    // TR-3: the pause, all the frontier's platform walks keep, is still kept: its mark stands, so no Tx A of any
+    // organisation walks the platform chain from its anchor while its session ends are given way.
+    expect(mark).toBeDefined();
+    expect(log.factsKept(PLATFORM)).toBe(mark);
+    // An organisation's chain given way its payments alone keeps no mark (its requests are what Tx A reads).
   });
 });
 
@@ -1050,6 +1074,18 @@ describe('SEC-DB-11 a chain given way comes back once there is room again (AT13e
     await restarted.log.read();
     return { log: restarted.log, capture };
   }
+
+  it('TR-3 a record that moves nothing judges no memory: a chain due back comes back at the next that moves something', async () => {
+    const { fake, time } = await gaveWay();
+    const { log, capture } = await restartedWith(fake, time);
+    log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    time.held.at += HOUR;
+    // The same fact again: nothing moved, nothing judged.
+    log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    expect(said(capture, 'audit.state_digest_chain_coming_back')).toEqual([]);
+    log.record(OTHER, seen(['agent', AGENT, 3n]), time.now());
+    expect(said(capture, 'audit.state_digest_chain_coming_back')).toEqual([expect.objectContaining({ orgId: ORG })]);
+  });
 
   it('an hour after it gave way, with room, its catch-up walk reads it again from its first event; no wait meanwhile', async () => {
     const { fake, time } = await gaveWay();

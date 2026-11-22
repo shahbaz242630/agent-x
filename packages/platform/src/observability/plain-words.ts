@@ -886,6 +886,11 @@ export const PLAIN_WORDS = {
     broke: 'That payment was not sent; its money stays held and the bank check settles it.',
     next: 'Read the reason: a cut means the database was changed, so follow the incident runbook.',
   },
+  'handoff.read_moved': {
+    happened: 'An approved payment’s records changed between its checks and the audit trail’s last check.',
+    broke: 'Nothing was sent. The payment waits and is checked again on the next run, in about 10 seconds.',
+    next: 'Nothing if rare. If it repeats, someone may be changing the database: follow the incident runbook.',
+  },
   'handoff.queue_stale': {
     happened: 'Approved payments have waited over 15 minutes without being handed to the bank, for no known reason.',
     broke: 'Those payments are not sent; their money stays held.',

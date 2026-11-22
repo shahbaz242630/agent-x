@@ -1115,6 +1115,39 @@ const headsMoved = new WeakMap<object, Map<string, HeadMoved>>();
  */
 const headsTaken = new WeakMap<object, Set<string>>();
 
+/**
+ * Each transaction's reads of signed states (TR-3): for every object read, the newest signed place it found there
+ * (0 for none), by its digest key. A walk later in the same transaction that names an object's newer signed state is a
+ * read made on a chain that moved under it (readBelowWalk): an event hidden while the transaction read, put back
+ * before its walk.
+ */
+const readPlaces = new WeakMap<object, Map<string, bigint>>();
+
+/** A read's place kept for its transaction: the newest it has found of the object. */
+function placeRead(tx: object, type: string, id: string, latest: LatestSignedState): void {
+  if (latest.kind === 'broken') return;
+  const place = latest.kind === 'none' ? 0n : latest.seq;
+  const byKey = readPlaces.get(tx) ?? new Map<string, bigint>();
+  readPlaces.set(tx, byKey);
+  const key = subjectKey(type, id);
+  if ((byKey.get(key) ?? -1n) < place) byKey.set(key, place);
+}
+
+/**
+ * The first object this transaction read whose newest signed state a walk later in it found further on (`signed`, the
+ * walk's own: each object's newest place on it): the read was made on a chain that moved under it, put back before the
+ * walk (TR-3). None where every read stands.
+ */
+export function readBelowWalk(tx: object, signed: SignedSeen): readonly [string, bigint] | undefined {
+  const byKey = readPlaces.get(tx);
+  if (byKey === undefined) return undefined;
+  for (const [key, place] of signed) {
+    const read = byKey.get(key);
+    if (read !== undefined && read < place) return [key, place];
+  }
+  return undefined;
+}
+
 /** Recording's steps over the audit tables, for one organisation and the events recorded together, in their order. */
 function writerFor(
   tx: AuditTransaction,
@@ -1662,11 +1695,23 @@ export function createAuditTrail({
    * which every row of the statement carries alike (`first`).
    */
   const latestIn = (
+    tx: AuditTransaction,
     chain: Chain & { readonly kind: 'organisation' },
-    rows: readonly Readonly<Record<string, unknown>>[],
-    first: Readonly<Record<string, unknown>> | undefined,
+    subject: readonly [string, string],
+    {
+      rows,
+      first,
+    }: {
+      readonly rows: readonly Readonly<Record<string, unknown>>[];
+      readonly first: Readonly<Record<string, unknown>> | undefined;
+    },
     known: bigint | undefined,
-  ): LatestSignedState => heldToDigest(latestOfRows(chain, rows, first), known);
+  ): LatestSignedState => {
+    const latest = heldToDigest(latestOfRows(chain, rows, first), known);
+    // Kept for the transaction: a walk later in it holds the read to what it finds (readBelowWalk, TR-3).
+    placeRead(tx, ...subject, latest);
+    return latest;
+  };
 
   /**
    * Where the digest (AT13) says the object's newest signed event is, if it says. Asked before the statement that reads
@@ -1794,7 +1839,10 @@ export function createAuditTrail({
       // A backlog, past the head or not, is left to the row's own read, which judges it as it always has.
       return {
         id: typeof asked === 'string' ? asked : null,
-        latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : unlessCut(latestIn(chain, own, first, known), cut),
+        latest:
+          own.length > LATER_EVENTS_READ
+            ? BACKLOGGED
+            : unlessCut(latestIn(tx, chain, [type ?? '', String(asked)], { rows: own, first }, known), cut),
         rows: rowsAlong(first),
       };
     });
@@ -1829,7 +1877,10 @@ export function createAuditTrail({
     );
     const rows = rowRead === undefined ? undefined : rowsAlong(events[0]);
     const cut = cutBack(tx, chain, watch, events[0]);
-    return { latest: unlessCut(latestIn(chain, events, events[0], known), cut), rows };
+    return {
+      latest: unlessCut(latestIn(tx, chain, [subject.type, id], { rows: events, first: events[0] }, known), cut),
+      rows,
+    };
   };
 
   /**
@@ -2167,7 +2218,7 @@ export function createAuditTrail({
             id,
             !pastHead && own.length > LATER_EVENTS_READ
               ? BACKLOGGED
-              : unlessCut(latestIn(chain, own, first, known.get(id)), cut),
+              : unlessCut(latestIn(tx, chain, [type, id], { rows: own, first }, known.get(id)), cut),
           ];
         }),
       );

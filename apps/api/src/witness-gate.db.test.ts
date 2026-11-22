@@ -906,6 +906,85 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
     },
   );
 
+  /**
+   * A stop above F hidden for one Tx A alone: A paid (F raised), then W suspends the agent (above F, no digest fact yet).
+   * The owner hides the suspension and puts the agent's row back as active, holding the chain's head row: J's Tx A for B
+   * reads the agent as active, then waits on the head; with `restore`, the owner puts the suspension back before letting
+   * go, so the walk reads the true chain (the agent isn't read again after the head's lock; the request is).
+   */
+  async function stopAboveFHiddenForOneTxA(restore: boolean) {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const j = await jobsCopy(w, store);
+    const paid = await ask(acting, w, { amount: ALLOWED() });
+    await j.witness.refresh();
+    expect(await handOffOnJ(w, j)).toBe(1);
+    expect(await statusOf(w, paid.id)).toBe('HANDED_OFF');
+    // Asked after F rose past A: its decision, and the cancel to come, above F.
+    const stopped = await ask(acting, w, { amount: ALLOWED() });
+    const owner = await tamperAsOwner(database, AGENTS, w.org);
+    try {
+      const saved = await owner.saveRow(w.agent);
+      witnessWith(witnessOver(store));
+      try {
+        await signed(w, (tx, states) =>
+          states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+            actor: OPERATOR,
+            action: 'agent.suspended',
+            details: { reason: 'test' },
+          }),
+        );
+      } finally {
+        witnessWith(undefined);
+      }
+      await j.witness.refresh();
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query(
+        "update audit.events set subject_id = '0199a0f0-0000-7000-8000-00000000beef' where org_id = $1 and subject_id = $2 and action = 'agent.suspended'",
+        [w.org, w.agent],
+      );
+      await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+      const holder = await database.connect('owner');
+      try {
+        // Inside the organisation, as the owner's tampering is (the tables' walls hold the owner too).
+        await holder.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+        await holder.query('begin');
+        const locked = await holder.query('select seq from audit.heads where org_id = $1 for update', [w.org]);
+        expect(locked).toHaveLength(1);
+        capture = new LogCapture();
+        const running = handOffOnJ(w, j);
+        await waitUntilQueued(database.as('owner'), 1);
+        if (restore) {
+          await holder.query(
+            "update audit.events set subject_id = $2 where org_id = $1 and subject_id = '0199a0f0-0000-7000-8000-00000000beef'",
+            [w.org, w.agent],
+          );
+        }
+        await holder.query('commit');
+        return { w, stopped, submitted: await running };
+      } finally {
+        await holder.end();
+      }
+    } finally {
+      await owner.query('alter table audit.events enable trigger user');
+      await owner.end();
+    }
+  }
+
+  it('80: a stop above F hidden while Tx A reads and put back before its walk: never paid', async () => {
+    const { w, stopped, submitted } = await stopAboveFHiddenForOneTxA(true);
+    expect(submitted).toBe(0);
+    expect(await outcome(w, stopped.id, submitted)).toMatchObject({ transaction: undefined });
+    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'read_moved' }));
+  });
+
+  it('the positive control: left hidden, the read and the walk agree and nothing stops the payment here', async () => {
+    const { submitted } = await stopAboveFHiddenForOneTxA(false);
+    // The rewrite left in place: its event's MAC no longer holds, so the walk itself refuses (not this check's).
+    expect(submitted).toBe(0);
+    expect(lines('handoff.waiting')).not.toContainEqual(expect.objectContaining({ why: 'read_moved' }));
+  });
+
   it('the positive control: not rewritten, the cancelled request is never handed off, and nothing is alarmed', async () => {
     const { w, stopped, submitted } = await cancelledThenRewritten(false);
     expect(submitted).toBe(0);

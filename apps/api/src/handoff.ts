@@ -103,6 +103,7 @@ import {
   createAuditTrail,
   headWrittenIn,
   MOST_WALKED_WITHIN,
+  readBelowWalk,
   type SignedStates,
   type SignedStatesServices,
   withSignedStates,
@@ -611,6 +612,7 @@ export function createHandoff({
     tx: HandoffTx,
     states: SignedStates,
     orgId: string,
+    log: Logger,
   ): Promise<string | Walked | undefined> => {
     const chain = { kind: 'organisation', orgId } as const;
     // TR-1 F.2: a witness view gone stale, or a log past its memory, may miss a stop another copy wrote.
@@ -637,6 +639,14 @@ export function createHandoff({
     if (kept.outcome === 'unverified') return 'chain_unverified';
     // Committed or not, the head locked was: F rises to it now.
     witnessing.frontier.raise(chain, start, kept.walk);
+    // TR-3: every read above was made before the head's lock, each statement on its own snapshot. One the walk finds a
+    // newer signed state of was read on a chain that moved under it (an event hidden while it read, put back before the
+    // walk): nothing commits on it, and the next run reads again, held now to what this walk kept in the digest.
+    const moved = readBelowWalk(tx, kept.walk.signed);
+    if (moved !== undefined) {
+      log.warn('handoff.read_moved', { seq: String(moved[1]) });
+      return 'read_moved';
+    }
     return { start, walk: kept.walk };
   };
 
@@ -720,7 +730,7 @@ export function createHandoff({
       await voidedWith(tx, states, keys, key, ['SUPPLIER_CHANGED'], now);
       return { outcome: 'denied', causes: 'SUPPLIER_CHANGED' };
     }
-    const stopped = await chainStops(tx, states, orgId);
+    const stopped = await chainStops(tx, states, orgId, log);
     if (typeof stopped === 'string') return { outcome: 'waiting', why: stopped };
     if (request.status === 'APPROVED') await moveRequest(tx, states, key, 'make_ready');
     await moveRequest(tx, states, key, 'hand_off');

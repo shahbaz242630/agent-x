@@ -371,6 +371,9 @@ const CHAIN_BYTES = 300;
 /** How many stretches a chain keeps that don't join its coverage yet: a gap's far side, a few. */
 const MOST_STRETCHES = 16;
 
+/** The give-way generations one chain held may pass through, for factsKept's mark: far past any it reaches. */
+const MARKS_A_CHAIN = 1_000_000;
+
 /** How often a chain given way says so again. */
 const SAY_EVERY_MS = 60 * 60_000;
 
@@ -574,6 +577,8 @@ interface ChainState {
   gaveWay: 0 | 1 | 2;
   /** Its give-way generation (AT13e, the header): odd while it comes back. */
   gen: number;
+  /** Which chain held this is, of all this process has made: a rebase makes the next (factsKept, TR-3). */
+  readonly made: number;
   /** About what its tables held when it gave way, for coming back to fit. */
   letGo: number;
   /** When it gave way, here or as read: it comes back no sooner than BACK_AFTER_MS after. */
@@ -736,6 +741,7 @@ export function createDigestLog({
 
   /** A fresh chain, counted. */
   const newChain = (bornAt: number, counted: boolean): ChainState => {
+    chainsMade += 1;
     const made: ChainState = {
       bornAt,
       tables: [new ChainDigest(bornAt), new ChainDigest(bornAt)],
@@ -745,6 +751,7 @@ export function createDigestLog({
       gaveWay: 0,
       gen: 0,
       letGo: 0,
+      made: chainsMade,
     };
     if (counted) heldBytes += tablesBytes(made) + CHAIN_BYTES;
     return made;
@@ -756,10 +763,15 @@ export function createDigestLog({
     if (held === undefined) return;
     heldBytes -= tablesBytes(held) + CHAIN_BYTES;
     chains.delete(name);
+    givenWay.delete(name);
   };
 
   /** Whether this process may write: it leads, or nothing says otherwise. Never forgets anything (TR-1 A). */
   const writing = (): boolean => writes === undefined || writes();
+  // How many chains this process has made, rebases' fresh ones among them (factsKept), and those given way now, all a
+  // come-back looks at (comeBack: never every chain on every record, TR-3).
+  let chainsMade = 0;
+  const givenWay = new Set<string>();
 
   /** The chain held, set aside whole where it was rebased after its oldest fact. */
   const chainOf = (name: string): ChainState | undefined => {
@@ -914,6 +926,7 @@ export function createDigestLog({
 
   /** The chain gives way: its growing objects' table, or with none or those gone already, all of it. Said. */
   const giveWay = (name: string, held: ChainState): void => {
+    givenWay.add(name);
     const before = tablesBytes(held);
     dropTo(held, held.gaveWay === 0 && paymentsHeld(held) ? 1 : 2);
     held.letGo += before - tablesBytes(held);
@@ -947,9 +960,18 @@ export function createDigestLog({
     let room = mostBytes * NEAR_MEMORY - heldBytes;
     if (room <= 0) return;
     const at = now().getTime();
-    const ready = [...chains].filter(
-      ([, held]) => held.gaveWay !== 0 && held.gaveWayAt !== undefined && at - held.gaveWayAt >= BACK_AFTER_MS,
-    );
+    const ready: [string, ChainState][] = [];
+    for (const name of givenWay) {
+      const held = chains.get(name);
+      if (
+        held !== undefined &&
+        held.gaveWay !== 0 &&
+        held.gaveWayAt !== undefined &&
+        at - held.gaveWayAt >= BACK_AFTER_MS
+      ) {
+        ready.push([name, held]);
+      }
+    }
     for (const [name, held] of ready.toSorted(([, one], [, other]) => one.letGo - other.letGo)) {
       if (held.letGo > room) return;
       room -= held.letGo;
@@ -963,6 +985,7 @@ export function createDigestLog({
    * that walk reaches the anchor (`covers`). Written, so a restart agrees.
    */
   const beginComingBack = (name: string, held: ChainState): void => {
+    givenWay.delete(name);
     const was = held.gaveWay;
     held.gen += held.gen % 2 === 1 ? 2 : 1;
     held.gaveWay = 0;
@@ -1015,10 +1038,12 @@ export function createDigestLog({
       held.gaveWay = 0;
       held.letGo = 0;
       delete held.gaveWayAt;
+      givenWay.delete(name);
     }
     changedSinceSnapshot = true;
     if (level === 0) return;
     dropTo(held, level);
+    givenWay.add(name);
     held.letGo = letGo;
     held.gaveWayAt = now().getTime();
     sayGaveWay(name, held);
@@ -1268,7 +1293,8 @@ export function createDigestLog({
    * A walk's facts into the chain, and those that moved into what waits to be written. Dated ones are known by now:
    * every event the walk read was recorded before it recorded them (AT13d/g).
    */
-  const recordFacts = (name: string, held: ChainState, seen: SignedSeen, at: number): void => {
+  const recordFacts = (name: string, held: ChainState, seen: SignedSeen, at: number): boolean => {
+    let any = false;
     const knownBy = now().getTime();
     for (const [key, seq] of seen) {
       const [high, low] = fingerprintOf(key);
@@ -1276,9 +1302,11 @@ export function createDigestLog({
       const byDay = dated(name, key);
       const moved = byDay ? putDated(held, knownBy, high, low, place) : putInto(held, grows(key), high, low, place);
       if (!moved) continue;
+      any = true;
       changedSinceSnapshot = true;
       if (store !== undefined) pendingTable(pendingChain(name, at), key, byDay, knownBy).put(high, low, place);
     }
+    return any;
   };
 
   /** The table a fact waits to be written in: a day's, for a dated one (AT13d/g), else its class's. */
@@ -1470,9 +1498,12 @@ export function createDigestLog({
     factsKept(chain: Chain): number | undefined {
       if (!writing()) return undefined;
       const held = chainOf(chainName(chain));
-      // Given way: none. Coming back, its generation moved on (beginComingBack), so nothing from before stands.
-      if (held !== undefined && held.gaveWay !== 0) return undefined;
-      return held?.gen ?? 0;
+      if (held === undefined) return 0;
+      // Given way: none. The platform chain's walks within keep only the pause, an authority fact, which giving way its
+      // session ends alone (1) keeps: so every Tx A of every organisation never walks it from its anchor meanwhile.
+      if (held.gaveWay === 2 || (held.gaveWay === 1 && chain.kind !== 'platform')) return undefined;
+      // Which chain held (a rebase makes a new one) and its generation (coming back moves it): nothing from before stands.
+      return held.made * MARKS_A_CHAIN + held.gen;
     },
     coverage(chain: Chain): CheckedPoint | undefined {
       return chainOf(chainName(chain))?.covered;
@@ -1492,10 +1523,14 @@ export function createDigestLog({
       const at = began.getTime();
       // Dated before the chain's newest rebase: it read the chain as it was, which nothing goes on from.
       if (anchors?.rebasedAfter(chain, began) === true) return;
+      const bytes = heldBytes;
       const held = heldChain(name, at);
-      recordFacts(name, held, seen, at);
+      const moved = recordFacts(name, held, seen, at);
       if (stretch !== undefined) recordStretch(name, held, stretch, at);
-      judgeMemory();
+      // Memory judged only where the record moved something: at ~170 Tx A a second, a walk that read nothing new (the
+      // usual Tx A's) costs nothing. The horizon's forgetting goes on either way, at its own pace.
+      if (moved || stretch !== undefined || heldBytes !== bytes) judgeMemory();
+      else forgetPast(false);
     },
     read(): Promise<void> {
       reading ??= readOnce().finally(() => {
