@@ -467,7 +467,7 @@ export const PLAIN_WORDS = {
   },
   'audit.integrity_failed': {
     happened:
-      'A tamper check found records, the audit trail or the database set-up changed, or could not check them for too long.',
+      "A tamper check found records, the audit trail or the database set-up changed (the database's clock far from the app's among them), or could not check them for too long.",
     broke: 'Whatever met it was refused or stopped, and an organisation found tampered with is put on hold.',
     next: 'Treat it as a possible break-in and follow the incident runbook straight away.',
   },
@@ -861,11 +861,6 @@ export const PLAIN_WORDS = {
     happened: "The oldest of one organisation's records still waiting to be linked is over a day old.",
     broke: 'A missing older event about its records is not caught as tampering.',
     next: 'Read its warnings: an old version still running, database edits, or records changing every run.',
-  },
-  'state_names.rebased_unnamed': {
-    happened: "An organisation's audit chain was rebased after a repair, so it can't be read whole from its start.",
-    broke: 'Its older records were not linked and nothing was held; the anchor check still checks it.',
-    next: 'Check an incident asked for the rebase. This is said each hour while it stands.',
   },
   'state_names.failed': {
     happened: "One organisation's older records could not all be given the links that protect their history.",
