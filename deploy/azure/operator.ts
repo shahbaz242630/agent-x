@@ -21,7 +21,8 @@
 // of the API passes over its witness files from its next read, each said as
 // the alarm, for every file it named until then. The ID is from the fork
 // alarms (the operator's step in witness-log.ts's header says which); the
-// reason is signed into the line and recorded on the platform chain. Run
+// reason is signed into the line and recorded on the platform chain; a line in
+// the store but not recorded ends the run 1, not done (TR-7 C3). Run
 // again, it finds its line, writes none and records the event again.
 //
 // person-activity-export (CO8b, D2) exports one person's own activity log
@@ -1172,7 +1173,10 @@ export function parseWitnessSetAside(argv: readonly string[]): WitnessSetAsideAr
 /** Said after anything unclear: a run again finds the writer's line and writes no second one. */
 const SET_ASIDE_AGAIN = 'Run the same command again: it finds a line written before and writes no second one.';
 
-/** What a set-aside's run found, from the command's own line about this writer: 0 once it is in the store. */
+/**
+ * What a set-aside's run found, from the command's own line about this writer: 0 once it is in the store and recorded
+ * on the platform audit log; 1 where it stands unrecorded (TR-7 C3: the job exits 1 too), with how to finish it.
+ */
 function witnessSetAsideOutcome(steps: JobSteps, lines: readonly LogLine[], writer: string): number {
   const said = commandLines(lines);
   const about = (event: string) => said.some((line) => line.event === event && line.writer === writer);
@@ -1182,19 +1186,22 @@ function witnessSetAsideOutcome(steps: JobSteps, lines: readonly LogLine[], writ
     );
     if (!about('operator.witness_writer_recorded')) {
       steps.say(
-        "It isn't recorded on the platform audit log yet: once the database answers, run the same command again to record it.",
+        "It isn't recorded on the platform audit log yet, so this run is not done: once the database answers, run the same command again. It finds its line, writes no second one, and records it.",
       );
-    } else if (said.some((line) => line.event === 'operator.not_witnessed')) {
+      return 1;
+    }
+    if (said.some((line) => line.event === 'operator.not_witnessed')) {
       steps.say(
-        "It is recorded on the platform audit log, but that record's head isn't yet in the witness store: run the same command again once the store answers.",
+        "It is recorded on the platform audit log, but that record's head isn't yet in the witness store, so this run is not done: run the same command again once the store answers.",
       );
+      return 1;
     }
     return 0;
   }
   return refusedOrUnclear(steps, said, SET_ASIDE_AGAIN);
 }
 
-/** Sets a witness writer aside, on the operator's job (TR-14): 0 once its line is in the witness store. */
+/** Sets a witness writer aside, on the operator's job (TR-14): 0 once its line is in the store and recorded (TR-7 C3). */
 export function witnessSetAside(asked: WitnessSetAsideArguments, steps: JobSteps): Promise<number> {
   return runRequest(steps, () => ({
     text: witnessSetAsideRequest(asked.writer, asked.reason),
