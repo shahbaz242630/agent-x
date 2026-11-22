@@ -404,6 +404,16 @@ export const PLAIN_WORDS = {
       'Nothing if it gives an offset: the copy names files by the store’s time. If it names a file, heads may be late.',
     next: 'Check the time sync of the host the copy runs on. On Container Apps the clock is the host’s.',
   },
+  'audit.witness_snapshot_skipped': {
+    happened: 'The jobs copy skipped its hourly witness snapshot: it has not read the witness store whole lately.',
+    broke: 'Nothing: a restart reads further back instead. A snapshot now could miss a recent stop.',
+    next: 'Nothing if reads recover. Else see the witness read failure lines.',
+  },
+  'audit.witness_rebase_needed': {
+    happened: 'A starting copy did not re-read witness state older than a day: a set-aside writer, or set-aside flood.',
+    broke: 'A stop older than a day may not be held by this copy, so a cut chain could pass here.',
+    next: 'Every time: rebase each chain the incident touched, playbook section H step 5.',
+  },
   'audit.witness_beyond_memory': {
     happened: 'This copy had more audit chain heads than its memory allows, and let the oldest go.',
     broke: 'The chain named is anchored no more and its payments wait: a head let go cannot be checked.',

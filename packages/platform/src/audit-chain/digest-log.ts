@@ -102,7 +102,8 @@
 // lowers what the other reads hold to: the hand-off pause's reads stay held to the head seen.
 //
 // Held to every copy's heads too (TR-1, witness-log.ts): another copy's stop was never seen here, so each read is also
-// held to the highest heads any copy witnessed above the chain's anchor (`witnessed`, at most MOST_WITNESSED), each at
+// held to the highest heads any copy witnessed above the chain's anchor (`witnessed`, at most MOST_WITNESSED, and the
+// lowest: TR-7 C1, so more heads above a stop than a read asks never hide it from digest reads), each at
 // its place with its hash, in the read's own statement (`heldTo`): a list, never only the highest, as a stale copy's
 // head on a cut branch must not bury the honest one. The chain taken as it stands (AT13h) holds its reads to the heads
 // witnessed after it alone: one the cut took away, witnessed before, would lock the console again (S208's decision).
@@ -140,8 +141,8 @@ export interface HeadWatch {
   readonly seen: HeadSeen | undefined;
   /**
    * Every head the read is held to (TR-1): the head this process saw, where the digest covers the chain to, and the
-   * highest heads any copy witnessed above the chain's anchor (witness-log.ts), at most MOST_WITNESSED: each at its place
-   * with its hash, the chain's head no lower than the highest. Kept apart, never only the highest: a stale copy's head
+   * highest heads any copy witnessed above the chain's anchor (witness-log.ts), at most MOST_WITNESSED, and the lowest
+   * where more are held (TR-7 C1): each at its place with its hash, the chain's head no lower than the highest. Kept apart, never only the highest: a stale copy's head
    * on a cut branch must not bury the honest one below it. Empty, nothing to hold to.
    */
   readonly heldTo: readonly HeadSeen[];
@@ -1428,16 +1429,17 @@ export function createDigestLog({
     });
   };
 
-  /** The chain's witnessed heads, the highest first, at most MOST_WITNESSED: only those noted after `after` where given. */
+  /**
+   * The chain's witnessed heads, the highest first, at most MOST_WITNESSED, and the lowest given last where more were
+   * (TR-7 C1: the witness log gives the lowest above the anchor after the highest, so more heads than a read asks above a
+   * stop never hide it): only those noted after `after` where given.
+   */
   const witnessedOf = (chain: Chain, after?: number): HeadSeen[] => {
-    const found: HeadSeen[] = [];
-    // The highest few alone, however many are held: on an honest chain a later head is higher, so those after an accept
-    // are among them.
-    for (const { seq, hash, at } of witnessed?.(chain, MOST_WITNESSED) ?? []) {
-      if (found.length >= MOST_WITNESSED) break;
-      if (after === undefined || at > after) found.push({ seq, hash });
-    }
-    return found;
+    const given = witnessed?.(chain, MOST_WITNESSED) ?? [];
+    // The highest few, however many are held: on an honest chain a later head is higher, so those after an accept are
+    // among them.
+    const asked = given.length > MOST_WITNESSED ? [...given.slice(0, MOST_WITNESSED), ...given.slice(-1)] : given;
+    return asked.filter(({ at }) => after === undefined || at > after).map(({ seq, hash }) => ({ seq, hash }));
   };
 
   /** The heads a read is held to, each once, in the order given. */

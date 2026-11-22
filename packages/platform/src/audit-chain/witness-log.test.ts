@@ -626,6 +626,21 @@ describe('SEC-DB-20 the witness log: reading', () => {
     expect(log.pending(CHAIN)[0]?.at).toBe(dated);
   });
 
+  it('TR-7 D5: witnessed finds a head noted here by its own, though the offset fell by minutes since', async () => {
+    const truth = clock();
+    const time = clock(START.getTime() - 20 * MINUTE);
+    const store = createFakeWriteOnceStore({ now: () => truth.held.at });
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    log.soon(CHAIN, head(5n, 1));
+    const noted = time.held.at;
+    // The store's Date now ten minutes behind what it said: the least offset falls from twenty minutes to ten.
+    truth.held.at -= 10 * MINUTE;
+    await log.refresh();
+    expect(log.witnessed(CHAIN)).toEqual([{ seq: 5n, hash: hash(1), at: noted }]);
+    expect(log.witnessed(CHAIN, 1)).toEqual([{ seq: 5n, hash: hash(1), at: noted }]);
+  });
+
   it('TR-12: the first Date arriving on a Put re-dates the heads in it, and witnessed still gives them as noted here', async () => {
     const fake = createFakeWriteOnceStore();
     let date: number | undefined;
@@ -829,6 +844,8 @@ describe('SEC-DB-20 the witness log: memory and snapshots', () => {
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
     time.held.at += 15 * MINUTE;
     log.soon(CHAIN, head(1_002n, 1));
+    // Only while its reads are whole (TR-7 D2).
+    await log.refresh();
     await log.flush();
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
     // Another thousand let go at once after it: the next waits its quarter hour too, the hour as ever.
@@ -840,6 +857,7 @@ describe('SEC-DB-20 the witness log: memory and snapshots', () => {
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
     time.held.at += 1;
     log.soon(CHAIN, head(3_002n, 1));
+    await log.refresh();
     await log.flush();
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(3);
   });
@@ -892,6 +910,7 @@ describe('SEC-DB-20 the witness log: memory and snapshots', () => {
     await leader.log.flush();
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
     time.held.at += HOUR;
+    await leader.log.refresh();
     await leader.log.flush();
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
     // A start from it holds what the leader held.
@@ -899,6 +918,50 @@ describe('SEC-DB-20 the witness log: memory and snapshots', () => {
     await fresh.log.refresh();
     expect(seqs(fresh.log.pending(CHAIN))).toEqual([5n]);
     expect(seqs(fresh.log.pending(OTHER))).toEqual([2n]);
+  });
+
+  it('TR-7 D2: a leader whose reads have failed for minutes writes no snapshot, so a start still holds a stop named meanwhile', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const leader = witnessOn(store, { snapshots, leads: true, time });
+    leader.log.soon(OTHER, head(1n, 1));
+    await leader.log.refresh();
+    await leader.log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    // Its reads fail from here; another copy's stop lands while they do.
+    store.instead.list = () => Promise.reject(new Error('the store refused the list'));
+    await planted(
+      store.files,
+      'heads',
+      HEADS,
+      [line(`organisation:${ORG}`, 7n, 7, new Date(time.held.at + 50 * MINUTE))],
+      {
+        at: time.held.at + 50 * MINUTE,
+      },
+    );
+    time.held.at += HOUR;
+    leader.log.soon(OTHER, head(2n, 2));
+    expect(await leader.log.refreshWhole()).toBe(false);
+    time.held.at += 10 * MINUTE;
+    await leader.log.flush();
+    await leader.log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    expect(leader.capture.lines().filter(({ event }) => event === 'audit.witness_snapshot_skipped')).toEqual([
+      expect.objectContaining({ level: 'warn', lastWholeReadAt: START.toISOString() }),
+    ]);
+    // A start reads from the snapshot before the failure, so the stop's file is read.
+    delete store.instead.list;
+    const fresh = witnessOn(store, { snapshots, time });
+    await fresh.log.refresh();
+    expect(seqs(fresh.log.pending(CHAIN))).toEqual([7n]);
+    // Reads whole again, the leader's next snapshot holds it too.
+    await leader.log.refresh();
+    await leader.log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
+    const after = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
+    await after.log.refresh();
+    expect(seqs(after.log.pending(CHAIN))).toEqual([7n]);
   });
 });
 
@@ -1270,5 +1333,25 @@ describe('SEC-DB-20 TR-9 one held set: heldTo', () => {
     latest.set(ORG, 4n);
     expect(seqs(web.log.heldTo(CHAIN))).toEqual([5n]);
     expect(seqs(leader.log.heldTo(CHAIN))).toEqual([5n, 4n, 3n]);
+  });
+});
+
+describe('TR-7 C1 a stop below more heads than a read asks', () => {
+  it('witnessed gives the lowest held above the anchor after the highest few, a released one too; none twice', () => {
+    const { log } = witnessOn();
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    // At or below the anchor, still held on the copy that anchors: not the one a read needs.
+    log.soon(CHAIN, head(1n, 1));
+    log.soon(CHAIN, head(5n, 5));
+    // A copy's heads on a cut branch above the stop, more than a read asks.
+    for (let seq = 10n; seq < 20n; seq += 1n) log.soon(CHAIN, head(seq, 9));
+    expect(seqs(log.witnessed(CHAIN, 8))).toEqual([19n, 18n, 17n, 16n, 15n, 14n, 13n, 12n, 5n]);
+    // Released on a probe's finding, the stop is still the lowest held to.
+    log.release(CHAIN, [head(5n, 5)]);
+    expect(seqs(log.witnessed(CHAIN, 8)).at(-1)).toBe(5n);
+    // Within what is asked, nothing added.
+    const all = [19n, 18n, 17n, 16n, 15n, 14n, 13n, 12n, 11n, 10n, 5n, 1n];
+    expect(seqs(log.witnessed(CHAIN, 20))).toEqual(all);
+    expect(seqs(log.witnessed(CHAIN, 12))).toEqual(all);
   });
 });
