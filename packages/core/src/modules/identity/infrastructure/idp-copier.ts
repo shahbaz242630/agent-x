@@ -32,10 +32,18 @@
 // the login (`subject`, recorded with every event about one, SA2), so one
 // removed before they first sign in does too.
 //
-// Where it got to is the latest time the platform chain holds for a copied
-// event: each run reads from a millisecond before it to a minute before now
-// (an event written late, by an older clock, is still read), at most
-// MOST_PAGES pages a run, each page from a millisecond before the last one's
+// The feed is read as two (S210 final): the password resets asked for, in a
+// search of their own, and every other event, the changes, each from a read
+// position of its own and within pages of its own, the changes first; so a
+// flood of resets, which anyone can send, never holds a real change back. The
+// changes' feed left more than two runs behind is an error
+// (`idp_events.changes_late`): real changes, and their alarms, are late.
+// Where each got to is the latest time the platform chain holds for a copied
+// event of its types (0119's index): each run reads from a millisecond before
+// it to a minute before now (an event written late, by an older clock, is
+// still read), at most MOST_PAGES pages a run of each feed (the resets' fewer:
+// under a flood they fall behind, which is accepted, as they change no
+// credential), each page from a millisecond before the last one's
 // last event. Zitadel's span leaves out its own start (review: its search
 // reads events after `since`), so reading from a millisecond before reads
 // again the event a run stopped part-way at (it stops at the first that
@@ -48,7 +56,7 @@
 // passed.
 // An event, with an organisation, already on the platform chain is skipped,
 // so a run that stops part-way, or reads the same time again, copies nothing
-// twice. The first run starts a day back.
+// twice. Each feed's first run starts a day back.
 //
 // The S68 audit added two rules, decided once per event, on its first copy:
 // - A change that ends sessions (idp-event.ts `endsSessions`: a second factor
@@ -80,7 +88,8 @@
 // the person alone, never the admins, at most once an hour (`told: 'yes'` on
 // the platform chain's record of the copy that told them). A flood of them is
 // copied once a person a page, the page's latest, the others counted on it
-// (`alsoAsked`), so it can't hold the copies of real changes back.
+// (`alsoAsked`); read on a feed of its own, it can't hold the copies of real
+// changes back.
 //
 // Impersonation (which the stack never turns on) is logged as an error;
 // rights given in the login service, and tokens issued, as warnings. Each of
@@ -111,6 +120,8 @@ import {
 } from '../../platform-controls/index.ts';
 import {
   endsSessions,
+  FEED_TYPES,
+  type IdpFeedPart,
   isOurRoutineChange,
   type OurLoginChanges,
   isToldOnlyToThePerson,
@@ -127,7 +138,7 @@ import { lockChallengesOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userOfSubject } from './users.ts';
 
-/** The platform chain's record of each event copied, and the action the cursor is read from. */
+/** The platform chain's record of each event copied, and the action each feed's read position is read from. */
 export const IDP_EVENT_COPIED = 'idp.event_copied';
 
 /** The organisation chain's record of a person's sign-in changed. */
@@ -142,8 +153,14 @@ const SETTLE_MS = 60_000;
 /** How far before where it got to, or the last page's last event, each read starts: Zitadel's span leaves out its start. */
 const OVERLAP_MS = 1;
 
-/** The most pages of events one run reads. */
-const MOST_PAGES = 10;
+/**
+ * The most pages of events one run reads of each feed (S210 final): the resets asked for have pages of their own, so a
+ * flood of them, which anyone can send, never spends the changes' pages.
+ */
+const MOST_PAGES: Readonly<Record<IdpFeedPart, number>> = { changes: 10, resets: 5 };
+
+/** How far behind a minute ago the changes' feed may be left by a run before it is an error: two of the API's 5-minute runs. */
+const LATE_AFTER_MS = 2 * 5 * 60_000;
 
 /** The events a page asks for. */
 const PAGE = 100;
@@ -438,35 +455,41 @@ export function createIdpEventCopier({
     }
   };
 
-  /** Reads and copies pages until none is left, MOST_PAGES are read, or the signal is aborted. */
-  const copyAll = async (
+  /** What a run, or one feed's part of it, copied. */
+  interface Copied {
+    events: number;
+    written: number;
+    alsoAsked: number;
+  }
+
+  /**
+   * Reads and copies one feed's pages, from its own read position, until none is left, its MOST_PAGES are read, or the
+   * signal is aborted; where the next run will read it from when its pages ran out first, else undefined.
+   */
+  const copyPart = async (
+    part: IdpFeedPart,
+    until: Date,
+    endedThisRun: Set<string>,
+    copied: Copied,
     signal: AbortSignal | undefined,
-  ): Promise<{ events: number; written: number; alsoAsked: number }> => {
-    let events = 0;
-    let written = 0;
-    let alsoAsked = 0;
-    const until = new Date(clock.now().getTime() - SETTLE_MS);
-    // Each person's sessions ended once a run, at their first event that ends them (R-15, S206): every event the run
-    // copies was made before `until`, so before that end, which covers them all; and one person's changes in a burst
-    // put one record of an end on the platform chain a run, not one each.
-    const endedThisRun = new Set<string>();
-    const latest = await latestPlatformTime(database, IDP_EVENT_COPIED, 'at');
+  ): Promise<Date | undefined> => {
+    const latest = await latestPlatformTime(database, IDP_EVENT_COPIED, 'at', FEED_TYPES[part]);
     let since =
       latest === undefined
         ? new Date(clock.now().getTime() - FIRST_RUN_BACK_MS)
         : new Date(latest.getTime() - OVERLAP_MS);
-    for (let page = 0; page < MOST_PAGES; page += 1) {
-      if (since.getTime() >= until.getTime()) break;
-      const found = await feed.eventsBetween(since, until, PAGE);
+    for (let page = 0; page < MOST_PAGES[part]; page += 1) {
+      if (since.getTime() >= until.getTime()) return undefined;
+      const found = await feed.eventsBetween(since, until, PAGE, part);
       for (const kept of coalesced(found)) {
-        if (signal?.aborted === true) return { events, written, alsoAsked };
-        written += await copy(kept, endedThisRun);
-        events += 1 + kept.alsoAsked;
-        alsoAsked += kept.alsoAsked;
+        if (signal?.aborted === true) return undefined;
+        copied.written += await copy(kept, endedThisRun);
+        copied.events += 1 + kept.alsoAsked;
+        copied.alsoAsked += kept.alsoAsked;
       }
       // A page not full is the last.
       const last = found.at(-1);
-      if (found.length < PAGE || last === undefined) break;
+      if (found.length < PAGE || last === undefined) return undefined;
       const next = new Date(last.createdAt.getTime() - OVERLAP_MS);
       if (next.getTime() <= since.getTime()) {
         // The whole page within a millisecond: moving on leaves out any more at that time.
@@ -476,7 +499,31 @@ export function createIdpEventCopier({
         since = next;
       }
     }
-    return { events, written, alsoAsked };
+    return since;
+  };
+
+  /**
+   * Copies the changes, then the resets asked for, each feed within its own pages. The changes' feed left more than
+   * LATE_AFTER_MS behind a minute ago is an error, once a run: real changes, and their alarms, are late.
+   */
+  const copyAll = async (signal: AbortSignal | undefined): Promise<Copied> => {
+    const copied: Copied = { events: 0, written: 0, alsoAsked: 0 };
+    const until = new Date(clock.now().getTime() - SETTLE_MS);
+    // Each person's sessions ended once a run, at their first event that ends them (R-15, S206): every event the run
+    // copies was made before `until`, so before that end, which covers them all; and one person's changes in a burst
+    // put one record of an end on the platform chain a run, not one each.
+    const endedThisRun = new Set<string>();
+    const behind = await copyPart('changes', until, endedThisRun, copied, signal);
+    if (behind !== undefined && until.getTime() - behind.getTime() > LATE_AFTER_MS) {
+      logger.error('idp_events.changes_late', {
+        since: behind.toISOString(),
+        behindMinutes: Math.floor((until.getTime() - behind.getTime()) / 60_000),
+      });
+    }
+    // The resets may fall behind under a flood, run after run, and that is accepted: they change no credential, and
+    // their own pages and read position keep them from ever holding back the changes above.
+    if (signal?.aborted !== true) await copyPart('resets', until, endedThisRun, copied, signal);
+    return copied;
   };
 
   return {

@@ -111,6 +111,18 @@ export const WATCHED_IDP_EVENTS: Readonly<Record<string, IdpEventClass>> = Objec
   ),
 );
 
+/**
+ * The two feeds the copier reads, each in a search of its own from a read position of its own (S210 final): the resets
+ * asked for, which anyone can make in a flood, apart from every real change, so a flood never holds a change back.
+ */
+export type IdpFeedPart = 'changes' | 'resets';
+
+/** The event types each feed reads: the resets asked for alone, and every other type copied. */
+export const FEED_TYPES: Readonly<Record<IdpFeedPart, readonly string[]>> = Object.freeze({
+  resets: BY_CLASS.password_reset_asked,
+  changes: Object.keys(WATCHED_IDP_EVENTS).filter((type) => WATCHED_IDP_EVENTS[type] !== 'password_reset_asked'),
+});
+
 /** The most event types one search may name (Zitadel's own limit). */
 export const MOST_WATCHED_TYPES = 30;
 

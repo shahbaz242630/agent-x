@@ -26,7 +26,7 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { PlatformControlsTables } from '../../platform-controls/index.ts';
-import { classOfIdpEvent, type OurLoginChanges } from '../domain/idp-event.ts';
+import { classOfIdpEvent, FEED_TYPES, type OurLoginChanges } from '../domain/idp-event.ts';
 import { COPY_LOCK, createIdpEventCopier, IDP_EVENT_COPIED, SIGN_IN_CHANGED } from './idp-copier.ts';
 import { type FactorsHeld, IdpFactorsUnavailable, type SecondFactorsHeld } from './idp-factors.ts';
 import { type IdpEvent, type IdpEventFeed, IdpFeedUnavailable } from './idp-feed.ts';
@@ -113,23 +113,28 @@ function event(type: string, aggregateId: string, changes: Partial<IdpEvent> = {
   };
 }
 
-/** A stand-in for the feed: answers each span with the events after its start and before its end, as Zitadel does, and keeps what was asked. */
+/**
+ * A stand-in for the feed: answers each span with the events of the part's types after its start and before its end,
+ * as Zitadel does, and keeps what was asked, the changes' searches in `asked`, the resets' in `askedResets`.
+ */
 function feedOf(events: () => readonly IdpEvent[] | Error) {
   const asked: { since: Date; until: Date; most: number }[] = [];
+  const askedResets: { since: Date; until: Date; most: number }[] = [];
   const feed: IdpEventFeed = {
-    eventsBetween: (since, until, most) => {
-      asked.push({ since, until, most });
+    eventsBetween: (since, until, most, part) => {
+      (part === 'changes' ? asked : askedResets).push({ since, until, most });
       const found = events();
       if (found instanceof Error) return Promise.reject(found);
       return Promise.resolve(
         found
+          .filter((each) => FEED_TYPES[part].includes(each.type))
           .filter((each) => each.createdAt > since && each.createdAt < until)
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
           .slice(0, most),
       );
     },
   };
-  return { feed, asked };
+  return { feed, asked, askedResets };
 }
 
 const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld, ours?: OurLoginChanges) =>
@@ -205,15 +210,18 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     const who = await person();
     await organization(who.userId);
     const older = event('user.locked', who.subject, { createdAt: new Date(clock.now().getTime() - 3_600_000) });
-    const { feed, asked } = feedOf(() => [older]);
+    const { feed, asked, askedResets } = feedOf(() => [older]);
 
     await copierWith(feed).run();
 
-    expect(asked[0]).toEqual({
+    const first = {
       since: new Date(clock.now().getTime() - 86_400_000),
       until: new Date(clock.now().getTime() - 60_000),
       most: 100,
-    });
+    };
+    // Each feed, the changes and the resets asked for (S210 final), from its own read position: none yet, a day back.
+    expect(asked[0]).toEqual(first);
+    expect(askedResets).toEqual([first]);
     asked.length = 0;
     clock.advanceBy(10 * 60_000);
     await copierWith(feed).run();
@@ -526,10 +534,21 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
       await copierWith(feed).run();
       // Ten pages: the first a hundred, each after it its last one's last event again and 99 more.
       expect(await orgRecords(org)).toHaveLength(991);
+      // SEC-OPS-02 S210 final: its pages spent with the changes still ~28 minutes behind, more than two runs: one error.
+      const last = many[990]?.createdAt.getTime() ?? 0;
+      expect(lines('idp_events.changes_late')).toEqual([
+        expect.objectContaining({
+          level: 'error',
+          since: new Date(last - 1).toISOString(),
+          behindMinutes: Math.floor((clock.now().getTime() - 60_000 - (last - 1)) / 60_000),
+        }),
+      ]);
       clock.advanceBy(60_000);
       await copierWith(feed).run();
 
       expect(await orgRecords(org)).toHaveLength(1100);
+      // Caught up: no error again.
+      expect(lines('idp_events.changes_late')).toHaveLength(1);
     },
   );
 
@@ -1005,6 +1024,48 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await copierWith(feedOf(() => [event('user.human.password.code.added', who.subject)]).feed).run();
     expect(await toldOfReset()).toBe(2);
   });
+
+  it(
+    'SEC-OPS-02 S210 final: a flood of resets larger than a run’s pages, on a feed of its own, never delays a password changed after it',
+    { timeout: 120_000 },
+    async () => {
+      const who = await person();
+      const org = await organization(who.userId);
+      await signIn(who.userId);
+      const base = clock.now().getTime() - 30 * 60_000;
+      // More resets asked for than every page of a run holds, the changes' and the resets' together, a millisecond apart.
+      const flood = Array.from({ length: 1600 }, (_, index) =>
+        event('user.human.password.code.added', who.subject, { createdAt: new Date(base + index) }),
+      );
+      const changed = event('user.human.password.changed', who.subject, { createdAt: new Date(base + 61_000) });
+      const { feed, asked, askedResets } = feedOf(() => [...flood, changed]);
+
+      await copierWith(feed).run();
+
+      // The password changed is copied, and ends the session, in the same run, the flood read apart from it.
+      expect(await platformCopies(`user:${who.subject}:${changed.sequence}`)).toHaveLength(1);
+      expect(await sessionsOf(who.userId)).toBe(0);
+      expect(asked).toHaveLength(1);
+      // The resets on their own pages, five a run, still recorded: once a page, the others counted on it.
+      expect(askedResets).toHaveLength(5);
+      const resets = await Promise.all(flood.map((one) => platformCopies(`user:${who.subject}:${one.sequence}`)));
+      expect(resets.flat().map((copy) => [copy.type, copy.alsoAsked])).toEqual(
+        Array.from({ length: 5 }, () => ['user.human.password.code.added', 99]),
+      );
+      expect(await orgRecords(org)).toHaveLength(6);
+      // The resets left behind are no alarm: the changes are not late.
+      expect(lines('idp_events.changes_late')).toEqual([]);
+
+      // The next run carries the resets on from where they got to, and reads the changes from the password changed.
+      askedResets.length = 0;
+      asked.length = 0;
+      clock.advanceBy(60_000);
+      await copierWith(feed).run();
+      expect(askedResets[0]?.since.getTime()).toBeGreaterThan(base + 400);
+      expect(asked[0]?.since).toEqual(new Date(changed.createdAt.getTime() - 1));
+      expect(await platformCopies(`user:${who.subject}:${changed.sequence}`)).toHaveLength(1);
+    },
+  );
 
   it('SA2: restricts a person for 7 days from a factor removed by someone else before they first signed in, by their login', async () => {
     const subject = zitadelId();

@@ -1296,6 +1296,11 @@ export const PLAIN_WORDS = {
     broke: 'Events not yet copied are waiting; any copied before the failure are kept.',
     next: 'It carries on from where it stopped at the next run, every 5 minutes. If it repeats, check the login service.',
   },
+  'idp_events.changes_late': {
+    happened: 'The job copying sign-in changes from the login service is over two runs behind.',
+    broke: 'Changed passwords or second factors are copied late, so their alarms are late too.',
+    next: "Look for a flood of changes in the login service's history, and for failures on the job's lines.",
+  },
   'idp_events.tied_page': {
     happened: 'A full page of login service events all had the same time, so the copy job moved past that moment.',
     broke: 'Any more events from that exact moment may not have been copied into the audit trail.',

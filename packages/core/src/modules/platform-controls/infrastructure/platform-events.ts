@@ -5,8 +5,9 @@
 // anchor check (A2b): an event planted to make a copy look done, or one
 // deleted, breaks it.
 //
-// Each fact is compared as `(details::jsonb ->> <name>)`. The facts 0084
-// indexes (event, person, subject, and `at` for the latest time) are written
+// Each fact is compared as `(details::jsonb ->> <name>)`. The facts the
+// indexes key (0084's event and subject, 0116's person, 0109's record, and
+// 0119's type with `at` for each type's latest time) are written
 // out exactly as the indexes key them, fixed text, so a read by one of them is
 // a few index entries however many events of the action the chain holds (SA2);
 // any other name goes as a bound value. The containment test stays beside
@@ -15,12 +16,14 @@ import { type Expression, type Kysely, type RawBuilder, sql, type Transaction } 
 
 import type { PlatformControlsTables } from './tables.ts';
 
-/** The facts 0084 indexes, each exactly as its index keys it. */
+/** The facts 0084's, 0109's and 0119's indexes key, each exactly as its index keys it. */
 const INDEXED_FACTS: ReadonlyMap<string, RawBuilder<string | null>> = new Map([
   ['event', sql<string | null>`(details::jsonb ->> 'event')`],
   ['person', sql<string | null>`(details::jsonb ->> 'person')`],
   ['subject', sql<string | null>`(details::jsonb ->> 'subject')`],
   ['at', sql<string | null>`(details::jsonb ->> 'at')`],
+  // 0119's: with `at`, each type's latest copy, the copier's read positions (S210 final).
+  ['type', sql<string | null>`(details::jsonb ->> 'type')`],
   // 0109's: a session's signed sign-out or rotation, by its record ID (sessions.ts).
   ['record', sql<string | null>`(details::jsonb ->> 'record')`],
 ]);
@@ -31,29 +34,43 @@ const fact = (name: string): RawBuilder<string | null> =>
 
 type Reader = Kysely<PlatformControlsTables> | Transaction<PlatformControlsTables>;
 
-/** The read latestPlatformTime runs: the greatest `name` by byte order, from 0084's index for `at`. */
-export const latestPlatformTimeRead = (db: Reader, action: string, name: string) =>
+/**
+ * The read latestPlatformTime runs (S210 final, 0119): for each value of the `type` fact listed, the greatest `name` by
+ * byte order among the action's events of that type, one seek of 0119's index each, and the greatest of those.
+ */
+export const latestPlatformTimeRead = (db: Reader, action: string, name: string, types: readonly string[]) =>
   db
-    .selectFrom('platform_controls.audit_events')
-    .select(sql<string>`${fact(name)} collate "C"`.as('latest'))
-    .where('action', '=', action)
-    .where(sql<boolean>`${fact(name)} is not null`)
-    .orderBy(sql`${fact(name)} collate "C"`, 'desc')
-    .limit(1);
+    .selectFrom(sql<{ type: string }>`(select pg_catalog.unnest(${types}::text[]) as type)`.as('wanted'))
+    .innerJoinLateral(
+      (inner) =>
+        inner
+          .selectFrom('platform_controls.audit_events')
+          .select(sql<string>`${fact(name)} collate "C"`.as('at'))
+          .where('action', '=', action)
+          .where(sql<boolean>`${fact('type')} = wanted.type`)
+          .where(sql<boolean>`${fact(name)} is not null`)
+          .orderBy(sql`${fact(name)} collate "C"`, 'desc')
+          .limit(1)
+          .as('latest'),
+      (join) => join.onTrue(),
+    )
+    .select(sql<string | null>`max(latest.at)`.as('latest'));
 
 /**
  * The latest time in the details' `name` among the chain's events of
- * `action`, or undefined when there are none. Every value must be a time as
- * `Date.toISOString` writes it (UTC, 24 characters), as the copier's are, so
- * that byte order is time order; the one picked that isn't a time throws.
+ * `action` whose `type` fact is one of `types`, or undefined when there are
+ * none. Every value must be a time as `Date.toISOString` writes it (UTC, 24
+ * characters), as the copier's are, so that byte order is time order; the one
+ * picked that isn't a time throws.
  */
 export async function latestPlatformTime(
   db: Kysely<PlatformControlsTables>,
   action: string,
   name: string,
+  types: readonly string[],
 ): Promise<Date | undefined> {
-  const row = await latestPlatformTimeRead(db, action, name).executeTakeFirst();
-  if (row === undefined) return undefined;
+  const row = await latestPlatformTimeRead(db, action, name, types).executeTakeFirst();
+  if (row?.latest === undefined || row.latest === null) return undefined;
   const latest = new Date(row.latest);
   if (Number.isNaN(latest.getTime()) || latest.toISOString() !== row.latest) {
     throw new TypeError(`The platform chain's latest ${name} of ${action} is not a time as toISOString writes it`);
