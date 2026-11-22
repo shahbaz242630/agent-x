@@ -1,0 +1,18 @@
+-- agentx: no transaction (concurrent index)
+-- S210 TR-7 (R2-3): a registration counts its network's last 24 hours first (clients.ts,
+-- registerClient), and only a busy network goes on to count the server's. 0096 left the
+-- network's count to ride on the server's, read by clients_by_time in the same statement;
+-- read alone, it would visit every client of the day to find its network's. This index keys
+-- the network and when it registered, so the day's count is a range of the network's own
+-- entries, stopping at its cap. Only rows with a network: it is cleared a day after the
+-- client registered (0099, AG8), so the index holds about a day's registrations however
+-- many clients are kept.
+--
+-- A plain index missing is speed to the schema guard, never drift (schema-guard.ts), so the
+-- image before this migration reads on. oauth.clients is a global table, of no organisation
+-- (0093): no org_id to lead with, and no table, column or grant changes.
+--
+-- Built concurrently, outside a transaction (the first line; migrate.ts), as 0116's:
+-- clients go on registering throughout. A build that fails leaves the index not valid,
+-- which the guard reads as speed, not drift, and the next run drops it and builds it again.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS clients_by_network ON oauth.clients (network, created_at) WHERE network IS NOT NULL;

@@ -6,6 +6,7 @@
 import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
@@ -28,6 +29,7 @@ import {
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   BUSY_NETWORK_REGISTRATIONS,
   registerClient,
+  registrationsSince,
   sweepClientNetworks,
   sweepClients,
 } from './clients.ts';
@@ -209,6 +211,57 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
       });
     } finally {
       // Its crowd's networks would be left for the sweep below to clear.
+      await admin.query("delete from oauth.clients where name = 'Filler'");
+    }
+  });
+
+  it(`SEC-OAUTH-13 R2-3: the day's counts read no more than their caps, the network's by its own index, however many registered`, async () => {
+    const day = new Date('2026-12-15T09:00:00Z');
+    const admin = database.as('admin');
+    // 6,000 registered today, quiet networks' few each past the server's cap, and one network's 400 (more than its cap).
+    await admin.query(
+      `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at, network)
+       select 'axcl_e' || lpad(to_hex(n), 31, '0'), 'Filler', array['https://a.example/cb'], 'web', array['authorization_code'], $1,
+         case when n <= 400 then 'r23-busy' else 'r23-net-' || (n % 3000) end
+       from generate_series(1, 6000) as n`,
+      [day],
+    );
+    try {
+      await admin.query('analyze oauth.clients');
+      const since = new Date(day.getTime() - DAY_MS + 1000);
+      interface PlanNode {
+        readonly 'Node Type': string;
+        readonly 'Relation Name'?: string;
+        readonly 'Index Name'?: string;
+        readonly 'Actual Rows': number;
+        readonly Plans?: readonly PlanNode[];
+      }
+      // Every node of the plan as run: the table's reads among them, and the indexes it read by.
+      const planned = async (most: number, network?: string): Promise<PlanNode[]> => {
+        const { rows } = await sql<{
+          'QUERY PLAN': readonly [{ Plan: PlanNode }];
+        }>`explain (analyze, format json) ${registrationsSince(app, since, most, network)}`.execute(app);
+        const nodes: PlanNode[] = [];
+        const walk = (node: PlanNode): void => {
+          nodes.push(node);
+          for (const child of node.Plans ?? []) walk(child);
+        };
+        walk(rows[0]?.['QUERY PLAN'][0].Plan ?? { 'Node Type': 'none', 'Actual Rows': 0 });
+        return nodes;
+      };
+      const tableReads = (nodes: readonly PlanNode[]) => nodes.filter((node) => node['Relation Name'] === 'clients');
+      const server = tableReads(await planned(MOST_REGISTRATIONS_A_DAY));
+      expect(server).toHaveLength(1);
+      expect(server[0]?.['Actual Rows']).toBeLessThanOrEqual(MOST_REGISTRATIONS_A_DAY);
+      const network = await planned(MOST_REGISTRATIONS_A_NETWORK_A_DAY, 'r23-busy');
+      expect(network.map((node) => node['Index Name'])).toContain('clients_by_network');
+      expect(tableReads(network)).toHaveLength(1);
+      expect(tableReads(network)[0]?.['Actual Rows']).toBeLessThanOrEqual(MOST_REGISTRATIONS_A_NETWORK_A_DAY);
+      // And the counts themselves stop at the caps.
+      expect(await registrationsSince(app, since, MOST_REGISTRATIONS_A_DAY).executeTakeFirst()).toEqual({
+        registered: MOST_REGISTRATIONS_A_DAY,
+      });
+    } finally {
       await admin.query("delete from oauth.clients where name = 'Filler'");
     }
   });
