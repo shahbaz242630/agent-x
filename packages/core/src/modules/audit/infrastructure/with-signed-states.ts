@@ -638,6 +638,16 @@ export async function holdOrganisation(
 }
 
 /**
+ * The alarm for a chain that refused the work's write, named by that chain (the work may record on the platform's too).
+ * TR-7 A1: the database's clock too far from the app's is named apart, by how far, from a head that fails its check.
+ */
+function chainRefused(logger: Logger, orgId: string, error: ChainBroken): void {
+  const why = error instanceof ChainClockDiffers ? { reason: 'clocks_differ', differsMs: error.differsMs } : {};
+  const named = error.chain.kind === 'platform' ? logger : logger.child({ orgId: orgId.toLowerCase() });
+  named.error('audit.integrity_failed', { chain: error.chain.kind, check: 'record', ...why });
+}
+
+/**
  * Runs `work` in withTenant's transaction for the organisation, with signed
  * states of its own and each statement limited (withTenant's `limited`), and then
  * puts the organisation on hold for anything they found tampered with.
@@ -702,10 +712,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
       });
       found.push({ orgId: own, subjectType: CHAIN_SUBJECT, objectId: own, sign: 'chain', chainFailure: 'cut_back' });
     } else if (error instanceof ChainBroken) {
-      // TR-7 A1: the database's clock too far from the app's is named apart, by how far, from a head that fails its check.
-      const why = error instanceof ChainClockDiffers ? { reason: 'clocks_differ', differsMs: error.differsMs } : {};
-      const named = error.chain.kind === 'platform' ? logger : logger.child({ orgId: orgId.toLowerCase() });
-      named.error('audit.integrity_failed', { chain: error.chain.kind, check: 'record', ...why });
+      chainRefused(logger, orgId, error);
     }
     throw error;
   } finally {
