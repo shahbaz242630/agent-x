@@ -474,11 +474,7 @@ async function connectionOf(owner: Member, agentId: string): Promise<string> {
     clients,
   });
   const redirect = 'https://chatgpt.com/connector/oauth/cb';
-  const registered = await authorizing.register(
-    { redirect_uris: [redirect], client_name: 'ChatGPT' },
-    CORRELATION,
-    '192.0.2.81',
-  );
+  const registered = await authorizing.register({ redirect_uris: [redirect], client_name: 'ChatGPT' }, '192.0.2.81');
   if (registered.outcome !== 'registered') throw new Error(`not registered: ${registered.outcome}`);
   const flow = await authorizing.authorize(
     {

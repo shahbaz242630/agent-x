@@ -245,9 +245,11 @@ export {
   type SignInStart,
   type VerifiedSignIn,
 } from './infrastructure/oidc-client.ts';
+export { MOST_SESSIONS_A_DAY, MOST_STEP_UPS_A_DAY } from './infrastructure/person-chain-caps.ts';
 export {
   type CallbackInput,
   createSignIn,
+  SessionsSpent,
   type SignIn,
   type SignInBegun,
   SignInBusy,

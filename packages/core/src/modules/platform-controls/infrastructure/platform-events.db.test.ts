@@ -184,7 +184,7 @@ describe(`the copier's and the restriction's reads, from 0084's indexes (SA2, Po
     ]);
     // The copies by person and by login from their indexes; the resets (none here) by any index's action alone.
     expect(indexesOf(plans.restriction)).toEqual(
-      expect.arrayContaining(['audit_events_by_person', 'audit_events_by_subject']) as unknown,
+      expect.arrayContaining(['audit_events_by_person_time', 'audit_events_by_subject']) as unknown,
     );
   });
 

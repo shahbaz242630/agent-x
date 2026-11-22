@@ -31,6 +31,7 @@ import {
   MOST_OPEN_FLOWS,
   MOST_OPEN_FLOWS_A_NETWORK,
   MOST_OPEN_FLOWS_A_SOURCE,
+  MOST_REGISTRATIONS_A_DAY,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   openCodeFlow,
   PKCE_METHOD,
@@ -80,7 +81,7 @@ export type RegistrationAnswer =
 /** `ip`: the client's address as the trust rule reads it, undefined when it can't be read (rate-limit.ts). */
 export interface OauthAuthorizing {
   authorize(asked: AuthorizeAsked, cookie: string | undefined, ip: string | undefined): Promise<AuthorizeAnswer>;
-  register(asked: RegistrationAsked, correlationId: string, ip: string | undefined): Promise<RegistrationAnswer>;
+  register(asked: RegistrationAsked, ip: string | undefined): Promise<RegistrationAnswer>;
 }
 
 /**
@@ -139,6 +140,33 @@ export function capWarning(
   };
 }
 
+/**
+ * A person's refusals by a cap of their own (TR-7), said with their ID (Agent X's own, as `auth.signed_in` says it) at
+ * most once a minute a person, with how many were refused since: one person's flood is a line a minute, and the line
+ * names whom to look at. Those quiet for the minute are forgotten as others are said.
+ */
+export function personCapWarning(
+  logger: Logger,
+  clock: Clock,
+  event: ProblemEvent,
+  fields: Readonly<Record<string, unknown>>,
+): (userId: string) => void {
+  const said = new Map<string, { at: number; refused: number }>();
+  return (userId: string): void => {
+    const now = clock.now().getTime();
+    const last = said.get(userId);
+    if (last !== undefined && now - last.at < CAP_WARNING_EVERY_MS) {
+      last.refused += 1;
+      return;
+    }
+    // Forgotten only with no refusal left unsaid, so a count is never lost.
+    for (const [person, was] of said)
+      if (now - was.at >= CAP_WARNING_EVERY_MS && was.refused === 0) said.delete(person);
+    logger.warn(event, { ...fields, userId, refused: (last?.refused ?? 0) + 1 });
+    said.set(userId, { at: now, refused: 0 });
+  };
+}
+
 /** The most characters of a client's `state` kept and sent back (0093). */
 const MOST_STATE = 512;
 
@@ -171,6 +199,10 @@ export function createOauthAuthorizing({
     kind: 'flow',
     per: 'network',
     most: MOST_OPEN_FLOWS_A_NETWORK,
+  });
+  // S210 TR-7: past the day's cap only a busy network is refused (a quiet one still registers), said once a minute.
+  const registrationsCapped = capWarning(logger, clock, 'oauth.registrations_capped', {
+    most: MOST_REGISTRATIONS_A_DAY,
   });
   const networkRegistrationsCapped = capWarning(logger, clock, 'oauth.source_capped', {
     kind: 'registration',
@@ -208,12 +240,12 @@ export function createOauthAuthorizing({
       return orBusy(back, () => authorized(asked, cookie, flowSourceOf(ip), back));
     },
 
-    async register(asked, correlationId, ip) {
+    async register(asked, ip) {
       const checked = checkRegistration(asked);
       if (checked.outcome === 'invalid') return checked;
       const registered = await registerClient(database, keys, checked.client, clock.now(), clientNetwork(ip));
       if (registered.outcome === 'registered') return registered;
-      if (registered.cap === 'server') logger.child({ correlationId }).warn('oauth.registrations_capped');
+      if (registered.cap === 'server') registrationsCapped();
       else networkRegistrationsCapped();
       return { outcome: 'capped' };
     },

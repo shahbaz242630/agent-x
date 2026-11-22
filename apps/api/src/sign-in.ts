@@ -38,6 +38,15 @@
 //   are held to SIGN_IN_STARTS a minute per network, as the open flows are
 //   counted (an IPv4 address, an IPv6 /48: clientSite) (TR-17):
 //   past it RATE_LIMITED, 429 with Retry-After, and no flow begun.
+// - S210 TR-7: a person opens at most MOST_SESSIONS_A_DAY sessions and
+//   completes MOST_STEP_UPS_A_DAY step-ups in any 24 hours, as each adds to
+//   the shared platform chain (person-chain-caps.ts). A sign-in past it is
+//   RATE_LIMITED, 429 with Retry-After, and no session opened; a step-up past
+//   it STEP_UPS_SPENT, 429 with Retry-After, at its start, and back at its page
+//   with `?stepUpFailed=<challenge>&stepUpWhy=spent` at the callback, for the
+//   console to say why; no security event, as nothing about the sign-in was
+//   wrong. Each refusal warned with the person's ID, at most once a minute a
+//   person (personCapWarning). A sign-out is never refused.
 // - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
 //   a step-up for a challenge of the signed-in person's own session: a flow
 //   cookie, and off to the login service to sign in again (`prompt=login`).
@@ -71,7 +80,10 @@ import {
   type LoginSessions,
   MOST_OPEN_SIGN_INS,
   MOST_OPEN_SIGN_INS_A_NETWORK,
+  MOST_SESSIONS_A_DAY,
+  MOST_STEP_UPS_A_DAY,
   RETURN_PATH,
+  SessionsSpent,
   type SignIn,
   SignInBusy,
   SignInFailed,
@@ -87,7 +99,7 @@ import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { capWarning } from './oauth-authorizing.ts';
+import { capWarning, personCapWarning } from './oauth-authorizing.ts';
 import { clientSite, createAddressCounter, type ProxyTrust, shareOfCopies } from './rate-limit.ts';
 import type { SecurityEventSink } from './security-recorder.ts';
 
@@ -211,6 +223,10 @@ const SIGN_OUT_SCHEMA = {
 /** The query a step-up's page comes back with when it failed at the login service's return: the challenge it was for. */
 const STEP_UP_FAILED_QUERY = 'stepUpFailed';
 
+/** Why a failed step-up's page came back, where the console has its own words for it: the day's step-ups spent (TR-7). */
+const STEP_UP_WHY_QUERY = 'stepUpWhy';
+const STEP_UPS_SPENT_WHY = 'spent';
+
 /** The query a step-up's page comes back with to confirm its change: never kept on a failed one. */
 const STEPPED_QUERY = 'stepped';
 
@@ -219,13 +235,15 @@ const STEPPED_QUERY = 'stepped';
  * (its filter, `?org=`, CO5) less `?stepped=`, which would offer the change to
  * confirm, with the challenge, so the console forgets the change it kept for it.
  */
-function failedStepUpPage({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>): string {
+function failedStepUpPage({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>, spent: boolean): string {
   const at = returnTo.indexOf('?');
   const path = at === -1 ? returnTo : returnTo.slice(0, at);
   // The rest is its query, any later `?` a part of it (URLSearchParams drops the leading one).
   const query = new URLSearchParams(at === -1 ? '' : returnTo.slice(at));
   query.delete(STEPPED_QUERY);
+  query.delete(STEP_UP_WHY_QUERY);
   query.set(STEP_UP_FAILED_QUERY, challengeId);
+  if (spent) query.set(STEP_UP_WHY_QUERY, STEP_UPS_SPENT_WHY);
   return `${path}?${query.toString()}`;
 }
 
@@ -243,6 +261,9 @@ export const SIGN_IN_STARTS = { most: 20, windowMs: 60_000 } as const;
 
 /** How long to wait before starting again when the login service can't be reached: long enough for it to wake from zero. */
 const UNAVAILABLE_RETRY_SECONDS = 15;
+
+/** How long to wait past a person's day's sessions or step-ups (TR-7): an hour, as the oldest leave the 24 hours. */
+const PERSON_SPENT_RETRY_SECONDS = 3600;
 
 export function registerSignIn(
   app: FastifyInstance,
@@ -268,6 +289,9 @@ export function registerSignIn(
     { most: MOST_OPEN_SIGN_INS_A_NETWORK },
     'started',
   );
+  // S210 TR-7: a person past their day's sessions or step-ups, said the same way.
+  const sessionsSpent = personCapWarning(logger, clock, 'auth.person_sessions_spent', { most: MOST_SESSIONS_A_DAY });
+  const stepUpsSpent = personCapWarning(logger, clock, 'auth.person_step_ups_spent', { most: MOST_STEP_UPS_A_DAY });
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
   const failed = (request: FastifyRequest, reply: FastifyReply, failure: SignInFailure, reason?: string) => {
     logger
@@ -306,8 +330,26 @@ export function registerSignIn(
    * refuses it: they stay signed in. Back from the login service, the browser
    * goes back to the change's page, saying so; at the start, a 403.
    */
+  /** Back to the page a failed step-up was asked on, said failed (and why, where the console has words for it). */
+  const failedPage = (reply: FastifyReply, back: NonNullable<StepUpFailed['back']>, spent: boolean) =>
+    reply
+      .code(302)
+      .header('location', failedStepUpPage(back, spent))
+      .header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0))
+      .send({});
   const stepUpFailed = (request: FastifyRequest, reply: FastifyReply, failed: StepUpFailed) => {
     const { failure, userId } = failed;
+    // Past the day's step-ups the sign-in itself was sound (S210 TR-7): the cap's own line and code, no security event.
+    if (failure === 'step_ups_spent') {
+      if (userId !== undefined) stepUpsSpent(userId);
+      if (failed.back !== undefined) return failedPage(reply, failed.back, true);
+      return sendErrorBody(
+        reply.header('retry-after', String(PERSON_SPENT_RETRY_SECONDS)),
+        429,
+        'STEP_UPS_SPENT',
+        request.id,
+      );
+    }
     logger
       .child({ correlationId: request.id })
       .warn('auth.step_up_failed', userId === undefined ? { failure } : { failure, userId });
@@ -319,11 +361,7 @@ export function registerSignIn(
       ...(userId !== undefined && { userId }),
     });
     if (failed.back === undefined) return sendErrorBody(reply, 403, 'STEP_UP_FAILED', request.id);
-    return reply
-      .code(302)
-      .header('location', failedStepUpPage(failed.back))
-      .header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0))
-      .send({});
+    return failedPage(reply, failed.back, false);
   };
 
   const startLimit = createAddressCounter(
@@ -384,6 +422,17 @@ export function registerSignIn(
       });
     } catch (thrown) {
       if (thrown instanceof StepUpFailed) return stepUpFailed(request, reply, thrown);
+      if (thrown instanceof SessionsSpent) {
+        sessionsSpent(thrown.userId);
+        return sendErrorBody(
+          reply
+            .header('retry-after', String(PERSON_SPENT_RETRY_SECONDS))
+            .header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0)),
+          429,
+          'RATE_LIMITED',
+          request.id,
+        );
+      }
       if (!(thrown instanceof SignInFailed)) throw thrown;
       if (thrown.failure === 'provider_unavailable') return unavailable(request, reply, thrown.message);
       return failed(request, reply, thrown.failure, thrown.message);

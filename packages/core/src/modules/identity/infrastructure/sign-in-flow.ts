@@ -61,12 +61,19 @@
 // own: the owner pointing a flow at another pending challenge of the session raises the integrity alarm, and the
 // fresh sign-in verifies nothing.
 //
+// S210 TR-7 (B3): a session's end and a step-up are each an event on the shared
+// platform chain, so a person opens at most MOST_SESSIONS_A_DAY sessions and
+// completes MOST_STEP_UPS_A_DAY step-ups in any 24 hours (person-chain-caps.ts).
+// A sign-in past it is SessionsSpent, and opens nothing; a step-up past it is
+// StepUpFailed `step_ups_spent`, at its start and again as it completes. A
+// sign-out is never refused: each session ends once, so its sign-in bounds it.
+//
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
 import type { KeyProvider } from '@agentx/platform/keys';
 import { limitStatements } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely } from 'kysely';
+import type { Kysely, Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { nowChainsOf, waitWitnessed } from '../../audit/index.ts';
@@ -75,6 +82,7 @@ import { HOME_PATH, isReturnPath, type Subject } from '../domain/sign-in.ts';
 import { earliestAuthTime, type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
 import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
+import { MOST_SESSIONS_A_DAY, MOST_STEP_UPS_A_DAY, sessionsSpent, stepUpsSpent } from './person-chain-caps.ts';
 import { recordSessionEmail } from './session-emails.ts';
 import { type EndedSession, type LiveSession, type Sessions, sessionsEndedAt } from './sessions.ts';
 import { createSignedEnds, sessionEndedEvent, sessionRotatedEvent } from './signed-ends.ts';
@@ -121,10 +129,15 @@ export type CallbackInput = {
  * Why a step-up failed: the sign-in's own failures on the way back (but the
  * login service being unreachable, which stays SignInFailed), no live session
  * (`session_missing`), the challenge gone, used or out of time
- * (`challenge_missing`), or the fresh sign-in not standing for it.
+ * (`challenge_missing`), the fresh sign-in not standing for it, or the person's day's step-ups spent
+ * (`step_ups_spent`, S210 TR-7).
  */
 export type StepUpFailure =
-  Exclude<SignInFailure, 'provider_unavailable'> | 'session_missing' | 'challenge_missing' | StepUpRefusal;
+  | Exclude<SignInFailure, 'provider_unavailable'>
+  | 'session_missing'
+  | 'challenge_missing'
+  | 'step_ups_spent'
+  | StepUpRefusal;
 
 /** Where a step-up's browser goes back to after a failure on the way back: the page it was asked on, and for which challenge. */
 interface StepUpReturn {
@@ -157,6 +170,16 @@ export class SignInBusy extends Error {
   }
 }
 
+/** A sign-in that opened no session: the person has opened their day's MOST_SESSIONS_A_DAY (S210 TR-7). */
+export class SessionsSpent extends Error {
+  override readonly name = 'SessionsSpent';
+  readonly userId: string;
+  constructor(userId: string) {
+    super("sign-in refused: the person's sessions for the day are spent");
+    this.userId = userId;
+  }
+}
+
 export interface SignIn {
   /**
    * Starts a sign-in from `network` (its client's, as login-flows.ts counts it) that sends the browser back to
@@ -167,11 +190,14 @@ export interface SignIn {
   /**
    * Starts a step-up for the session's own pending challenge, sending the
    * browser back to `returnTo` after. Throws StepUpFailed `challenge_missing`
-   * for a challenge that isn't the session's or isn't pending, RangeError for
-   * a path that isn't ours.
+   * for a challenge that isn't the session's or isn't pending, `step_ups_spent`
+   * past the person's day's step-ups, RangeError for a path that isn't ours.
    */
   beginStepUp(sessionId: string, challengeId: string, returnTo?: string): Promise<SignInBegun>;
-  /** Finishes the sign-in or step-up the flow cookie names. Throws SignInFailed, or StepUpFailed for a step-up. */
+  /**
+   * Finishes the sign-in or step-up the flow cookie names. Throws SignInFailed, SessionsSpent past the person's day's
+   * sessions, or StepUpFailed for a step-up.
+   */
   complete(input: CallbackInput): Promise<SignInCompleted>;
   /** Ends the session this cookie belongs to, if any; who it was, as they sign in, undefined if there was none. */
   signOut(cookie: string | undefined): Promise<Subject | undefined>;
@@ -194,6 +220,8 @@ export function createSignIn({
   clock,
   keys,
   logger,
+  mostSessions = MOST_SESSIONS_A_DAY,
+  mostStepUps = MOST_STEP_UPS_A_DAY,
 }: {
   readonly db: Kysely<IdentityTables>;
   readonly oidc: OidcClient;
@@ -206,6 +234,10 @@ export function createSignIn({
   readonly keys: KeyProvider;
   /** For the integrity alarm of a person's row whose MAC fails (S205). */
   readonly logger: Logger;
+  /** A person's day's sessions (MOST_SESSIONS_A_DAY unless a test names fewer, rather than sign in a hundred times). */
+  readonly mostSessions?: number;
+  /** A person's day's step-ups (MOST_STEP_UPS_A_DAY unless a test names fewer). */
+  readonly mostStepUps?: number;
 }): SignIn {
   const macs = { keys, logger };
   /** The people's sessions' ends this process has checked on the platform chain, shared by its sign-ins (R-15). */
@@ -219,7 +251,7 @@ export function createSignIn({
   };
   /** The work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const inTransaction = async <T>(
-    work: (tx: Kysely<IdentityTables>) => Promise<T>,
+    work: (tx: Transaction<IdentityTables>) => Promise<T>,
   ): Promise<{ readonly result: T; readonly tx: object | undefined }> => {
     const opened: { tx?: object } = {};
     const result = await db.transaction().execute(async (tx) => {
@@ -233,7 +265,7 @@ export function createSignIn({
    * inTransaction, answering only once each platform head it wrote is outside the database (TR-1): a session's end or
    * rotation signed. WitnessUnconfirmed past the wait (503), the head still queued.
    */
-  const limited = async <T>(work: (tx: Kysely<IdentityTables>) => Promise<T>): Promise<T> => {
+  const limited = async <T>(work: (tx: Transaction<IdentityTables>) => Promise<T>): Promise<T> => {
     const { result, tx } = await inTransaction(work);
     if (tx !== undefined) await waitWitnessed(nowChainsOf(tx));
     return result;
@@ -316,6 +348,10 @@ export function createSignIn({
       throw failed(refusal, 'the fresh sign-in does not stand for the challenge', userId);
     }
     return limited(async (tx) => {
+      // The person's lock first (S210 TR-7): two step-ups at once can't both take the day's last.
+      if (await stepUpsSpent(tx, userId, mostStepUps)) {
+        throw failed('step_ups_spent', "the person's step-ups for the day are spent", userId);
+      }
       const rotated = await sessions.rotate(tx, sessionId);
       if (rotated === undefined) throw failed('session_missing', 'the session ended', userId);
       const recorded = await challenges.recordEvidence(tx, challengeId, sessionId, {
@@ -344,10 +380,15 @@ export function createSignIn({
 
     async beginStepUp(sessionId, challengeId, returnTo = HOME_PATH) {
       if (!isReturnPath(returnTo)) throw new RangeError('the return path is not a path on our own origin');
-      const pending = await limited((tx) => challenges.pending(tx, challengeId, sessionId));
-      if (pending === undefined) {
-        throw new StepUpFailed('challenge_missing', 'no challenge of this session is pending');
-      }
+      const pending = await limited(async (tx) => {
+        const found = await challenges.pending(tx, challengeId, sessionId);
+        if (found === undefined) throw new StepUpFailed('challenge_missing', 'no challenge of this session is pending');
+        // Answered before the browser leaves (S210 TR-7): the step-up would be refused as it completes.
+        if (await stepUpsSpent(tx, found.userId, mostStepUps)) {
+          throw new StepUpFailed('step_ups_spent', "the person's step-ups for the day are spent", found.userId);
+        }
+        return found;
+      });
       const { url, flow } = await oidc.start({ prompt: 'login', nonce: pending.nonce });
       const flowId = await limited((tx) => flows.save(tx, flow, returnTo, pending.challengeId));
       return { url, flowId };
@@ -384,6 +425,8 @@ export function createSignIn({
           if (!(error instanceof UserUnbelieved)) throw error;
           throw new SignInFailed('account_unbelieved', error.message);
         }
+        // The person's lock first of the sign-in's (S210 TR-7): its session is counted before it opens.
+        if (await sessionsSpent(tx, userId, clock.now(), mostSessions)) throw new SessionsSpent(userId);
         const previous = previousCookie === undefined ? undefined : await sessions.end(tx, previousCookie);
         // AG10: a sign-in made before the person's sessions were last all ended (a removal, a factor reset, a change
         // at the login service) opens none, though its flow began before that end.

@@ -20,7 +20,7 @@
 // sign-out's (`identity.session_ended`, naming the session) and a person's all
 // ended (`identity.sessions_ended`). A session either names, as ended after its
 // sign-in, is no session and raises the alarm: read in the statement that finds
-// the row, by 0109's by-record and 0084's by-person indexes, so no request costs
+// the row, by 0109's by-record and 0116's by-person indexes, so no request costs
 // a trip more, nor reads more as the person signs out more. A signed
 // end deleted to hide it breaks the platform chain, which the anchor check reads.
 // So is each rotation (`identity.session_rotated`, S207 GM-4), naming the
@@ -293,7 +293,7 @@ const later = (one: Date | null, other: Date | null): Date | null =>
  * R-15 (S206): the column alone is the owner's to set back, or to put an older value of back. So each end is signed on
  * the platform chain too (sessionsEndedEvent), and the end believed is the latest of three:
  * - the column;
- * - the person's latest signed end, read in the same statement by 0084's by-person index, so a column set back
+ * - the person's latest signed end, read in the same statement by 0116's by-person index, so a column set back
  *   behind it raises the alarm wherever that end lies;
  * - the person's latest end among the platform events checked in place since a little before `signedInAt` (an ID
  *   token's time, the login service's, which the owner can't move): the only ends that can make this sign-in stale.
@@ -390,7 +390,7 @@ export const sessionRowMessage = (row: SessionRow) =>
 /**
  * The session's signed ends, read with its row (R-15, S207): whether its own sign-out is signed (one entry of 0109's
  * by-record index, however often the person signed out), whether a rotation retired the row as it stands (the
- * session's few rotations, by the same index), and its person's latest all ended (0084's by-person index). Each a
+ * session's few rotations, by the same index), and its person's latest all ended (0116's by-person index). Each a
  * subquery of the statement, on the row's own columns.
  */
 const signedEndsOfRow = (db: Kysely<IdentityTables>, heldTo: Parameters<typeof platformHeadRead>[0]) => {

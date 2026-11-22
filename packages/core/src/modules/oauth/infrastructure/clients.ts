@@ -23,8 +23,19 @@ import { type ClientJudged, registeredJudged, registeredSealed, sealIn } from '.
 import { newClientId } from './codes.ts';
 import type { OauthTables } from './tables.ts';
 
-/** The most clients that may register in any 24 hours, from every address together. */
+/**
+ * The clients that may register in any 24 hours, from every address together, past which only a quiet network's
+ * (S210 TR-7): the table's backstop, never a lockout. A crowd of networks filling it would otherwise refuse every
+ * organisation's next app for the day (no fixed user ceiling: load may slow the system, never break it).
+ */
 export const MOST_REGISTRATIONS_A_DAY = 2000;
+
+/**
+ * How few registrations in 24 hours make a network quiet: let in even past MOST_REGISTRATIONS_A_DAY (S210 TR-7), as a
+ * quiet network's sign-in is past the sign-ins' backstop (login-flows.ts, S206 V8). The table then grows only with
+ * each new network's few.
+ */
+export const QUIET_NETWORK_REGISTRATIONS = 3;
 
 /**
  * The most clients that may register in any 24 hours from one network (6F1 G4): an IPv4 /24 or an IPv6 /48, so a few
@@ -40,7 +51,10 @@ export interface Client extends ClientRegistration {
   readonly createdAt: Date;
 }
 
-/** Registered, with its ID and when; or a day's cap reached, the whole server's or this network's, nothing kept. */
+/**
+ * Registered, with its ID and when; or a day's cap reached, nothing kept: this network's, or the whole server's with
+ * this network not quiet.
+ */
 export type Registered =
   | { readonly outcome: 'registered'; readonly client: Client }
   | { readonly outcome: 'capped'; readonly cap: 'server' | 'network' };
@@ -48,7 +62,8 @@ export type Registered =
 /**
  * Registers the client from `network` (6F1 G4: its client address's /24, or /48 for IPv6), in a transaction of its own
  * whose statements are limited to 10 seconds: the day's counts, the server's and the network's, taken under the
- * registrations' one lock, so two at once can't both take the last place.
+ * registrations' one lock, so two at once can't both take the last place. Past the server's cap a network holding fewer
+ * than QUIET_NETWORK_REGISTRATIONS that day still registers (S210 TR-7).
  */
 export async function registerClient(
   db: Kysely<OauthTables>,
@@ -68,7 +83,9 @@ export async function registerClient(
       ])
       .where('created_at', '>', new Date(now.getTime() - DAY_MS))
       .executeTakeFirstOrThrow();
-    if (registered >= MOST_REGISTRATIONS_A_DAY) return { outcome: 'capped', cap: 'server' };
+    if (registered >= MOST_REGISTRATIONS_A_DAY && fromNetwork >= QUIET_NETWORK_REGISTRATIONS) {
+      return { outcome: 'capped', cap: 'server' };
+    }
     if (fromNetwork >= MOST_REGISTRATIONS_A_NETWORK_A_DAY) return { outcome: 'capped', cap: 'network' };
     const client: Client = { ...registration, clientId: newClientId(), createdAt: now };
     const seal = registeredSealed(keys, client);

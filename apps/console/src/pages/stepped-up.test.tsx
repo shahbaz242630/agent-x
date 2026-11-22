@@ -166,6 +166,19 @@ describe('back from a step-up', () => {
     expect(confirms).toBe(0);
   });
 
+  it('S210 TR-7 says a step-up refused past the person’s day’s step-ups is spent, not failed, and cleans the address', async () => {
+    sessionStorage.setItem(`agentx.step-up.${CHALLENGE}`, JSON.stringify(PENDING));
+    const history = createMemoryHistory({ initialEntries: [`/more?stepUpFailed=${CHALLENGE}&stepUpWhy=spent`] });
+    render(<App queries={createQueries()} router={createConsoleRouter(history)} />);
+
+    expect(await screen.findByText(/as many changes by signing in again as one person may in a day/)).toBeDefined();
+    expect(screen.queryByText(/Signing in again didn't go through/)).toBeNull();
+    expect(sessionStorage).toHaveLength(0);
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(history.location.search).toBe('');
+    expect(confirms).toBe(0);
+  });
+
   it('says nothing for a stepUpFailed that names no challenge (a made-up link)', async () => {
     const history = createMemoryHistory({ initialEntries: ['/more?stepUpFailed=anything'] });
     render(<App queries={createQueries()} router={createConsoleRouter(history)} />);
