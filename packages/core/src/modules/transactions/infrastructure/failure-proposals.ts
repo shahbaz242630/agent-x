@@ -133,6 +133,9 @@ export async function openProposalOf(
     .executeTakeFirst();
   if (row === undefined) return { outcome: 'none' };
   const read = await proposalOf(tx, states, { orgId: key.orgId, id: row.id }, lock);
+  // Found OPEN before its lock: one closed by the write this read waited behind is no longer the open one (Shannon p6
+  // MISC-08: a second withdrawal's answer is NO_FAILURE_PROPOSAL, never left to its step-up's hash).
+  if (read.outcome === 'found' && read.proposal.status !== 'OPEN') return { outcome: 'none' };
   // Found by its ID a moment ago, and never deleted (0066's grants): one gone since (deleted past the app as this
   // read waited on its lock) is a tamper sign, its alarm raised and the organisation held.
   if (read.outcome !== 'missing') return read;
