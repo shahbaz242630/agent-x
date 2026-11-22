@@ -109,6 +109,36 @@ describe('SEC-DB-20 TR-14 the witness log: every file names its writer', () => {
       expect.objectContaining({ seq: '7', writer: forger.log.writer(), against: [honest.log.writer()] }),
     ]);
   });
+
+  it('S210 final F2: the fork alarm names the file of each head, as `misdated_heads` names it, so step 1 can tell framing', async () => {
+    const time = { at: AT.getTime() };
+    const store = createFakeWriteOnceStore({ now: () => time.at });
+    const honest = copyOn(store, { time });
+    await honest.log.now(CHAIN, head(7n, 1));
+    // A rival head in a file back-dated ten minutes: misdated, and the fork it makes is from that very file.
+    const forged = fileName('e1/heads/', time.at - 10 * MINUTE);
+    store.files.set(forged, await signedFile(keys, HEADS, forged, 1, [headLine(7n, 2, time.at - 10 * MINUTE)]));
+    store.created.set(forged, time.at);
+    const reader = copyOn(store, { time });
+    await reader.log.refresh();
+    const [fork] = reader.alarms('fork');
+    const [misdated] = reader.alarms('misdated_heads');
+    const files = [fork?.file, ...(fork?.againstFiles as string[])] as string[];
+    const writers = [fork?.writer, ...(fork?.against as string[])];
+    // Each a heads file's name, its folder leading (the logs mask the name's time; its ID after stays), in step with
+    // the writers; the forged one's exactly as `misdated_heads` names it.
+    const after = (name: string) => name.slice(name.indexOf('-'));
+    const honestFile = names(store, 'heads').find((name) => name !== forged) ?? '';
+    expect(files.every((file) => file.startsWith('e1/heads/'))).toBe(true);
+    expect(files.map(after).toSorted()).toEqual([after(honestFile), after(forged)].toSorted());
+    expect(files[writers.indexOf(writerOfName(forged))]).toBe(misdated?.file);
+    expect(after(files[writers.indexOf(honest.log.writer())] ?? '')).toBe(after(honestFile));
+    // A head noted here, met by a read: `noted`, read from no file.
+    await honest.log.refresh();
+    expect(honest.alarms('fork')).toEqual([
+      expect.objectContaining({ writer: writerOfName(forged), file: misdated?.file, againstFiles: ['noted'] }),
+    ]);
+  });
 });
 
 describe("SEC-DB-20 TR-14 the operator's set-aside list", () => {

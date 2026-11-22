@@ -88,7 +88,8 @@
 // that opens every file name it writes (signed-files.ts: fileName), so the closing line signs it; the API says it once
 // as it starts (witness-store.ts: `audit.witness_writer`), where the platform's own columns on the line
 // (RevisionName, ContainerGroupName: the replica) tell which copy holds it. The fork alarm names the writer of both
-// heads (`writer`, `against`); a snapshot's head line may carry its own writer (`w`), so a head read from a snapshot
+// heads (`writer`, `against`) and the file each came from (`file`, `againstFiles`: a snapshot's name for a head read from
+// one, `noted` for one noted here); a snapshot's head line may carry its own writer (`w`), so a head read from a snapshot
 // names who wrote it, never the leader that kept it (`snapshot` where the line says none). This release reads `w` and
 // writes none (SNAPSHOT_WRITERS: a build before it would take the snapshot as spoiled); the next release writes it.
 // Released and other compact heads carry no writer, and reach a new copy only through the leader's snapshot.
@@ -108,9 +109,12 @@
 //
 // The operator's step (playbook H, forks on many chains at once, R-12):
 //   1. Read the fork alarms' `writer` and `against`: the ID named across most chains is the suspect. Count only IDs
-//      named by heads files; `snapshot` names no one, and never set the jobs leader aside on fork alarms alone. Set
-//      aside only an ID no `impersonated` or `misdated_heads` alarm names (else the copy it names was framed: restart
-//      that revision, set nothing aside).
+//      named by heads files; `snapshot` names no one, and never set the jobs leader aside on fork alarms alone. An ID
+//      is framed only where every fork alarm naming it does so by a file (`file` or its place in `againstFiles`) that a
+//      `misdated_heads` or `impersonated` alarm names (`file`): then restart the revision it names and set nothing
+//      aside. Where fork alarms by any other heads file name it too, set it aside anyway: a copy broken into can write
+//      one back-dated file in its own ID, which never makes it exempt. A file under snapshots/, or `noted`, counts
+//      neither way (it says who kept the head, not when its file landed).
 //   2. Find its copy: ContainerAppConsoleLogs where Log has 'audit.witness_writer' and that ID; RevisionName and
 //      ContainerGroupName are the platform's, never the copy's word. An ID no such line names was made up: go to 5.
 //   3. Set it aside: deploy/azure/operator.ts witness-set-aside --writer <ID> --reason <incident>. Every copy passes
@@ -395,11 +399,11 @@ const SOON_RESERVED = MOST_LINES_A_FILE / 10;
 const MOST_FILE_BYTES = 64 * 1024 * 1024;
 
 /**
- * What one head held takes on the heap: its object (a bigint place, a time, its writer's ID shared by its file's heads),
- * its 32-byte hash's Buffer and the list's entry. Measured on Node 24 at 243 bytes (200,000 heads held as note() keeps
- * them, after a full collection; 235 before TR-14's writer).
+ * What one head held takes on the heap: its object (a bigint place, a time, its writer's ID and file's name, both shared
+ * by its file's heads), its 32-byte hash's Buffer and the list's entry. Measured on Node 24 at 251 bytes (200,000 heads
+ * held as a read keeps them, after a full collection; 243 before the file's name, 235 before TR-14's writer).
  */
-export const WITNESS_HEAD_BYTES = 250;
+export const WITNESS_HEAD_BYTES = 260;
 
 /**
  * What one compact head (a fingerprint, or a head released) takes: a 32-byte packed record (its place, its hash's first
@@ -480,6 +484,11 @@ interface LostMark {
 /** A head held: the writer whose file brought it in, or who noted it here, beside it (TR-14: the fork alarm names both). */
 interface Held extends WitnessedHead {
   readonly by: string;
+  /**
+   * The file it was read from, its folder leading (none where noted here): the fork alarm names it, so the operator can
+   * tell a fork from a file `misdated_heads` or `impersonated` names from one from an on-time file (playbook H, step 1).
+   */
+  readonly file?: string | undefined;
 }
 
 /** A line of a heads file or snapshot: one chain's head, or (a snapshot's) the heads it let go for memory. */
@@ -494,7 +503,7 @@ type HeadLine =
  * A line as its file of `fileAt` gives it: none where it isn't one, or is dated past the file's name beyond the clocks'
  * spread (no honest copy writes one: the header). Its time never past the name's, so a rebase after the file sets it aside.
  */
-function lineFrom(fields: unknown, fileAt: number, fileBy = '', snapshot = false): HeadLine | undefined {
+function lineFrom(fields: unknown, fileAt: number, fileBy = '', snapshot = false, file?: string): HeadLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
   const { c, s, h, t, l, f, x, r, b, a, w, ...rest } = fields as Record<string, unknown>;
   const dated = timeIn(t)?.getTime();
@@ -510,7 +519,7 @@ function lineFrom(fields: unknown, fileAt: number, fileBy = '', snapshot = false
   if (h !== undefined) {
     return x !== undefined || r !== undefined || typeof h !== 'string' || !HASH.test(h)
       ? undefined
-      : { chain: c, head: { seq, hash: Buffer.from(h, 'hex'), at, by } };
+      : { chain: c, head: { seq, hash: Buffer.from(h, 'hex'), at, by, file } };
   }
   // A fingerprint of a head let go, or a head released: its place and its hash's first bytes (a snapshot's alone).
   if (typeof x === 'string' && PREFIX.test(x) && r === undefined) {
@@ -523,6 +532,12 @@ function lineFrom(fields: unknown, fileAt: number, fileBy = '', snapshot = false
 
 /** What a snapshot's head line names when it doesn't say who wrote the head (one written before TR-14). */
 const FROM_SNAPSHOT = 'snapshot';
+
+/** What the fork alarm names as the file of a head this process noted itself, read from no file. */
+const NOTED_HERE = 'noted';
+
+/** What the fork alarm names as the writer and file of a released head, which keeps neither (a compact head). */
+const RELEASED = 'released';
 
 /**
  * Who wrote a line's head (TR-14): a snapshot's head line says (`w`), as the fork alarm names the head's writer, never
@@ -870,18 +885,25 @@ export function createWitnessLog({
   /**
    * The fork alarm: two heads witnessed at one place with different hashes, no read needed. It names the writer of the
    * head just seen (`writer`) and of those it meets (`against`), as their files' names say (TR-14): which is forged is for
-   * the chain to tell, and the one named across many chains' forks is the copy to set aside (the header).
+   * the chain to tell, and the one named across many chains' forks is the copy to set aside (the header). Each with the
+   * file it came from (`file`, `againstFiles`, in step; `noted` where noted here, `released` for a released head), so a
+   * fork from a file `misdated_heads` or `impersonated` names is told from one from an on-time file (playbook H, step 1).
    */
-  const forked = (name: string, seq: bigint, writer: string, against: readonly string[]): void => {
+  const forked = (name: string, head: Held, against: readonly Held[], released: number): void => {
     const platform = name === 'platform';
     const log = platform ? logger : logger.child({ orgId: name.slice('organisation:'.length) });
     log.error('audit.integrity_failed', {
       chain: platform ? 'platform' : 'organisation',
       check: 'witness',
       reason: 'fork',
-      seq: seq.toString(),
-      writer,
-      against,
+      seq: head.seq.toString(),
+      writer: head.by,
+      file: head.file ?? NOTED_HERE,
+      against: [...against.map(({ by }) => by), ...Array.from({ length: released }, () => RELEASED)],
+      againstFiles: [
+        ...against.map(({ file }) => file ?? NOTED_HERE),
+        ...Array.from({ length: released }, () => RELEASED),
+      ],
     });
   };
 
@@ -1030,12 +1052,9 @@ export function createWitnessLog({
     // Released at its place: the same head again (as good as held), or a fork.
     const releasedThere = released.has(name) ? releasedOf(name).filter(({ seq }) => seq === head.seq) : [];
     if (releasedThere.some((one) => sameCompact(one, head))) return false;
-    // A released head's writer isn't kept (a compact head is its place and hash alone).
-    const rivals = [
-      ...there.filter((one) => stands(name, one)).map(({ by }) => by),
-      ...releasedThere.map(() => 'released'),
-    ];
-    if (rivals.length > 0) forked(name, head.seq, head.by, rivals);
+    // A released head's writer and file aren't kept (a compact head is its place and hash alone).
+    const rivals = there.filter((one) => stands(name, one));
+    if (rivals.length + releasedThere.length > 0) forked(name, head, rivals, releasedThere.length);
     list.splice(place, 0, head);
     held.set(name, list);
     heldCount += 1;
@@ -1299,7 +1318,7 @@ export function createWitnessLog({
     const releasedRead = new Map<string, Compact[]>();
     const by = writerOfName(name);
     for await (const fields of bodyLines(got)) {
-      const line = lineFrom(fields, at, by, kind === SNAPSHOT_FILE);
+      const line = lineFrom(fields, at, by, kind === SNAPSHOT_FILE, name);
       if (line === undefined) continue;
       if ('head' in line) {
         if (keep(line.chain, line.head)) gained.add(line.chain);
