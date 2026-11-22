@@ -829,6 +829,8 @@ describe('SEC-DB-20 the witness log: memory and snapshots', () => {
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
     time.held.at += 15 * MINUTE;
     log.soon(CHAIN, head(1_002n, 1));
+    // Only while its reads are whole (TR-7 D2).
+    await log.refresh();
     await log.flush();
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
     // Another thousand let go at once after it: the next waits its quarter hour too, the hour as ever.
@@ -840,6 +842,7 @@ describe('SEC-DB-20 the witness log: memory and snapshots', () => {
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
     time.held.at += 1;
     log.soon(CHAIN, head(3_002n, 1));
+    await log.refresh();
     await log.flush();
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(3);
   });
@@ -892,6 +895,7 @@ describe('SEC-DB-20 the witness log: memory and snapshots', () => {
     await leader.log.flush();
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
     time.held.at += HOUR;
+    await leader.log.refresh();
     await leader.log.flush();
     expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
     // A start from it holds what the leader held.
@@ -899,6 +903,50 @@ describe('SEC-DB-20 the witness log: memory and snapshots', () => {
     await fresh.log.refresh();
     expect(seqs(fresh.log.pending(CHAIN))).toEqual([5n]);
     expect(seqs(fresh.log.pending(OTHER))).toEqual([2n]);
+  });
+
+  it('TR-7 D2: a leader whose reads have failed for minutes writes no snapshot, so a start still holds a stop named meanwhile', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const leader = witnessOn(store, { snapshots, leads: true, time });
+    leader.log.soon(OTHER, head(1n, 1));
+    await leader.log.refresh();
+    await leader.log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    // Its reads fail from here; another copy's stop lands while they do.
+    store.instead.list = () => Promise.reject(new Error('the store refused the list'));
+    await planted(
+      store.files,
+      'heads',
+      HEADS,
+      [line(`organisation:${ORG}`, 7n, 7, new Date(time.held.at + 50 * MINUTE))],
+      {
+        at: time.held.at + 50 * MINUTE,
+      },
+    );
+    time.held.at += HOUR;
+    leader.log.soon(OTHER, head(2n, 2));
+    expect(await leader.log.refreshWhole()).toBe(false);
+    time.held.at += 10 * MINUTE;
+    await leader.log.flush();
+    await leader.log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    expect(leader.capture.lines().filter(({ event }) => event === 'audit.witness_snapshot_skipped')).toEqual([
+      expect.objectContaining({ level: 'warn', lastWholeReadAt: START.toISOString() }),
+    ]);
+    // A start reads from the snapshot before the failure, so the stop's file is read.
+    delete store.instead.list;
+    const fresh = witnessOn(store, { snapshots, time });
+    await fresh.log.refresh();
+    expect(seqs(fresh.log.pending(CHAIN))).toEqual([7n]);
+    // Reads whole again, the leader's next snapshot holds it too.
+    await leader.log.refresh();
+    await leader.log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(2);
+    const after = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
+    await after.log.refresh();
+    expect(seqs(after.log.pending(CHAIN))).toEqual([7n]);
   });
 });
 

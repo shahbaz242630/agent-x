@@ -12,7 +12,7 @@
 //   e<epoch>/operator/<inverted-ms>-<id>   the operator's command, signed with its own `operator-signing` key, which
 //                                         is all it holds (the anchors' key is the API's alone)
 //   e<epoch>/snapshots/<inverted-ms>-<id>  hourly, every head held, in a container of its own (`snapshots`) that only
-//                                         the jobs copy leading writes
+//                                         the jobs copy leading writes, and only while its reads are whole (TR-7 D2)
 // A file is taken only under the key its folder allows: a web copy holds the anchors' key, so a snapshot it could sign
 // would let it leave out a real head; snapshots are read from their own container alone, which no web copy can add to,
 // and a heads file can say only what was written, never what wasn't. A spoiled file is the alarm, and counts nothing.
@@ -321,6 +321,12 @@ const MOST_SET_ASIDE_READS = 100;
 
 /** The most a set-aside file may hold: one line and its closing line, with room to spare. */
 const MOST_SET_ASIDE_BYTES = 4096;
+
+/**
+ * How recently the leader's last whole read must have begun for it to write a snapshot (TR-7 D2): well inside LAG_MS,
+ * so a start reading heads files from the snapshot's time less the lag reads every one named since that read.
+ */
+const SNAPSHOT_FRESH_MS = 60_000;
 
 /** How often the leader writes a snapshot. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
@@ -705,6 +711,7 @@ export function createWitnessLog({
   let lastSnapshotAt: number | undefined;
   let changedSinceSnapshot = false;
   let prunedSinceSnapshot = 0;
+  let staleSaidAt: number | undefined;
 
   const alarm = (reason: string, more: Record<string, unknown>): void => {
     logger.error('audit.integrity_failed', { chain: 'store', check: 'witness_store', reason, ...more });
@@ -1649,13 +1656,31 @@ export function createWitnessLog({
     return lines;
   };
 
-  /** The whole held, as a snapshot, where this copy leads, hourly and only after a whole read. */
+  /** A snapshot due but not written, its reads failing (TR-7 D2): said, at most once a SAY_EVERY_MS. */
+  const staleSnapshotSaid = (at: number): void => {
+    if (staleSaidAt !== undefined && at - staleSaidAt < SAY_EVERY_MS) return;
+    staleSaidAt = at;
+    logger.warn('audit.witness_snapshot_skipped', {
+      lastWholeReadAt: wholeFrom === undefined ? undefined : new Date(wholeFrom).toISOString(),
+      freshWithinMs: SNAPSHOT_FRESH_MS,
+    });
+  };
+
+  /**
+   * The whole held, as a snapshot, where this copy leads, hourly and only while its reads are whole (TR-7 D2): the last
+   * whole pass begun within SNAPSHOT_FRESH_MS. A start reads heads files only from a snapshot's time less the lag, so one
+   * written while reads failed would leave out every head named meanwhile, a stop among them, for good.
+   */
   const snapshotOnce = async (): Promise<void> => {
     if (snapshots === undefined || writes?.() !== true || state !== 'read' || !changedSinceSnapshot) return;
     const at = now().getTime();
     const since = lastSnapshotAt === undefined ? Infinity : at - lastSnapshotAt;
     const early = prunedSinceSnapshot >= PRUNED_FOR_A_SNAPSHOT && since >= SNAPSHOT_AT_MOST_MS;
     if (since < SNAPSHOT_EVERY_MS && !early) return;
+    if (wholeFrom === undefined || at - wholeFrom > SNAPSHOT_FRESH_MS) {
+      staleSnapshotSaid(at);
+      return;
+    }
     try {
       const name = fileName(folder('snapshots'), at, writer);
       await snapshots.put(name, await signedFile(keys, SNAPSHOT_FILE, name, epoch, snapshotLines(at)));
