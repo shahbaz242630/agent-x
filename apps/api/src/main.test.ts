@@ -788,6 +788,23 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     ]);
   });
 
+  it('TR-7 A1: names the database clock far from the app’s, by how far, when that is why the chain refused the start', async () => {
+    const { ChainClockDiffers } = await import('@agentx/platform/audit-chain');
+    startRecord.result = () => Promise.reject(new ChainClockDiffers({ kind: 'platform' }, -600_000));
+    const { host, capture } = await start();
+
+    expect(host.exitCode).toBe(1);
+    expect(capture.lines().slice(-2)).toEqual([
+      expect.objectContaining({
+        event: 'audit.integrity_failed',
+        check: 'start',
+        reason: 'clocks_differ',
+        differsMs: -600_000,
+      }),
+      expect.objectContaining({ level: 'error', event: 'api.start_not_recorded' }),
+    ]);
+  });
+
   it('A3e-1b: refuses to start when the live schema has drifted, before anything is written', async () => {
     // A database whose walls have been rewritten must not be served from, the
     // same way a broken platform chain refuses a start. The refusal comes
