@@ -28,7 +28,7 @@ import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
 import { clientSite } from './rate-limit.ts';
 import { buildServer } from './server.ts';
-import { cookieValue, FLOW_COOKIE, SESSION_COOKIE } from './sign-in.ts';
+import { cookieValue, FLOW_COOKIE, SESSION_COOKIE, SIGN_IN_STARTS } from './sign-in.ts';
 
 const PUBLIC_ORIGIN = 'https://app.agentx.example';
 const LOGIN_URL = 'https://auth.agentx.example/oauth/v2/authorize?state=s';
@@ -436,6 +436,57 @@ describe('S47 a login service that cannot be reached, such as one still waking f
       expect.objectContaining({ level: 'warn', most: MOST_OPEN_SIGN_INS_A_NETWORK, started: 1 }),
     ]);
     expect(capture.lines().map((line) => line.event)).not.toContain('auth.sign_ins_capped');
+  });
+
+  describe('SEC-HA-14 TR-17 sign-ins started, held to their own limit per address', () => {
+    const start = (remoteAddress: string) => ({ url: '/v1/auth/sign-in', remoteAddress });
+
+    it.each([
+      // Each IPv4 address on its own: the next one along is another.
+      ['an IPv4 address', () => '203.0.113.7', '203.0.113.7', '203.0.113.8'],
+      // One /64 counts as one address, whatever its last 64 bits; the next /64 in the same /48 is another.
+      [
+        'an IPv6 /64',
+        (n: number) => `2001:db8:1:2::${n.toString(16)}`,
+        '2001:db8:1:2:ffff:ffff:ffff:ffff',
+        '2001:db8:1:3::1',
+      ],
+    ])(
+      'refuses %s past them RATE_LIMITED, 429 with Retry-After, beginning nothing; another address goes on',
+      async (_what, address, sameOne, another) => {
+        const standIn = new StandIn();
+        const { app, noted } = await server(standIn);
+
+        for (let n = 1; n <= SIGN_IN_STARTS.most; n += 1) {
+          expect((await app.inject(start(address(n)))).statusCode).toBe(302);
+        }
+        const refused = await app.inject(start(sameOne));
+
+        expect(refused.statusCode).toBe(429);
+        expect(refused.json()).toEqual(errorBody('RATE_LIMITED', refused.headers['x-correlation-id'] as string));
+        expect(Number(refused.headers['retry-after'])).toBeGreaterThan(0);
+        expect(refused.headers).toMatchObject({ 'x-ratelimit-limit': String(SIGN_IN_STARTS.most) });
+        expect(refused.headers['set-cookie']).toBeUndefined();
+        expect(standIn.begun).toHaveLength(SIGN_IN_STARTS.most);
+        expect(noted).toEqual([]);
+        expect((await app.inject(start(another))).statusCode).toBe(302);
+        expect(standIn.begun).toHaveLength(SIGN_IN_STARTS.most + 1);
+      },
+    );
+
+    it('leaves the address’s other routes alone: its callbacks still come back', async () => {
+      const standIn = new StandIn();
+      const { app } = await server(standIn);
+      for (let n = 0; n <= SIGN_IN_STARTS.most; n += 1) await app.inject(start('203.0.113.7'));
+
+      const back = await app.inject({
+        ...callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}`),
+        remoteAddress: '203.0.113.7',
+      });
+
+      expect(back.statusCode).toBe(302);
+      expect(back.headers.location).toBe('/agents');
+    });
   });
 
   it('warns of no network giving way when none did', async () => {
