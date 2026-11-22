@@ -16,6 +16,8 @@ import {
   namedFromStart,
   namesFromHistory,
   NO_NAMES,
+  historyNamedOf,
+  namedAtOf,
 } from './state-trail.ts';
 
 const STOP = 'thing.stopped';
@@ -234,13 +236,26 @@ describe('an object named from its whole history (namesFromHistory) and the cut-
     expect(namedFromStart(undefined)).toBe(false);
   });
 
-  it('every state must carry names (allNamed): one with none is the gap; with no trail at all, not judged', () => {
+  it('a state with none from before its organisation was named (namedAt) is the gap; one after, or none named, isn’t', () => {
     const h = history();
     const bare: TrailObject = { ...h.state, trail: { seq: 20n, action: 'thing.noted', tracked: undefined } };
-    expect(trailGap([], [bare], [], undefined, true)).toEqual({ table: TABLE, id: ID, action: NO_NAMES, version: 5 });
-    expect(trailGap([], [bare], [], undefined, false)).toBeUndefined();
-    expect(trailGap([], [{ ...h.state, trail: undefined }], [], undefined, true)).toBeUndefined();
-    expect(trailGap(all(h), [h.state], [STOP, LIFT], undefined, true)).toBeUndefined();
+    expect(trailGap([], [bare], [], undefined, 21n)).toEqual({ table: TABLE, id: ID, action: NO_NAMES, version: 5 });
+    // After the naming: the app's own older code (a copy draining, a rollback), read as before.
+    expect(trailGap([], [bare], [], undefined, 20n)).toBeUndefined();
+    expect(trailGap([], [bare], [], undefined, undefined)).toBeUndefined();
+    expect(trailGap([], [{ ...h.state, trail: undefined }], [], undefined, 21n)).toBeUndefined();
+    expect(trailGap(all(h), [h.state], [STOP, LIFT], undefined, 30n)).toBeUndefined();
+  });
+
+  it('where an organisation was named: its own history_named event, or the one its names point at; none before', () => {
+    const ORG: SignedStateTable = { table: 'o.o', subject: 'org', fields: [], tracks: [historyNamedOf('org')] };
+    expect(namedAtOf(ORG, { seq: 40n, action: 'org.history_named', tracked: undefined })).toBe(40n);
+    const later = { from: 0n, last: new Map([['org.history_named', { version: 3, seq: 40n }]]) };
+    expect(namedAtOf(ORG, { seq: 55n, action: 'org.frozen', tracked: later })).toBe(40n);
+    const adjacent = { from: 0n, last: new Map([['org.history_named', { version: 3, seq: null }]]) };
+    expect(namedAtOf(ORG, { seq: 55n, action: 'org.frozen', tracked: adjacent })).toBe(54n);
+    expect(namedAtOf(ORG, { seq: 55n, action: 'org.frozen', tracked: { from: 0n, last: new Map() } })).toBeUndefined();
+    expect(namedAtOf(ORG, undefined)).toBeUndefined();
   });
 });
 

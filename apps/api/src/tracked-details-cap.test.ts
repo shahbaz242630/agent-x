@@ -47,6 +47,7 @@ const keysOf = (details: object) => Object.keys(details);
 const LARGEST: Readonly<Record<string, readonly string[]>> = {
   'organization.freeze': [...keysOf(choiceDetails('cancel')), 'reason'],
   'organization.unfreeze': [...STEP_UP, 'reason', ...keysOf(unfreezeChoiceDetails('cancel'))],
+  'organization.history_named': [],
   'agent.suspended': [...keysOf(choiceDetails('cancel')), 'reason'],
   'mandate.suspended': [...STEP_UP, ...keysOf(choiceDetails('cancel')), 'reason'],
   'mandate.accepted': [...STEP_UP, 'termsHash', 'versionId', 'carryRest', 'draftId'],

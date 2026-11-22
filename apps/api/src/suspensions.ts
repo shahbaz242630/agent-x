@@ -412,29 +412,6 @@ export const PAUSABLE_TABLES: Readonly<Record<Pausable, SignedStateTable>> = {
 /** An object a history read rests on, with its verified state: the read is held to the events that state names. */
 export type HeldBy = HistoryRests['on'][number];
 
-/**
- * Each object `ids` names (none for a null) with its verified state, read `share`: for a reader whose transaction has
- * read and locked each already (an approval's weighing), so no new lock is taken out of order. Undefined when any
- * can't be believed (its alarm raised).
- */
-export async function stopsHeldOf(
-  tx: AuditTransaction,
-  states: SignedStates,
-  orgId: string,
-  ids: Readonly<Record<Pausable, string | null>>,
-): Promise<readonly HeldBy[] | undefined> {
-  const held: HeldBy[] = [];
-  for (const which of Object.keys(PAUSABLE_TABLES) as Pausable[]) {
-    const id = ids[which];
-    if (id === null) continue;
-    const table = PAUSABLE_TABLES[which];
-    const state = await states.verifiedState(tx, table, { orgId, id }, 'share');
-    if (state.outcome !== 'verified') return undefined;
-    held.push({ table, id, state });
-  }
-  return held;
-}
-
 /** Each suspend's object type and action in the log: an organisation's freeze too (decision 10, D1). */
 export const SUSPENDS = {
   organization: { type: ORGANIZATIONS.subject, action: 'organization.freeze' },

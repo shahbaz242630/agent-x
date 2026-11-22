@@ -50,7 +50,7 @@
 // supplier holding it, which that lock waits for. So a claim taken meanwhile
 // is something past the app, and fails the request (D3's `taken`).
 import { AGENT_KEYS, agentKeyOf, agentOf, AGENTS, isLiveKey } from '@agentx/core/modules/agents';
-import type { AlongsideChange, AuditTables, SignedStates } from '@agentx/core/modules/audit';
+import type { AlongsideChange, AuditTables, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   AGENT_ZONES,
@@ -81,6 +81,7 @@ import {
 import {
   allowedCurrencyRead,
   MANDATE_VERSIONS,
+  MANDATES,
   openMandateGathered,
   openMandateOfAgent,
   POLICIES,
@@ -131,7 +132,7 @@ import {
   type SpendRequestRecord,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
-import { supplierOf } from '@agentx/core/modules/suppliers';
+import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { type Clock, type IdGenerator, type Money, money, periodOf } from '@agentx/core/shared-kernel';
 import {
   AGENT_BRAKE,
@@ -258,12 +259,13 @@ export async function answerOf(
   return found.request;
 }
 
-/** Level 2: the organisation, refused while frozen (ORG_FROZEN). */
-export async function notFrozen(tx: DecisionTx, states: SignedStates, orgId: string): Promise<void> {
+/** Level 2: the organisation, refused while frozen (ORG_FROZEN); its state as verified, for a read held to it. */
+export async function notFrozen(tx: DecisionTx, states: SignedStates, orgId: string): Promise<VerifiedState> {
   // The organisation always exists while its requests can be made.
   const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
   if (organization.outcome !== 'verified') throw new MandateRefused(503, 'INTEGRITY_FAILED');
   if (organization.fields.get('status') === 'FROZEN') throw new MandateRefused(409, 'ORG_FROZEN');
+  return organization;
 }
 
 /** Levels 2–3: the organisation not frozen, and the agent. */
@@ -280,13 +282,22 @@ export async function agentIn(
 export async function agentAlone(
   tx: DecisionTx,
   states: SignedStates,
+  at: { readonly orgId: string; readonly agentId: string },
+) {
+  return (await agentRead(tx, states, at)).agent;
+}
+
+/** agentAlone's read, with the agent's state as verified: for a read held to it (an approval's, TR-3 residual 75). */
+export async function agentRead(
+  tx: DecisionTx,
+  states: SignedStates,
   { orgId, agentId }: { readonly orgId: string; readonly agentId: string },
 ) {
   const agent = await agentOf(tx, states, { orgId, id: agentId }, 'share');
   believed(agent);
   // A key's check, or a mandate's own row, found it, and agents are never deleted (0019's grants).
   if (agent.outcome !== 'found') throw new Error(`An agent is missing: ${agentId}`);
-  return agent.agent;
+  return agent;
 }
 
 /** Levels 2–3a: the organisation not frozen, the agent, and the key it came with, still live and its own. */
@@ -327,16 +338,18 @@ export async function mandateWeighedIn(
   agentId: string,
   version: 'inForce' | 'draft' = 'inForce',
   mandateFound?: { readonly id: string | null },
-): Promise<MandateWeighed | null> {
+): Promise<(MandateWeighed & { readonly state: VerifiedState }) | null> {
   const open = await openMandateOfAgent(tx, states, orgId, agentId, mandateFound);
   believed(open);
-  const found = open.outcome === 'found' ? open.mandate : null;
-  const versionId = (version === 'draft' ? found?.pendingVersionId : found?.currentVersionId) ?? null;
-  if (found === null || versionId === null) return null;
+  if (open.outcome !== 'found') return null;
+  const found = open.mandate;
+  const versionId = (version === 'draft' ? found.pendingVersionId : found.currentVersionId) ?? null;
+  if (versionId === null) return null;
   const read = await versionIn(tx, states, orgId, found.id, versionId);
   // Drafted before E9 (decision 23): no choice, refused as it always was.
   const overLimit = (await overLimitOf(tx, states, orgId, found.id, read.id)) ?? 'refuse';
-  return { ...read, ...found, versionId: read.id, overLimit };
+  // Its state as verified beside it, for a read held to it (an approval's, TR-3 residual 75).
+  return { ...read, ...found, versionId: read.id, overLimit, state: open.state };
 }
 
 /**
@@ -398,14 +411,14 @@ async function supplierIn(
 ) {
   const supplier = await supplierOf(tx, states, { orgId, id: asked.supplierId }, supplierLock);
   believed(supplier);
-  if (supplier.outcome !== 'found') return { supplier: null, order: null };
+  if (supplier.outcome !== 'found') return { supplier: null, order: null, state: null };
   const found = supplier.supplier;
   // The simulator may weigh a request with no order named: no duplicate is then looked for.
   const order =
     asked.orderReference === null
       ? null
       : { supplierId: found.id, payeeKey: found.payeeKey, reference: asked.orderReference };
-  return { supplier: found, order };
+  return { supplier: found, order, state: supplier.state };
 }
 
 /** What weigh and a decision read for the engine, once the locks they each take are held. */
@@ -617,7 +630,11 @@ export async function weigh(
   const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
   const policies = rules(inForce, mandate);
   const source = await sourceIn(tx, states, orgId, asked);
-  const { supplier, order } = await supplierIn(tx, states, orgId, asked, decides ? 'change' : 'share');
+  const {
+    supplier,
+    order,
+    state: supplierState,
+  } = await supplierIn(tx, states, orgId, asked, decides ? 'change' : 'share');
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
   const read = { asked, now, agent, mandate, policies, source, supplier, order, month, except };
@@ -637,6 +654,12 @@ export async function weigh(
     order,
     month,
     approvalWait: inForce.approvalWait,
+    /** The mandate's, source's and supplier's states as verified here: what an approval's history reads are held to. */
+    held: [
+      ...(mandate === null ? [] : [{ table: MANDATES, id: mandate.id, state: mandate.state }]),
+      ...(source.outcome === 'found' ? [{ table: SOURCES, id: asked.fundingSourceId, state: source.state }] : []),
+      ...(supplierState === null ? [] : [{ table: SUPPLIERS, id: asked.supplierId, state: supplierState }]),
+    ],
   };
 }
 

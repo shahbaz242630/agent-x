@@ -106,7 +106,7 @@ import {
 } from './audit-trail.ts';
 import { type FrontierStart, judgeWitnessed, type WalkedWithin } from './chain-frontier.ts';
 import {
-  namedFromStart,
+  namedAtOf,
   type StateTrail,
   type TrackedBefore,
   type TrailEvent,
@@ -1932,9 +1932,9 @@ export function createSignedStates({
 
     historyHeld(orgId: string, events: readonly TrailEvent[], { on, actions, after }: HistoryRests): boolean {
       const objects = on.map(({ table, id, state }) => ({ table, id, version: state.version, trail: state.trail }));
-      // The organisation's own state, when among them, says whether every state must carry names (state-names.ts).
+      // The organisation's own state, when among them, says where it was named whole (state-names.ts).
       const own = on.find(({ id }) => id.toLowerCase() === orgId.toLowerCase());
-      const gap = trailGap(events, objects, actions, after, namedFromStart(own?.state.trail));
+      const gap = trailGap(events, objects, actions, after, own && namedAtOf(own.table, own.state.trail));
       if (gap === undefined) return true;
       alarm(gap.table.subject, { orgId, id: gap.id }, 'log');
       return false;

@@ -160,8 +160,20 @@ export interface TrailEvent {
   };
 }
 
-/** The gap's action for a state that carries no names where every one must (trailGap's `allNamed`). */
+/** The gap's action for a state from before its organisation was named whole that carries none (trailGap's `namedAt`). */
 export const NO_NAMES = 'names.missing';
+
+/** The action an object's state is recorded again with when it is named whole (state-names.ts). */
+export const historyNamedOf = (subject: string): string => `${subject}.history_named`;
+
+/** Where the organisation's own state says it was named whole: its history_named event's seq, or none. */
+export function namedAtOf(table: SignedStateTable, trail: StateTrail | undefined): bigint | undefined {
+  if (trail === undefined) return undefined;
+  const action = historyNamedOf(table.subject);
+  if (trail.action === action) return trail.seq;
+  const named = trail.tracked?.last.get(action);
+  return named === undefined ? undefined : placeOf(named, trail.seq).seq;
+}
 
 /** The event a read should have got and didn't: about which object, of which action, at which version. */
 export interface TrailGap {
@@ -191,13 +203,17 @@ export function trailGap(
   objects: readonly TrailObject[],
   actions: readonly string[],
   after: bigint | undefined,
-  /** Every object's state must carry names: its organisation's own reach back to its start (born so, or named whole since). */
-  allNamed = false,
+  /**
+   * Where its organisation was named whole (its history_named event, state-names.ts): an object's state from before it
+   * carrying no names is one the naming missed, never the app's. One after it may be the app's own older code (a copy
+   * still draining, a rollback), so it is read as before.
+   */
+  namedAt?: bigint,
 ): TrailGap | undefined {
-  // A state with none where every one has them was never the app's (an owner can't write a sealed event): the gap.
-  const unnamed = allNamed
-    ? objects.find(({ trail }) => trail !== undefined && trail.tracked === undefined)
-    : undefined;
+  const unnamed =
+    namedAt === undefined
+      ? undefined
+      : objects.find(({ trail }) => trail !== undefined && trail.tracked === undefined && trail.seq < namedAt);
   if (unnamed !== undefined)
     return { table: unnamed.table, id: unnamed.id, action: NO_NAMES, version: unnamed.version };
   const got = new Set(events.map(({ seq, event }) => `${keyOf(event.subject.type, event.subject.id)}@${seq}`));

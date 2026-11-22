@@ -61,6 +61,8 @@ import {
   type Database,
   type DatabaseTransaction,
   type IdempotentRequest,
+  noStatementTimes,
+  timingStatements,
   withTenant,
 } from '@agentx/platform/db';
 import {
@@ -199,6 +201,9 @@ const CHANGES = {
 } as const;
 
 const { mandateIdOf: mandateOf } = shared;
+
+/** An ask's trips before its reads were held to the names (781c713a), measured there. */
+const TRIPS_BEFORE_75 = 30;
 
 /** The months the agent's reservations sit in, oldest first. */
 const monthsOf = (w: World) =>
@@ -916,6 +921,16 @@ describe('SEC-DB-20 TR-3 residual 75 on the approval path: an older cancel hidde
     expect(answer).toEqual(refused(503, 'INTEGRITY_FAILED'));
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
     expect(onHold).toBe(true);
+  });
+
+  it('held to the weighing’s own states: an ask takes no trip more than before (few calls a request, S62)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const times = noStatementTimes();
+    const answer = await timingStatements(times, () => asking(w.admin, waiting.id));
+    expect(answer).toMatchObject({ outcome: 'asked' });
+    // TRIPS_BEFORE_75: an ask's trips as they were before its reads were held (781c713a), its commit's among them.
+    expect(times.trips).toBe(TRIPS_BEFORE_75);
   });
 
   it('the positive control: not hidden, the cancel read, REQUEST_CHANGED, no hold', async () => {

@@ -84,6 +84,7 @@ import {
   type AgentActing,
   createSpendRequestDecisions,
   DECIDE_OPERATION,
+  notFrozen,
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
 
@@ -909,6 +910,7 @@ describe('SEC-DB-21 in the lock order (11c: after the payee windows, in order of
           requestId: waiting.id,
           now: clock.now(),
           decides: true,
+          organization: await notFrozen(tx, states, w.org),
         });
         weighed = true;
         return again;
@@ -935,8 +937,14 @@ describe('SEC-DB-21 in the lock order (11c: after the payee windows, in order of
         waiting.id,
       ]);
     });
-    const { made } = await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      weighedAgain(tx, states, { orgId: w.org, requestId: waiting.id, now: clock.now(), decides: false }),
+    const { made } = await withSignedStates(app, w.org, quiet(), async (tx, states) =>
+      weighedAgain(tx, states, {
+        orgId: w.org,
+        requestId: waiting.id,
+        now: clock.now(),
+        decides: false,
+        organization: await notFrozen(tx, states, w.org),
+      }),
     );
     // Held by itself alone, it is no duplicate of its own.
     expect(made.decision).toBe('REQUIRE_APPROVAL');

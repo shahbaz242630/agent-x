@@ -293,17 +293,21 @@ export function subjectsAre(subjects: readonly AuditSubjectKey[]): RawBuilder<bo
 export interface WalkedEvent {
   readonly seq: bigint;
   readonly recordedAt: Date;
+  readonly action: string;
+  readonly subjectType: string;
   readonly subjectId: string;
+  readonly subjectVersion: number;
   /** Its details, as the exact JSON text that was sealed. */
   readonly details: string;
 }
 
 /** The event a walk read, if it is of `actions`: its content's labelled parts (eventContent) name what it is. */
 function walkedOf(entry: StoredEntry | undefined, actions: readonly string[]): WalkedEvent | undefined {
-  const [, , , , action, , , subjectId, , , details] = entry?.content ?? [];
+  const [, , , , action, , subjectType, subjectId, version, , details] = entry?.content ?? [];
   if (entry === undefined || typeof action !== 'string' || !actions.includes(action)) return undefined;
-  if (typeof subjectId !== 'string' || typeof details !== 'string') return undefined;
-  return { seq: entry.seq, recordedAt: entry.recordedAt, subjectId, details };
+  if (typeof subjectType !== 'string' || typeof subjectId !== 'string' || typeof details !== 'string') return undefined;
+  const subjectVersion = Number(version);
+  return { seq: entry.seq, recordedAt: entry.recordedAt, action, subjectType, subjectId, subjectVersion, details };
 }
 
 /**

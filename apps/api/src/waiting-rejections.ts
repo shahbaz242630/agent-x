@@ -346,12 +346,13 @@ export function createWaitingRejections({
   ): Promise<boolean> => {
     // Read before the lock waits below, as a decision's: the instant it is weighed at.
     const now = clock.now();
-    await notFrozen(tx, states, orgId);
+    const organization = await notFrozen(tx, states, orgId);
     const { made, supplierNow, unchanged, rejection, decidedSeq } = await weighedAgain(tx, states, {
       orgId,
       requestId,
       now,
       decides: true,
+      organization,
     });
     const inForce = from.mandateId === null ? made.versions.organizationPolicy : made.versions.mandatePolicy;
     if (!unchanged || supplierNow.move !== 'same' || inForce !== from.versionId || rejection === null) return false;

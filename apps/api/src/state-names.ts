@@ -1,11 +1,12 @@
 // Each tracked object recorded before the names given them (TR-3 residual 75, state-trail.ts): the API's job, on a
 // timer of its own, as the grant summaries' backfill is. For each organisation the directory lists, every run, it
 // first looks (one `share` read) whether the organisation's own state names its history from its start: born after
-// the names, or named here already, it is done. Otherwise it checks the organisation's whole chain from its start;
-// only a chain that checks out whole is named. Then each tracked object whose state doesn't reach its start is
-// recorded again, unchanged, its event naming the newest of each tracked action its whole history holds
-// (namesFromHistory), a page at a time; the organisation's own state last, so it names its start only once every
-// other one does. From then, a state with no names in that organisation is tampering (trailGap's `allNamed`).
+// the names, or named here already, it is done. Otherwise it walks the organisation's whole chain from its start,
+// keeping the events of the tracked actions as the walk read them; only a chain that checks out whole is named, and
+// only from what that walk read, so nothing moved after it can be named over. Then each tracked object whose state
+// doesn't reach its start is recorded again, unchanged, its event naming the newest of each tracked action the walk
+// kept of it (namesFromHistory), a page at a time; one changed since the walk is left for the next run; the
+// organisation's own state last, only once every other one is named. From then, a state from before that naming with no names is tampering (trailGap's `namedAt`).
 //
 // An object's older events of an action than its newest stay unnamed (legacy, never more than the chain checked
 // whole here held): only staging holds such objects, and the request-voids job settles any request they stopped.
@@ -17,11 +18,15 @@
 import { AGENTS } from '@agentx/core/modules/agents';
 import {
   type AuditTables,
+  CHAIN_START,
+  type CheckedPoint,
   createAuditTrail,
+  historyNamedOf,
   namedFromStart,
   namesFromHistory,
   type SignedStates,
   type SignedStatesServices,
+  type TrailEvent,
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
@@ -30,6 +35,7 @@ import { MANDATES } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
+import type { ChainProblem } from '@agentx/platform/audit-chain';
 import type { Database, DatabaseTransaction, SignedStateTable } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -43,8 +49,11 @@ const NAMED_TABLES: readonly SignedStateTable[] = [AGENTS, MANDATES, SOURCES, SU
 /** How many objects one transaction names. */
 const OBJECTS_A_PAGE = 50;
 
-/** The most events of its tracked actions one object's history may hold to be named (each a person's or a lapse's). */
-const MOST_TRACKED_EVENTS = 1_000;
+/** How many events one step of the walk from the chain's start reads (each step its own transaction, as the checks'). */
+const EVENTS_A_STEP = 5_000;
+
+/** Every action a named table tracks: what the walk keeps. */
+const TRACKED_ACTIONS = [...new Set(NAMED_TABLES.flatMap((table) => table.tracks ?? []))];
 
 type NamesTables = AuditTables & DirectoryTables;
 type NamesTx = DatabaseTransaction<NamesTables>;
@@ -54,25 +63,38 @@ export interface StateNames {
   run(signal?: AbortSignal): Promise<void>;
 }
 
-/** The object's state recorded again, naming its whole history, unless it reaches its start already; whether it did. */
-async function namedOne(tx: NamesTx, states: SignedStates, table: SignedStateTable, orgId: string, id: string) {
+/** What the walk from the chain's start read: where it reached, and the tracked events it kept, by object. */
+interface Walked {
+  readonly reached: bigint;
+  readonly kept: ReadonlyMap<string, TrailEvent[]>;
+}
+
+const objectKey = (type: string, id: string) => `${type}:${id.toLowerCase()}`;
+
+/**
+ * The object's state recorded again, naming the newest of each tracked action the walk kept of it, unless it reaches
+ * its start already (`named`) or moved past the walk (`left`, for the next run).
+ */
+async function namedOne(
+  tx: NamesTx,
+  states: SignedStates,
+  table: SignedStateTable,
+  { orgId, id }: { readonly orgId: string; readonly id: string },
+  walked: Walked,
+): Promise<'named' | 'as_is' | 'left'> {
   const key = { orgId, id };
   const state = await states.verifiedState(tx, table, key, 'change');
   if (state.outcome !== 'verified') throw new Error(`An object to name can't be believed: ${table.subject} ${id}`);
-  if (namedFromStart(state.trail)) return false;
-  const history = await states.historyOf(tx, orgId, {
-    subjectTypes: [table.subject],
-    subjectId: id,
-    actions: table.tracks ?? [],
-    limit: MOST_TRACKED_EVENTS,
-  });
-  if (history.outcome !== 'read') throw new Error(`An object's history to name can't be believed: ${id}`);
-  await states.renamed(tx, table, key, state, namesFromHistory(table, history.events), {
+  if (namedFromStart(state.trail)) return 'as_is';
+  // Its state recorded since the walk: its events past it weren't read whole by it, so it waits for the next walk.
+  if (state.trail === undefined || state.trail.seq > walked.reached) return 'left';
+  const events = walked.kept.get(objectKey(table.subject, id)) ?? [];
+  await states.renamed(tx, table, key, state, namesFromHistory(table, events), {
     actor: { type: 'system', id: 'api' },
-    action: `${table.subject}.history_named`,
+    action: historyNamedOf(table.subject),
     details: {},
   });
-  return true;
+  return 'named';
 }
 
 export function createStateNames({
@@ -81,6 +103,7 @@ export function createStateNames({
   keys,
   ids,
   logger,
+  walked: afterWalk = () => Promise.resolve(),
 }: {
   /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -88,12 +111,34 @@ export function createStateNames({
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
+  /** Done between an organisation's walk and its naming (tests: a move made just then). */
+  readonly walked?: () => Promise<void>;
 }): StateNames {
   const trail = createAuditTrail({ keys, ids });
 
-  /** Each of the table's objects named, a page a transaction; how many were. */
-  const namedIn = async (services: SignedStatesServices, orgId: string, table: SignedStateTable): Promise<number> => {
-    let named = 0;
+  /** The organisation's whole chain walked from its start, its tracked events kept as read; the problem, if it fails. */
+  const walkedWhole = async (orgId: string): Promise<Walked | ChainProblem> => {
+    let at: CheckedPoint = CHAIN_START;
+    const kept = new Map<string, TrailEvent[]>();
+    for (;;) {
+      const { step, kept: read } = await trail.walkFrom(database, orgId, at, EVENTS_A_STEP, TRACKED_ACTIONS);
+      if (!step.ok) return step.problem;
+      for (const event of read) {
+        const at = objectKey(event.subjectType, event.subjectId);
+        const subject = { type: event.subjectType, id: event.subjectId, version: event.subjectVersion };
+        kept.set(at, [
+          ...(kept.get(at) ?? []),
+          { seq: event.seq, event: { action: event.action, subject, details: {} } },
+        ]);
+      }
+      at = { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion };
+      if (step.seq >= step.to) return { reached: step.seq, kept };
+    }
+  };
+
+  /** Each of the table's objects named, a page a transaction: how many were, and how many were left for the next run. */
+  const namedIn = async (services: SignedStatesServices, orgId: string, table: SignedStateTable, walked: Walked) => {
+    const counted = { named: 0, left: 0 };
     let after: string | null = null;
     do {
       const page: { readonly ids: readonly string[]; readonly next: string | null } = await withSignedStates(
@@ -102,13 +147,16 @@ export function createStateNames({
         services,
         async (tx, states) => {
           const listed = await states.objectIds(tx, orgId, table, after, OBJECTS_A_PAGE);
-          for (const id of listed.ids) if (await namedOne(tx, states, table, orgId, id)) named += 1;
+          for (const id of listed.ids) {
+            const came = await namedOne(tx, states, table, { orgId, id }, walked);
+            if (came !== 'as_is') counted[came] += 1;
+          }
           return listed;
         },
       );
       after = page.next;
     } while (after !== null);
-    return named;
+    return counted;
   };
 
   const nameIn = async (orgId: string, signal: AbortSignal | undefined): Promise<void> => {
@@ -121,17 +169,23 @@ export function createStateNames({
         return own.outcome !== 'verified' || namedFromStart(own.trail);
       });
       if (done) return;
-      const checked = await trail.verifyAlone(database, orgId, undefined);
-      if (!checked.ok) {
-        log.warn('state_names.chain_unverified', { reason: checked.problem.reason, seq: checked.problem.seq });
+      const walked = await walkedWhole(orgId);
+      if (!('kept' in walked)) {
+        log.warn('state_names.chain_unverified', { reason: walked.reason, seq: walked.seq });
         return;
       }
+      await afterWalk();
       let named = 0;
+      let left = 0;
       for (const table of NAMED_TABLES) {
         if (signal?.aborted === true) return;
-        named += await namedIn(services, orgId, table);
+        // The organisation's own state last, and only once no other was left: its names then reach its start.
+        if (table === ORGANIZATIONS && left > 0) break;
+        const counted = await namedIn(services, orgId, table, walked);
+        named += counted.named;
+        left += counted.left;
       }
-      log.info('state_names.named', { named });
+      log.info('state_names.named', { named, left });
     } catch (error) {
       log.error('state_names.failed', { err: error });
     }
