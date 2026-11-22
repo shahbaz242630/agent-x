@@ -73,6 +73,11 @@ export interface WriteOnceStore {
    * the add token could make huge, or put beyond a plain read (PL-65): never a failure of the store for that alone.
    */
   getAtMost(name: string, mostBytes: number): Promise<Buffer | 'missing' | 'too-large' | 'unreadable'>;
+  /**
+   * The service's own time on its latest answer (Azure's `Date` header, over TLS), where it gives one (TR-12): a writer
+   * names its files by it, so its own clock being off hides none. None from a store with no service.
+   */
+  readonly serverTime?: () => number | undefined;
 }
 
 /** A body read only as far as `mostBytes`: past it, the rest is never fetched, and it is `too-large`. */
@@ -186,13 +191,21 @@ export function azureWriteOnceStore({
   /** The clock a kept token is timed by. */
   readonly now?: () => number;
 }): WriteOnceStore {
-  const call = blobServiceCaller({
+  const caller = blobServiceCaller({
     settings,
     fetch,
     store: STORE,
     timeoutMs: CALL_TIMEOUT_MS,
     ...(now === undefined ? {} : { now }),
   });
+  // The service's `Date` on its latest answer that gave a readable one (serverTime).
+  let serverAt: number | undefined;
+  const call: typeof caller = async (path, init) => {
+    const response = await caller(path, init);
+    const said = Date.parse(response.headers.get('date') ?? '');
+    if (Number.isFinite(said)) serverAt = said;
+    return response;
+  };
 
   /** An answer other than `expected` as the failure it is: nothing of it read but its status and code. */
   const failed = async (response: Response): Promise<BlobStoreFailed> => {
@@ -204,6 +217,8 @@ export function azureWriteOnceStore({
   };
 
   return {
+    serverTime: () => serverAt,
+
     async put(name, bytes) {
       const response = await call(`/${checkedBlobName(name)}`, {
         method: 'PUT',

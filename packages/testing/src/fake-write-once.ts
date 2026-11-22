@@ -12,7 +12,8 @@ export interface FakeWriteOnceStore {
   readonly files: Map<string, Buffer>;
   /**
    * When each file landed by the store's clock, as Azure's list gives it (TR-12): set by a Put where the store was given
-   * a clock, or by a test for a file it planted. A list gives those of its page, where any.
+   * a clock (`now`, which its serverTime gives too, as Azure's Date), or by a test for a file it planted. A list gives
+   * those of its page, where any.
    */
   readonly created: Map<string, number>;
   /** How many of each call reached `store`. */
@@ -64,6 +65,8 @@ export function createFakeWriteOnceStore({ now }: { readonly now?: () => number 
   };
 
   const store: WriteOnceStore = {
+    // The store's clock as Azure's Date gives it (TR-12), where it was given one.
+    ...(now === undefined ? {} : { serverTime: now }),
     put(name, bytes) {
       calls.puts += 1;
       return (instead.put ?? real.put)(name, bytes);

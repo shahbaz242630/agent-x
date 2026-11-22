@@ -390,8 +390,9 @@ export const PLAIN_WORDS = {
   },
   'audit.witness_clock_skew': {
     happened: 'A copy of the API has a clock more than five minutes off the witness store’s.',
-    broke: 'Its chain heads reach other copies up to five minutes late; over an hour slow, never.',
-    next: 'Restart the copy whose clock is off so it resyncs: playbook section H.',
+    broke:
+      'Nothing if it gives an offset: the copy names files by the store’s time. If it names a file, heads may be late.',
+    next: 'Check the time sync of the host the copy runs on. On Container Apps the clock is the host’s.',
   },
   'audit.witness_beyond_memory': {
     happened: 'This copy had more audit chain heads than its memory allows, and let the oldest go.',

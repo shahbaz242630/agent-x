@@ -173,28 +173,28 @@ export async function* bodyLines(bytes: Buffer): AsyncGenerator {
 
 /**
  * Every well-named file in `folder`, newest first, with when it landed by the store's clock where the store says
- * (`created`). A name dated past `mostAt` (given that landing) is said (`future`) and passed over: no honest clock names
- * one so far ahead.
+ * (`created`), `most` names a list call. A name dated past `mostAt` is said (`future`) and passed over: no honest clock
+ * names one so far ahead.
  */
 export async function* namesIn(
   from: WriteOnceStore,
   folder: string,
-  mostAt: (created: number | undefined) => number,
+  mostAt: () => number,
   future: (at: number) => void,
+  most = NAMES_A_PAGE,
 ): AsyncGenerator<{ readonly name: string; readonly at: number; readonly created: number | undefined }> {
   let after: string | undefined;
   do {
-    const page = await from.list(folder, NAMES_A_PAGE, after);
+    const page = await from.list(folder, most, after);
     for (const name of page.names) {
       const rest = name.slice(folder.length);
       if (!FILE.test(rest)) continue;
       const at = timeOfName(rest.slice(0, 13));
-      const created = page.created?.get(name);
-      if (at > mostAt(created)) {
+      if (at > mostAt()) {
         future(at);
         continue;
       }
-      yield { name, at, created };
+      yield { name, at, created: page.created?.get(name) };
     }
     after = page.next;
   } while (after !== undefined);

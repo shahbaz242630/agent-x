@@ -425,6 +425,29 @@ describe('SEC-ANC-01 4D2e E3 the write-once store on Azure', () => {
     );
   });
 
+  it('keeps the service’s Date from its latest answer that gave one, for a writer to name files by (TR-12)', async () => {
+    const dates = ['Fri, 20 Nov 2026 09:00:00 GMT', 'not a date', 'Fri, 20 Nov 2026 09:20:00 GMT'];
+    const store = azureWriteOnceStore({
+      settings: SETTINGS,
+      fetch: (url) =>
+        Promise.resolve(
+          new URL(url).origin === 'http://localhost:42356'
+            ? Response.json({ access_token: ISSUED })
+            : new Response('<EnumerationResults><Blobs /><NextMarker /></EnumerationResults>', {
+                headers: { date: dates.shift() ?? '' },
+              }),
+        ),
+    });
+    expect(store.serverTime?.()).toBeUndefined();
+    await store.list('e1/', 10);
+    expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:00:00Z'));
+    // One with no readable Date leaves the last.
+    await store.list('e1/', 10);
+    expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:00:00Z'));
+    await store.list('e1/', 10);
+    expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:20:00Z'));
+  });
+
   it('refuses a continuation of another form rather than send it on', async () => {
     await expect(
       answering('<EnumerationResults><NextMarker>a&amp;b</NextMarker></EnumerationResults>').list('e1/', 10),
