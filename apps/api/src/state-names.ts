@@ -44,6 +44,7 @@ import type { ChainProblem } from '@agentx/platform/audit-chain';
 import {
   type Database,
   type DatabaseTransaction,
+  oldestCarryingAgeMs,
   oldestEventAgeMs,
   oldestLackingAgeMs,
   type SignedStateTable,
@@ -318,19 +319,18 @@ export function createStateNames({
   /**
    * An organisation left unnamed this run: an error once its naming began (its first object named, by the database's
    * clock) longer ago than a day of runs, read from its chain so no restart or change of leader resets it (TR-16).
-   * With nothing named yet, the oldest state still carrying no names dates the wait instead: an older image's state
-   * stays until it is named or written again, so its age is as durable, and one is always there while the wait lasts.
+   * With nothing named yet, the older of two dates the wait instead: the oldest state still carrying no names (an older
+   * image's, which stays until named or written again), and the chain's first event carrying names (sealed, never
+   * reset), which is there once a busy organisation's objects are each written again by the app as it is now.
    */
   const tooLong = async (services: SignedStatesServices, orgId: string, log: Logger) => {
     const ageMs = await withSignedStates(database, orgId, services, async (tx) => {
       const began = await oldestEventAgeMs(tx, orgId, NAMING_ACTIONS);
       if (began !== null) return began;
-      let oldest: number | null = null;
-      for (const table of NAMED_TABLES) {
-        const age = await oldestLackingAgeMs(tx, table, orgId, TRACKED_BEFORE);
-        if (age !== null && (oldest === null || age > oldest)) oldest = age;
-      }
-      return oldest;
+      const ages = [await oldestCarryingAgeMs(tx, orgId, TRACKED_BEFORE)];
+      for (const table of NAMED_TABLES) ages.push(await oldestLackingAgeMs(tx, table, orgId, TRACKED_BEFORE));
+      const known = ages.filter((age) => age !== null);
+      return known.length === 0 ? null : Math.max(...known);
     });
     if (ageMs !== null && ageMs >= unnamedTooLongMs)
       log.error('state_names.unnamed_too_long', { hours: Math.floor(ageMs / 3_600_000) });

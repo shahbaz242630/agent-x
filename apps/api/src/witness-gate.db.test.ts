@@ -1791,6 +1791,44 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     expect(lines('state_names.unnamed_too_long')).toEqual([expect.objectContaining({ level: 'error', hours: 0 })]);
   });
 
+  it('TR-16 review: a busy organisation, nothing named and nothing left without names, dates the wait from its first event with names', async () => {
+    // The app as it is now writes the agent and the organisation before the agent's page every run: each carries names,
+    // not from its start, and each is left, so nothing is ever named and no state lacks names.
+    const { w, started } = await legacyOrganisation(true, async (at, next) => {
+      if (next !== AGENTS) return;
+      await signed(at, async (tx, states) => {
+        for (const [table, id] of [
+          [AGENTS, at.agent],
+          [ORGANIZATIONS, at.org],
+        ] as const) {
+          const state = await states.verifiedState(tx, table, { orgId: at.org, id }, 'change');
+          if (state.outcome !== 'verified') throw new Error('the object should verify');
+          await states.record(
+            tx,
+            table,
+            { orgId: at.org, id },
+            state,
+            {},
+            { actor: OPERATOR, action: 'test.noted', details: {} },
+          );
+        }
+      });
+    });
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 0, left: 1 })]);
+    let lacking: unknown[] = [];
+    await asOwner(w, async (owner) => {
+      lacking = await owner.query(
+        `select 1 from agents.agents t join audit.events e on e.org_id = t.org_id and e.id = t.state_event_id
+          where t.org_id = $1 and (e.details::jsonb -> 'trackedBefore') is null`,
+        [w.org],
+      );
+    });
+    expect(lacking).toEqual([]);
+    expect(lines('state_names.unnamed_too_long')).toEqual([]);
+    await started(0).run();
+    expect(lines('state_names.unnamed_too_long')).toEqual([expect.objectContaining({ level: 'error', hours: 0 })]);
+  });
+
   it('state names: an object that can’t be believed is the organisation’s failure, logged, nothing claimed named', async () => {
     const { w, job } = await legacyOrganisation(false);
     await asOwner(w, async (owner) => {

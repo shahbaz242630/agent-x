@@ -97,6 +97,7 @@ export {
   signedRowsLackingSince,
   oldestEventAgeMs,
   oldestLackingAgeMs,
+  oldestCarryingAgeMs,
   signedRowPointed,
   signedRowPointing,
   brakeSharedLookedUp,

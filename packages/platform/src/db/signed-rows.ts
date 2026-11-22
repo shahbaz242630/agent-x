@@ -662,6 +662,28 @@ export async function oldestLackingAgeMs<Schema>(
   return ageIn(rows[0]?.age_ms);
 }
 
+/**
+ * How long ago, by the database's clock, the organisation's first event whose details carry `detail` was recorded, or
+ * null for none: state-names.ts's age of the names in its chain (sealed, so never reset). The first by seq: the chain's
+ * key stops the scan there.
+ */
+export async function oldestCarryingAgeMs<Schema>(
+  tx: Transaction<Schema>,
+  orgId: string,
+  detail: string,
+): Promise<number | null> {
+  if (!UUID.test(orgId)) throw new RangeError('A signed row is named by UUIDs');
+  await assertTenant(tx, orgId);
+  const { rows } = await sql<{ age_ms: string }>`
+    select (pg_catalog.date_part('epoch', pg_catalog.now() - e.recorded_at) * 1000)::bigint::text as age_ms
+    from audit.events as e
+    where e.org_id = ${orgId} and (e.details::jsonb -> ${detail}) is not null
+    order by e.seq
+    limit 1
+  `.execute(tx);
+  return ageIn(rows[0]?.age_ms);
+}
+
 /** An age in milliseconds as the database wrote it, or null for none. */
 const ageIn = (text: string | null | undefined): number | null =>
   text === null || text === undefined ? null : Number(text);

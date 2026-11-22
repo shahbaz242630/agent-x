@@ -842,9 +842,9 @@ export const PLAIN_WORDS = {
     next: 'It is tried again in about an hour. If it repeats, look for an old version still running.',
   },
   'state_names.unnamed_too_long': {
-    happened: "Linking one organisation's older records began over a day ago and has not finished.",
-    broke: 'A missing older event about its records is still not caught as tampering.',
-    next: 'Read its warnings: an old version still running, someone editing the database, or records changing every run.',
+    happened: "The oldest of one organisation's records still waiting to be linked is over a day old.",
+    broke: 'A missing older event about its records is not caught as tampering.',
+    next: 'Read its warnings: an old version still running, database edits, or records changing every run.',
   },
   'state_names.failed': {
     happened: "One organisation's older records could not all be given the links that protect their history.",

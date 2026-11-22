@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createDatabase, type Database } from './database.ts';
 import {
+  oldestCarryingAgeMs,
   oldestEventAgeMs,
   oldestLackingAgeMs,
   pointSignedRow,
@@ -325,6 +326,15 @@ describe('looking for a row pointing at an event since a place, its details lack
     // An organisation with no rows: none.
     expect(await lackingAge('0199a0f0-0000-7000-8000-0000000000ff')).toBeNull();
     await expect(lackingAge(LOOKED_ORG, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('says how long ago the first event carrying the key was recorded, or none', async () => {
+    const carryingAge = (detail: string, org = LOOKED_ORG) =>
+      withTenant(app, LOOKED_ORG, (tx) => oldestCarryingAgeMs(tx, org, detail));
+    // Event 2 carries "named" (above); none carries "never".
+    expect(await carryingAge('named')).toBeGreaterThanOrEqual(0);
+    expect(await carryingAge('never')).toBeNull();
+    await expect(carryingAge('named', 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
   });
 });
 
