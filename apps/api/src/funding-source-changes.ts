@@ -199,7 +199,7 @@ export function createFundingSourceChanges({
   const suspendedSource = async (tx: FundingSourceTx, states: SignedStates, orgId: string, sourceId: string) => {
     const read = await work.sourceIn(tx, states, { orgId, id: sourceId }, 'change');
     if (read.source.status !== 'SUSPENDED') throw new FundingSourceRefused(409, 'SOURCE_NOT_SUSPENDED');
-    return { id: read.source.id, suspendedBy: read.state.eventId };
+    return { id: read.source.id, suspendedBy: read.state.eventId, state: read.state };
   };
 
   /**
@@ -292,7 +292,7 @@ export function createFundingSourceChanges({
         const holdsExpired =
           lookup.kind === 'found' &&
           lookup.source.availability === 'UNAVAILABLE' &&
-          (await holdsOverExpiry(tx, states, member.orgId, sourceId));
+          (await holdsOverExpiry(tx, states, member.orgId, sourceId, found.state));
         if (lookup.kind === 'not_found' || partnerEnds(found.source, lookup.source, holdsExpired)) {
           const braked = { fundingSourceId: sourceId };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
@@ -352,7 +352,7 @@ export function createFundingSourceChanges({
         const read = await work.sourceIn(tx, states, key, 'change');
         const { source } = read;
         if (source.status === 'ENDED') throw new FundingSourceRefused(409, 'SOURCE_NOT_USABLE');
-        const inForce = await consentExpiryOf(tx, states, member.orgId, sourceId);
+        const inForce = await consentExpiryOf(tx, states, member.orgId, sourceId, read.state);
         // Chosen already: answered as it is, nothing recorded twice.
         if (inForce === consentExpiry) return { status: 200, resourceId: source.id };
         const lapsed = lapsedBy(source, clock.now());
@@ -416,7 +416,7 @@ export function createFundingSourceChanges({
           { passkeyRequired: true },
         );
         // Its suspension cancelled them: those its brake left are voided first, the job any past this batch (F1 G1).
-        if (await cancelledInForce(tx, states, member.orgId, 'source', source.id)) {
+        if (await cancelledInForce(tx, states, member.orgId, 'source', source.id, source.state)) {
           const braked = { fundingSourceId: source.id };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
         }

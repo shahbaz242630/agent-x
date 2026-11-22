@@ -199,7 +199,8 @@ export function createOrganizationChanges({
     await work.memberIn(tx, states, member, UNFREEZING_ROLES);
     if (organization.status !== 'FROZEN') throw new OrganizationRefused(409, 'ORG_NOT_FROZEN');
     if (choice === 'pause') {
-      const paused = await pausedOf(tx, states, member.orgId, [['organization', member.orgId, 'FROZEN']]);
+      const stopped = ['organization', member.orgId, 'FROZEN', organization.state] as const;
+      const paused = await pausedOf(tx, states, member.orgId, [stopped]);
       if (!paused.has('organization')) throw new OrganizationRefused(409, 'PENDING_REQUESTS_CANCELLED');
     }
     return organization;

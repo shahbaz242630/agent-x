@@ -190,7 +190,7 @@ export function createCarryRest({
     if (
       currentVersionId === null ||
       mandate.mandate.status !== 'ACTIVE' ||
-      !(await carriesRest(tx, states, orgId, mandate.mandate))
+      !(await carriesRest(tx, states, orgId, mandate.mandate, mandate.state))
     ) {
       return { outcome: 'left', why: 'not_carried' };
     }

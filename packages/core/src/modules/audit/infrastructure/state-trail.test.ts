@@ -13,6 +13,9 @@ import {
   trailGap,
   type TrailObject,
   withTracked,
+  namedFromStart,
+  namesFromHistory,
+  NO_NAMES,
 } from './state-trail.ts';
 
 const STOP = 'thing.stopped';
@@ -121,9 +124,10 @@ describe('the names a state event carries (withTracked, trackedBeforeIn)', () =>
   });
 });
 
-describe('a history read held to the names (trailGap)', () => {
-  const all = (h: ReturnType<typeof history>) => [h.events.stop1, h.events.lift, h.events.stop2];
+/** Every stop and lift of the thing's history. */
+const all = (h: ReturnType<typeof history>) => [h.events.stop1, h.events.lift, h.events.stop2];
 
+describe('a history read held to the names (trailGap)', () => {
   it('the positive control: every stop and lift since the start got, nothing missing', () => {
     const h = history();
     expect(trailGap(all(h), [h.state], [STOP, LIFT], undefined)).toBeUndefined();
@@ -205,6 +209,38 @@ describe('a history read held to the names (trailGap)', () => {
     const h = history();
     expect(trailGap(all(h), [h.state], ['thing.noted'], undefined)).toBeUndefined();
     expect(trailGap([h.events.lift], [h.state], [LIFT], undefined)).toBeUndefined();
+  });
+});
+
+describe('an object named from its whole history (namesFromHistory) and the cut-over (allNamed)', () => {
+  it('names the newest of each tracked action, from the start; untracked actions left out', () => {
+    const h = history();
+    const other = eventAt(15n, 9, 'thing.noted', 'new');
+    expect(namesFromHistory(TABLE, [h.events.stop2, h.events.stop1, h.events.lift, other])).toEqual({
+      from: 0n,
+      last: new Map([
+        [STOP, { version: 4, seq: 12n }],
+        [LIFT, { version: 3, seq: 9n }],
+      ]),
+    });
+  });
+
+  it('a state recorded again with them names exactly those, reaching its start', () => {
+    const names = { from: 0n, last: new Map([[STOP, { version: 4, seq: 12n }]]) };
+    expect(named({ rebuilt: names })).toEqual(names);
+    expect(namedFromStart({ seq: 1n, action: STOP, tracked: names })).toBe(true);
+    expect(namedFromStart({ seq: 1n, action: STOP, tracked: { from: 5n, last: new Map() } })).toBe(false);
+    expect(namedFromStart({ seq: 1n, action: STOP, tracked: undefined })).toBe(false);
+    expect(namedFromStart(undefined)).toBe(false);
+  });
+
+  it('every state must carry names (allNamed): one with none is the gap; with no trail at all, not judged', () => {
+    const h = history();
+    const bare: TrailObject = { ...h.state, trail: { seq: 20n, action: 'thing.noted', tracked: undefined } };
+    expect(trailGap([], [bare], [], undefined, true)).toEqual({ table: TABLE, id: ID, action: NO_NAMES, version: 5 });
+    expect(trailGap([], [bare], [], undefined, false)).toBeUndefined();
+    expect(trailGap([], [{ ...h.state, trail: undefined }], [], undefined, true)).toBeUndefined();
+    expect(trailGap(all(h), [h.state], [STOP, LIFT], undefined, true)).toBeUndefined();
   });
 });
 

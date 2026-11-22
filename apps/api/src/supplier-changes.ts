@@ -146,7 +146,7 @@ export function createSupplierChanges({
     const found = await work.supplierIn(tx, states, { orgId, id: supplierId }, 'change');
     if (found.supplier.status !== 'SUSPENDED') throw new SupplierRefused(409, 'SUPPLIER_NOT_SUSPENDED');
     if (choice === 'pause') {
-      const paused = await pausedOf(tx, states, orgId, [['supplier', supplierId, 'SUSPENDED']]);
+      const paused = await pausedOf(tx, states, orgId, [['supplier', supplierId, 'SUSPENDED', found.state]]);
       if (!paused.has('supplier')) throw new SupplierRefused(409, 'PENDING_REQUESTS_CANCELLED');
     }
     return { found, suspendedBy: found.state.eventId };
@@ -161,7 +161,8 @@ export function createSupplierChanges({
           const found = await work.supplierIn(tx, states, key, 'change');
           const braked = { supplierId: found.supplier.id };
           const cancelledBefore =
-            pendingRequests === 'pause' && (await cancelledByItsStop(tx, states, member.orgId, found.supplier));
+            pendingRequests === 'pause' &&
+            (await cancelledByItsStop(tx, states, member.orgId, found.supplier, found.state));
           if (pendingRequests === 'cancel' || cancelledBefore) {
             await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
           }

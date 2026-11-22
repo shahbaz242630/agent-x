@@ -106,6 +106,7 @@ import {
 } from './audit-trail.ts';
 import { type FrontierStart, judgeWitnessed, type WalkedWithin } from './chain-frontier.ts';
 import {
+  namedFromStart,
   type StateTrail,
   type TrackedBefore,
   type TrailEvent,
@@ -555,6 +556,18 @@ export interface SignedStates {
     key: SignedRowKey,
     from: VerifiedState | 'new',
     set: SignedFieldValues,
+    change: SignedChange,
+  ): Promise<RecordedState>;
+  /**
+   * The object's state recorded again, unchanged, its event naming `names` (namesFromHistory, read once its chain was
+   * checked whole): how an object recorded before the names gets them (state-names.ts, TR-3 residual 75).
+   */
+  renamed(
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    key: SignedRowKey,
+    from: VerifiedState,
+    names: TrackedBefore,
     change: SignedChange,
   ): Promise<RecordedState>;
   /**
@@ -1598,11 +1611,12 @@ export function createSignedStates({
     from: VerifiedState | 'new',
     set: SignedFieldValues,
     change: SignedChange,
+    start: TrailStart = from,
   ): Promise<RecordedState> => {
     noSealGiven(change);
     const row = await written(tx, table, key, from, set);
     // The row pointed at its event in the event's own write (4D2d P8).
-    const { event, tracked } = sealedEvent(table, key, row, change, from);
+    const { event, tracked } = sealedEvent(table, key, row, change, start);
     const recorded = await trail.recordAlong(tx, key.orgId, event, (eventId, gate) =>
       signedRowPointing(table, key, { version: row.version, eventId }, gate),
     );
@@ -1918,7 +1932,9 @@ export function createSignedStates({
 
     historyHeld(orgId: string, events: readonly TrailEvent[], { on, actions, after }: HistoryRests): boolean {
       const objects = on.map(({ table, id, state }) => ({ table, id, version: state.version, trail: state.trail }));
-      const gap = trailGap(events, objects, actions, after);
+      // The organisation's own state, when among them, says whether every state must carry names (state-names.ts).
+      const own = on.find(({ id }) => id.toLowerCase() === orgId.toLowerCase());
+      const gap = trailGap(events, objects, actions, after, namedFromStart(own?.state.trail));
       if (gap === undefined) return true;
       alarm(gap.table.subject, { orgId, id: gap.id }, 'log');
       return false;
@@ -2018,6 +2034,18 @@ export function createSignedStates({
         throw new RangeError('A status changes through changeStatus');
       }
       return recordChange(tx, table, key, from, set, change);
+    },
+
+    async renamed(
+      tx: AuditTransaction,
+      table: SignedStateTable,
+      key: SignedRowKey,
+      from: VerifiedState,
+      names: TrackedBefore,
+      change: SignedChange,
+    ): Promise<RecordedState> {
+      if (table.tracks === undefined) throw new RangeError('Only a table that tracks actions is named');
+      return recordChange(tx, table, key, from, {}, change, { rebuilt: names });
     },
 
     async changeStatus<State extends string, Event extends string>(

@@ -236,7 +236,7 @@ export function createAgentChanges({
   const suspendedAgent = async (tx: AgentTx, states: SignedStates, orgId: string, agentId: string) => {
     const read = await agentToChange(tx, states, orgId, agentId);
     if (read.agent.status !== 'SUSPENDED') throw new AgentRefused(409, 'AGENT_NOT_SUSPENDED');
-    return { id: read.agent.id, suspendedBy: read.state.eventId };
+    return { id: read.agent.id, suspendedBy: read.state.eventId, state: read.state };
   };
 
   /**
@@ -377,7 +377,7 @@ export function createAgentChanges({
             { passkeyRequired: true },
           );
           // Its suspension cancelled them: those its brake left are voided first, the job any past this batch (F1 G1).
-          if (await cancelledInForce(tx, states, member.orgId, 'agent', agent.id)) {
+          if (await cancelledInForce(tx, states, member.orgId, 'agent', agent.id, agent.state)) {
             const braked = { agentId: agent.id };
             await voidPendingOf(tx, states, keys, member.orgId, braked, 'AGENT_SUSPENDED', clock.now());
           }

@@ -5,7 +5,7 @@
 // only from the version read through its signed state, and with its payee
 // and any payee change waiting as the partner described them (E2-2b): what
 // the call-back confirms (ADR-014 §3), never an account number.
-import type { SignedStates } from '@agentx/core/modules/audit';
+import type { SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { Notice, NotificationsTables } from '@agentx/core/modules/notifications';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
@@ -116,10 +116,11 @@ export async function cancelledByItsStop(
   states: SignedStates,
   orgId: string,
   supplier: { readonly id: string; readonly status: string },
+  state?: VerifiedState,
 ): Promise<boolean> {
   return (
     supplier.status === 'UNVERIFIED' &&
-    !(await pausedOf(tx, states, orgId, [['supplier', supplier.id, 'UNVERIFIED']])).has('supplier')
+    !(await pausedOf(tx, states, orgId, [['supplier', supplier.id, 'UNVERIFIED', state]])).has('supplier')
   );
 }
 

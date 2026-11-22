@@ -38,6 +38,7 @@ import {
   type PageAsked,
   type SignedStates,
   TooManyEventsToRead,
+  type VerifiedState,
 } from '../../audit/index.ts';
 import {
   keptZonesOf,
@@ -63,7 +64,7 @@ import { requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
 import { SLOTS_NAMED_ACTION, SLOTS_NAMED_SUBJECT } from '../domain/order-slots.ts';
 import { payeeAsSealed } from './payee-seal.ts';
-import { SPEND_REQUESTS } from './requests.ts';
+import { ENDING_ACTIONS, REQUEST_APPROVED, SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 type HoldingsTransaction = Transaction<SpendRequestsTables & LimitReservationsTables & AuditTables>;
@@ -95,7 +96,7 @@ export const NO_PAYMENTS = (): Promise<ReadonlyMap<string, PaymentHolds>> => Pro
 const MOST_DECIDED_EVENTS = 4;
 
 /** A person's approval of a request waiting (approvals.ts): read with its decision, for when it was approved (AT13d). */
-const APPROVED = 'spend_request.approved';
+const APPROVED = REQUEST_APPROVED;
 
 /** The events that may approve a request, the newest of them dating its approval (Decided's `approvedAt`, AT13d). */
 const APPROVING_ACTIONS: readonly string[] = ['spend_request.decided', APPROVED];
@@ -217,14 +218,6 @@ export interface Decided extends ApprovalClock {
   readonly slots: readonly string[] | null;
 }
 
-/** The events that end a request before hand-off (endings.ts): one may say it kept its capacity (`capacityKept`). */
-const ENDING_ACTIONS: readonly string[] = [
-  'spend_request.voided',
-  'spend_request.expired',
-  'spend_request.cancelled',
-  'spend_request.rejected',
-];
-
 /**
  * Each request's decision (Decided), by the request's ID in lower case, in
  * one statement (the holdings check; the team's list, for when a waiting one
@@ -236,8 +229,9 @@ export async function decisionsOf(
   states: SignedStates,
   orgId: string,
   ids: readonly string[],
+  held?: ReadonlyMap<string, VerifiedState>,
 ): Promise<Map<string, Decided>> {
-  const read = await decisionsRead(tx, states, orgId, ids);
+  const read = await decisionsRead(tx, states, orgId, ids, held);
   return read === 'tampered' ? new Map() : read;
 }
 
@@ -250,18 +244,24 @@ export async function decisionsRead(
   states: SignedStates,
   orgId: string,
   ids: readonly string[],
+  held?: ReadonlyMap<string, VerifiedState>,
 ): Promise<Map<string, Decided> | 'tampered'> {
   if (ids.length === 0) return new Map();
   // With each one the windows' cutover named the windows of (GM-1b), and the slots' cutover its slots (TR-2), on the
   // same read.
+  const actions = [...APPROVING_ACTIONS, ...ENDING_ACTIONS, WINDOWS_NAMED_ACTION, SLOTS_NAMED_ACTION];
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SPEND_REQUESTS.subject, WINDOWS_NAMED_SUBJECT, SLOTS_NAMED_SUBJECT],
     subjectIds: ids,
-    actions: [...APPROVING_ACTIONS, ...ENDING_ACTIONS, WINDOWS_NAMED_ACTION, SLOTS_NAMED_ACTION],
+    actions,
     // A person approves a request once at most, it ends once, and each cutover names it once: an event more each.
     limit: (MOST_DECIDED_EVENTS + 4) * ids.length,
   });
   if (history.outcome !== 'read') return 'tampered';
+  // Held to the approval and ending each request's state names (TR-3 residual 75): an ending that kept its capacity
+  // hidden would else read as none, and a total built from it hold too little.
+  const on = [...(held ?? [])].map(([id, state]) => ({ table: SPEND_REQUESTS, id, state }));
+  if (on.length > 0 && !states.historyHeld(orgId, history.events, { on, actions, after: undefined })) return 'tampered';
   const named = history.events.filter(({ event }) => event.action === WINDOWS_NAMED_ACTION);
   const decided = history.events
     .filter(({ event }) => event.action === 'spend_request.decided')
@@ -393,10 +393,13 @@ async function judged<Tx extends HoldingsTransaction>(
 ): Promise<Omit<HoldingsChecked, 'next'>> {
   const requests: SpendRequestRecord[] = [];
   let tampered = 0;
+  const heldStates = new Map<string, VerifiedState>();
   for (const read of (await requestsOf(tx, states, orgId, ids)).values()) {
     // Listed by its row or its signed events, a request not found is one tampered with (its read raised the alarm).
-    if (read.outcome === 'found') requests.push(read.request);
-    else tampered += 1;
+    if (read.outcome === 'found') {
+      requests.push(read.request);
+      heldStates.set(read.request.id, read.state);
+    } else tampered += 1;
   }
   const found = requests.map(({ id }) => id);
   const handedOff = requests.filter(({ status }) => status === 'HANDED_OFF').map(({ id }) => id);
@@ -410,7 +413,7 @@ async function judged<Tx extends HoldingsTransaction>(
   );
   // Every one's decision, on one read: what still holds anything, and an ended one whose signed ending kept its
   // capacity (AT13d), was sealed with what it holds; any other ended one holds nothing.
-  const decided = await decisionsOf(tx, states, orgId, found);
+  const decided = await decisionsOf(tx, states, orgId, found, heldStates);
   const heldBy = (request: SpendRequestRecord): HeldSealed | null => {
     const decision = decided.get(request.id);
     return decision !== undefined && (holdsNow(request.status) || decision.capacityKept) ? decision.held : null;

@@ -43,7 +43,9 @@ export interface StateTrail {
 export type TrailStart =
   | 'new'
   | { readonly version: number; readonly trail?: StateTrail | undefined }
-  | { readonly adjacent: { readonly version: number; readonly action: string } };
+  | { readonly adjacent: { readonly version: number; readonly action: string } }
+  /** Names rebuilt from the object's whole history, read once its chain was checked whole (namesFromHistory). */
+  | { readonly rebuilt: TrackedBefore };
 
 const SEQ = /^(?:0|[1-9]\d{0,18})$/;
 
@@ -94,6 +96,7 @@ export function trackedBeforeIn(details: Readonly<Record<string, unknown>>): Tra
 /** The names a table's next state event carries, from the state it moves on from; none for a table that tracks nothing, or a start that names none. */
 function trackedFrom(tracks: readonly string[], start: TrailStart): TrackedBefore | undefined {
   if (start === 'new') return { from: 0n, last: new Map() };
+  if ('rebuilt' in start) return start.rebuilt;
   if ('adjacent' in start) {
     const { version, action } = start.adjacent;
     return { from: 0n, last: new Map(tracks.includes(action) ? [[action, { version, seq: null }]] : []) };
@@ -120,6 +123,25 @@ export function withTracked(
     : { details: { ...details, [TRACKED_BEFORE]: trackedText(tracked) }, tracked };
 }
 
+/**
+ * An object's names rebuilt from its whole history (`events`: every event of its tracked actions, read once its
+ * chain was checked whole): the newest of each, complete from the start (state-names.ts names an object recorded
+ * before the names this way). Its own older events of each action carry no names of their own.
+ */
+export function namesFromHistory(table: SignedStateTable, events: readonly TrailEvent[]): TrackedBefore {
+  const last = new Map<string, EarlierEvent>();
+  for (const { seq, event } of events) {
+    if (table.tracks?.includes(event.action) !== true) continue;
+    const kept = last.get(event.action)?.seq;
+    if (kept === undefined || kept === null || kept < seq)
+      last.set(event.action, { version: event.subject.version, seq });
+  }
+  return { from: 0n, last };
+}
+
+/** Whether a state's names reach back to its object's start: false for a state from before them, or one named from its own event on. */
+export const namedFromStart = (trail: StateTrail | undefined): boolean => trail?.tracked?.from === 0n;
+
 /** An object a history read rests on, as its state was verified (held by the digest). */
 export interface TrailObject {
   readonly table: SignedStateTable;
@@ -137,6 +159,9 @@ export interface TrailEvent {
     readonly details: Readonly<Record<string, unknown>>;
   };
 }
+
+/** The gap's action for a state that carries no names where every one must (trailGap's `allNamed`). */
+export const NO_NAMES = 'names.missing';
 
 /** The event a read should have got and didn't: about which object, of which action, at which version. */
 export interface TrailGap {
@@ -166,7 +191,15 @@ export function trailGap(
   objects: readonly TrailObject[],
   actions: readonly string[],
   after: bigint | undefined,
+  /** Every object's state must carry names: its organisation's own reach back to its start (born so, or named whole since). */
+  allNamed = false,
 ): TrailGap | undefined {
+  // A state with none where every one has them was never the app's (an owner can't write a sealed event): the gap.
+  const unnamed = allNamed
+    ? objects.find(({ trail }) => trail !== undefined && trail.tracked === undefined)
+    : undefined;
+  if (unnamed !== undefined)
+    return { table: unnamed.table, id: unnamed.id, action: NO_NAMES, version: unnamed.version };
   const got = new Set(events.map(({ seq, event }) => `${keyOf(event.subject.type, event.subject.id)}@${seq}`));
   const missed: Missed = (object, action, named, namer) => {
     const { version, seq } = placeOf(named, namer);

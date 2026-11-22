@@ -51,7 +51,7 @@
 // requests (8) and their holdings (11), the chain head last. The agent (3) is
 // not read: none of these moves needs it active, and a suspended agent can't
 // spend whatever its mandate says.
-import type { SignedStates } from '@agentx/core/modules/audit';
+import type { SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { isEnded, MANDATES, type OverLimit } from '@agentx/core/modules/mandates';
 import type { NoticeKind, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
@@ -187,10 +187,11 @@ async function suspendable(
   orgId: string,
   mandate: { readonly id: string; readonly status: string },
   choice: PendingChoice,
+  state: VerifiedState,
 ): Promise<void> {
   if (mandate.status === 'ACTIVE') return;
   if (mandate.status !== 'SUSPENDED') throw new MandateRefused(409, 'MANDATE_NOT_ACTIVE');
-  const paused = (await pausedOf(tx, states, orgId, [['mandate', mandate.id, 'SUSPENDED']])).has('mandate');
+  const paused = (await pausedOf(tx, states, orgId, [['mandate', mandate.id, 'SUSPENDED', state]])).has('mandate');
   if (!paused && choice === 'pause') throw new MandateRefused(409, 'PENDING_REQUESTS_CANCELLED');
   // Suspended again only to make its pause a cancel.
   if (!paused || choice === 'pause') throw new MandateRefused(409, 'MANDATE_NOT_ACTIVE');
@@ -230,7 +231,7 @@ export function createMandateMoves({
     if (chosen.move === 'revoke') {
       if (isEnded(mandate.status)) throw new MandateRefused(409, 'MANDATE_ENDED');
     } else if (chosen.move === 'suspend') {
-      await suspendable(tx, states, orgId, mandate, chosen.pendingRequests);
+      await suspendable(tx, states, orgId, mandate, chosen.pendingRequests, read.state);
     } else {
       if (mandate.status !== 'SUSPENDED') throw new MandateRefused(409, 'MANDATE_NOT_SUSPENDED');
       // 0035's a_status_on_its_versions keeps a version in force on a SUSPENDED mandate.
@@ -297,7 +298,7 @@ export function createMandateMoves({
         );
         const { id } = read.mandate;
         // A resume after a suspension that cancelled them voids those its brake left first, the job the rest (F1 G1).
-        const left = move === 'resume' && (await cancelledInForce(tx, states, member.orgId, 'mandate', id));
+        const left = move === 'resume' && (await cancelledInForce(tx, states, member.orgId, 'mandate', id, read.state));
         if (cancels(chosen) || left) {
           await voidPendingOf(tx, states, keys, member.orgId, { mandateId: id }, 'MANDATE_NOT_IN_FORCE', clock.now());
         }

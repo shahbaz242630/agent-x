@@ -469,6 +469,10 @@ export async function authorityOf(
     { table: SOURCES, id: named.fundingSourceId, state: source.state },
     { table: SUPPLIERS, id: named.supplierId, state: supplier.state },
   ];
+  // Every one named, where its organisation's names reach its start (state-names.ts): one without is tampering.
+  if (!states.historyHeld(orgId, [], { on: held, actions: [], after: undefined })) {
+    throw new Error(`What a pending request names carries no names where it must: ${key.id}`);
+  }
   const cancelledBy = await cancelledSinceOf(
     tx,
     states,

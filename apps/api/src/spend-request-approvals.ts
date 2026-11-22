@@ -82,6 +82,7 @@ import {
   waitedOut,
   windowsHeldOf,
 } from '@agentx/core/modules/spend-requests';
+import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import { type Clock, type IdGenerator, money, type ReasonCode } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -102,7 +103,7 @@ import {
   weigh,
 } from './spend-request-decisions.ts';
 import { DECIDING_ROLES } from './spend-request-rejects.ts';
-import { cancelledSinceOf, isCarried, pausedFromOf } from './suspensions.ts';
+import { cancelledSinceOf, isCarried, pausedFromOf, stopsHeldOf } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
 
 export const APPROVE_OPERATION = 'spend-requests.approve';
@@ -260,6 +261,7 @@ async function notEndedSince(
   orgId: string,
   { decision, now }: { readonly decision: Decided; readonly now: Date },
   request: SpendRequestRecord,
+  weighed: boolean,
 ): Promise<void> {
   if (waitedOut(decision, now)) throw new MandateRefused(409, 'REQUEST_EXPIRED');
   const ids = {
@@ -270,7 +272,15 @@ async function notEndedSince(
     supplier: request.supplierId,
   };
   const unbelieved = () => new MandateRefused(503, 'INTEGRITY_FAILED');
-  const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, ids, unbelieved);
+  // Held to what each one's state names (TR-3 residual 75), once the weighing has read and locked each: a stop hidden
+  // below F can't make an approval stand. Not weighed (a decision that held nothing), it is refused below anyway.
+  const held = weighed ? await stopsHeldOf(tx, states, orgId, ids) : undefined;
+  if (weighed && held === undefined) throw unbelieved();
+  // Every one named, where its organisation's names reach its start (state-names.ts): one without is tampering.
+  if (held !== undefined && !states.historyHeld(orgId, [], { on: held, actions: [], after: undefined })) {
+    throw unbelieved();
+  }
+  const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, ids, unbelieved, held);
   if (cancelledBy.size > 0) throw new MandateRefused(409, 'REQUEST_CHANGED');
 }
 
@@ -284,7 +294,17 @@ async function supplierMoveOf(
   if (supplier === null) return { move: 'moved' };
   if (supplier.currentVersionId === decidedUnder) return { move: 'same' };
   if (decidedUnder === null) return { move: 'moved' };
-  const pausedFrom = await pausedFromOf(tx, states, orgId, supplier, () => new MandateRefused(503, 'INTEGRITY_FAILED'));
+  // Held to what the supplier's state names (TR-3 residual 75): the weighing read and locked it already.
+  const state = await states.verifiedState(tx, SUPPLIERS, { orgId, id: supplier.id }, 'share');
+  if (state.outcome !== 'verified') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  const pausedFrom = await pausedFromOf(
+    tx,
+    states,
+    orgId,
+    supplier,
+    () => new MandateRefused(503, 'INTEGRITY_FAILED'),
+    state,
+  );
   return isCarried(decidedUnder, supplier.currentVersionId, pausedFrom)
     ? { move: 'carried', from: decidedUnder, to: supplier.currentVersionId }
     : { move: 'moved' };
@@ -425,7 +445,7 @@ export async function weighedAgain(
   if (request.status !== 'APPROVAL_REQUIRED') throw new MandateRefused(409, 'REQUEST_NOT_WAITING');
   // Its wait runs from its decision as sealed, never a later event such as a carry (E4; as expireRequest's).
   // With no decision it holds nothing sealed, so the check below refuses it.
-  if (decision !== null) await notEndedSince(tx, states, orgId, { decision, now }, request);
+  if (decision !== null) await notEndedSince(tx, states, orgId, { decision, now }, request, weighed !== null);
   const against = decidedAgainst(read.state);
   // A waiting request holds capacity, sealed with its decision; and its row names what its signed state does.
   if (
