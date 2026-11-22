@@ -637,9 +637,34 @@ export async function oldestEventAgeMs<Schema>(
     from audit.events as e
     where e.org_id = ${orgId} and e.action = any(${[...actions]}::text[])
   `.execute(tx);
-  const age = rows[0]?.age_ms;
-  return age === null || age === undefined ? null : Number(age);
+  return ageIn(rows[0]?.age_ms);
 }
+
+/**
+ * How long ago, by the database's clock, the oldest event any of the organisation's rows in the table points at whose
+ * details carry no `detail` was recorded, or null for none: state-names.ts's age of a naming with nothing named yet.
+ */
+export async function oldestLackingAgeMs<Schema>(
+  tx: Transaction<Schema>,
+  table: SignedStateTable,
+  orgId: string,
+  detail: string,
+): Promise<number | null> {
+  checkTable(table);
+  if (!UUID.test(orgId)) throw new RangeError('A signed row is named by UUIDs');
+  await assertTenant(tx, orgId);
+  const { rows } = await sql<{ age_ms: string | null }>`
+    select (pg_catalog.date_part('epoch', pg_catalog.now() - pg_catalog.min(e.recorded_at)) * 1000)::bigint::text as age_ms
+    from ${sql.table(table.table)} as target
+    join audit.events as e on e.org_id = target.org_id and e.id = target.state_event_id
+    where target.org_id = ${orgId} and (e.details::jsonb -> ${detail}) is null
+  `.execute(tx);
+  return ageIn(rows[0]?.age_ms);
+}
+
+/** An age in milliseconds as the database wrote it, or null for none. */
+const ageIn = (text: string | null | undefined): number | null =>
+  text === null || text === undefined ? null : Number(text);
 
 /**
  * Writes the authority fields `set` names and gives back the row as it now

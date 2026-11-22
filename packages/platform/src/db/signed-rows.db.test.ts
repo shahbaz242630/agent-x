@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { createDatabase, type Database } from './database.ts';
 import {
   oldestEventAgeMs,
+  oldestLackingAgeMs,
   pointSignedRow,
   readSignedRow,
   type SignedFieldValues,
@@ -314,6 +315,16 @@ describe('looking for a row pointing at an event since a place, its details lack
     expect(await age(LOOKED_ORG, ['grant.noted'])).toBeGreaterThanOrEqual(2 * 60 * 60_000);
     expect(await age(LOOKED_ORG, ['grant.never'])).toBeNull();
     await expect(age('not-a-uuid', ['grant.noted'])).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('says how long ago the oldest event a row points at lacking the key was recorded, or none', async () => {
+    const lackingAge = (tenant: string, org = tenant) =>
+      withTenant(app, tenant, (tx) => oldestLackingAgeMs(tx, GRANTS, org, 'named'));
+    // The rows above point at events 1 (no key), 2 ("named") and 3 ("other"): 1 and 3 lack it.
+    expect(await lackingAge(LOOKED_ORG)).toBeGreaterThanOrEqual(0);
+    // An organisation with no rows: none.
+    expect(await lackingAge('0199a0f0-0000-7000-8000-0000000000ff')).toBeNull();
+    await expect(lackingAge(LOOKED_ORG, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
   });
 });
 

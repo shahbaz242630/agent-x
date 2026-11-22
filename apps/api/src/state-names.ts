@@ -45,6 +45,7 @@ import {
   type Database,
   type DatabaseTransaction,
   oldestEventAgeMs,
+  oldestLackingAgeMs,
   type SignedStateTable,
   signedRowsLackingSince,
 } from '@agentx/platform/db';
@@ -317,11 +318,20 @@ export function createStateNames({
   /**
    * An organisation left unnamed this run: an error once its naming began (its first object named, by the database's
    * clock) longer ago than a day of runs, read from its chain so no restart or change of leader resets it (TR-16).
+   * With nothing named yet, the oldest state still carrying no names dates the wait instead: an older image's state
+   * stays until it is named or written again, so its age is as durable, and one is always there while the wait lasts.
    */
   const tooLong = async (services: SignedStatesServices, orgId: string, log: Logger) => {
-    const ageMs = await withSignedStates(database, orgId, services, (tx) =>
-      oldestEventAgeMs(tx, orgId, NAMING_ACTIONS),
-    );
+    const ageMs = await withSignedStates(database, orgId, services, async (tx) => {
+      const began = await oldestEventAgeMs(tx, orgId, NAMING_ACTIONS);
+      if (began !== null) return began;
+      let oldest: number | null = null;
+      for (const table of NAMED_TABLES) {
+        const age = await oldestLackingAgeMs(tx, table, orgId, TRACKED_BEFORE);
+        if (age !== null && (oldest === null || age > oldest)) oldest = age;
+      }
+      return oldest;
+    });
     if (ageMs !== null && ageMs >= unnamedTooLongMs)
       log.error('state_names.unnamed_too_long', { hours: Math.floor(ageMs / 3_600_000) });
   };

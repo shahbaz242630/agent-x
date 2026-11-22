@@ -1779,6 +1779,18 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     expect(lines('state_names.unnamed_too_long')).toHaveLength(1);
   });
 
+  it('TR-16 review: with nothing ever named, the oldest state still carrying no names dates the wait: past its limit, the error from a new process', async () => {
+    // Older code writes the agent before its page every run: it is always left, so nothing is ever named.
+    const { started } = await legacyOrganisation(true, async (at, next) => {
+      if (next === AGENTS) await recordedByOlderCode(at);
+    });
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 0, left: 1 })]);
+    expect(lines('state_names.unnamed_too_long')).toEqual([]);
+    await started(0).run();
+    expect(lines('state_names.named').at(-1)).toEqual(expect.objectContaining({ named: 0 }));
+    expect(lines('state_names.unnamed_too_long')).toEqual([expect.objectContaining({ level: 'error', hours: 0 })]);
+  });
+
   it('state names: an object that can’t be believed is the organisation’s failure, logged, nothing claimed named', async () => {
     const { w, job } = await legacyOrganisation(false);
     await asOwner(w, async (owner) => {
