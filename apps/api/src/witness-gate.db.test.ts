@@ -1525,7 +1525,7 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
    * and the head gone, the agent's row put back. Named by the job holding the stop as `by` says (none: as before TR-7 A2).
    */
   async function cutBelowAWitnessedStop(by: 'witness' | 'anchor' | 'none') {
-    const witnessed: HeadSeen[] = [];
+    const witnessed: WitnessedHead[] = [];
     let anchored: HeadSeen | undefined;
     const legacy = await legacyOrganisation(false, undefined, {
       witness: { heldTo: () => witnessed },
@@ -1546,7 +1546,7 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
       stop = { seq: BigInt(head.seq), hash: head.hash };
     });
     if (stop === undefined) throw new Error('the stop should have moved the head');
-    if (by === 'witness') witnessed.push(stop);
+    if (by === 'witness') witnessed.push({ ...stop, at: 0 });
     if (by === 'anchor') anchored = stop;
     await cut();
     return legacy;
@@ -1576,9 +1576,10 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     });
     const { w } = legacy;
     await asOwner(w, async (owner) => {
+      // By the column, not its text: ordered as text, place 9 comes after 31.
       const [row] = await owner.query<{ place: string; hash: Buffer }>(
-        `select seq::text as place, hash from audit.events where org_id = $1 order by seq ${at === 'head' ? 'desc' : 'asc'} limit 1`,
-        [w.org],
+        'select seq::text as place, hash from audit.events where org_id = $1 order by seq * $2::bigint limit 1',
+        [w.org, at === 'head' ? -1 : 1],
       );
       if (row === undefined) throw new Error('the chain should hold events');
       anchored = { seq: BigInt(row.place), hash: row.hash };
