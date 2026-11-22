@@ -109,6 +109,36 @@ describe('SEC-DB-20 TR-14 the witness log: every file names its writer', () => {
       expect.objectContaining({ seq: '7', writer: forger.log.writer(), against: [honest.log.writer()] }),
     ]);
   });
+
+  it('S210 final F2: the fork alarm names the file of each head, as `misdated_heads` names it, so step 1 can tell framing', async () => {
+    const time = { at: AT.getTime() };
+    const store = createFakeWriteOnceStore({ now: () => time.at });
+    const honest = copyOn(store, { time });
+    await honest.log.now(CHAIN, head(7n, 1));
+    // A rival head in a file back-dated ten minutes: misdated, and the fork it makes is from that very file.
+    const forged = fileName('e1/heads/', time.at - 10 * MINUTE);
+    store.files.set(forged, await signedFile(keys, HEADS, forged, 1, [headLine(7n, 2, time.at - 10 * MINUTE)]));
+    store.created.set(forged, time.at);
+    const reader = copyOn(store, { time });
+    await reader.log.refresh();
+    const [fork] = reader.alarms('fork');
+    const [misdated] = reader.alarms('misdated_heads');
+    const files = [fork?.file, ...(fork?.againstFiles as string[])] as string[];
+    const writers = [fork?.writer, ...(fork?.against as string[])];
+    // Each a heads file's name, its folder leading (the logs mask the name's time; its ID after stays), in step with
+    // the writers; the forged one's exactly as `misdated_heads` names it.
+    const after = (name: string) => name.slice(name.indexOf('-'));
+    const honestFile = names(store, 'heads').find((name) => name !== forged) ?? '';
+    expect(files.every((file) => file.startsWith('e1/heads/'))).toBe(true);
+    expect(files.map(after).toSorted()).toEqual([after(honestFile), after(forged)].toSorted());
+    expect(files[writers.indexOf(writerOfName(forged))]).toBe(misdated?.file);
+    expect(after(files[writers.indexOf(honest.log.writer())] ?? '')).toBe(after(honestFile));
+    // A head noted here, met by a read: `noted`, read from no file.
+    await honest.log.refresh();
+    expect(honest.alarms('fork')).toEqual([
+      expect.objectContaining({ writer: writerOfName(forged), file: misdated?.file, againstFiles: ['noted'] }),
+    ]);
+  });
 });
 
 describe("SEC-DB-20 TR-14 the operator's set-aside list", () => {
@@ -226,6 +256,30 @@ describe('SEC-DB-20 TR-14 a file written in a process’s own name', () => {
       expect.objectContaining({ level: 'error', writer: copy.log.writer(), folder: 'e1/heads/', file: name }),
     ]);
     expect(seqs(copy.log.pending(CHAIN))).toEqual([6n]);
+  });
+
+  it('S210 final F1: a copy a minute ahead of the store still lists one named exactly the clocks’ spread before it landed', async () => {
+    const time = { at: AT.getTime() };
+    // The store a minute behind this copy: near enough that its clock is left as it stands (RIGHT_ENOUGH_MS).
+    const store = createFakeWriteOnceStore({ now: () => time.at - MINUTE });
+    const leader = copyOn(store, { time });
+    await leader.log.refresh();
+    // Lands half a minute after that pass began (by the store), named exactly five minutes before: not misdated.
+    const landed = time.at - MINUTE + 30_000;
+    const name = fileName('e1/heads/', landed - 5 * MINUTE, leader.log.writer());
+    const line = JSON.stringify({
+      c: `organisation:${ORG}`,
+      s: '6',
+      h: Buffer.alloc(32, 6).toString('hex'),
+      t: new Date(landed - 5 * MINUTE).toISOString(),
+    });
+    store.files.set(name, await signedFile(keys, HEADS, name, 1, [line]));
+    store.created.set(name, landed);
+    time.at += MINUTE;
+    await leader.log.refresh();
+    expect(leader.alarms('impersonated')).toEqual([expect.objectContaining({ writer: leader.log.writer() })]);
+    expect(leader.alarms('misdated_heads')).toEqual([]);
+    expect(seqs(leader.log.pending(CHAIN))).toEqual([6n]);
   });
 });
 

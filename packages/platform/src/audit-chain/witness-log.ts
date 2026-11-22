@@ -35,8 +35,9 @@
 // can't land past it. A head this process wrote already (a replay noting its kept head again) is not queued again.
 //
 // Reading: a coalesced `refresh` (a caller waits for the next that starts after its call) lists each heads folder
-// newest-first to what it read already, less five minutes for the clocks and late writes; a start reads the newest sound
-// snapshot first (passing over at most a day's spoiled ones), then every heads file since, less the same; with no sound
+// newest-first to what it read already, less the lag (LAG_MS: five minutes for the clocks and late writes, and a minute
+// for the reader's own clock, so wider than a misdated name), and a start reads the newest sound snapshot first (passing
+// over at most a day's spoiled ones), then every heads file since, less the lag and a minute more; with no sound
 // snapshot, a day of heads files back (a head older than that above its chain's anchor means the anchor check has been
 // stalled a day, its own alarm).
 //
@@ -87,7 +88,8 @@
 // that opens every file name it writes (signed-files.ts: fileName), so the closing line signs it; the API says it once
 // as it starts (witness-store.ts: `audit.witness_writer`), where the platform's own columns on the line
 // (RevisionName, ContainerGroupName: the replica) tell which copy holds it. The fork alarm names the writer of both
-// heads (`writer`, `against`); a snapshot's head line may carry its own writer (`w`), so a head read from a snapshot
+// heads (`writer`, `against`) and the file each came from (`file`, `againstFiles`: a snapshot's name for a head read from
+// one, `noted` for one noted here); a snapshot's head line may carry its own writer (`w`), so a head read from a snapshot
 // names who wrote it, never the leader that kept it (`snapshot` where the line says none). This release reads `w` and
 // writes none (SNAPSHOT_WRITERS: a build before it would take the snapshot as spoiled); the next release writes it.
 // Released and other compact heads carry no writer, and reach a new copy only through the leader's snapshot.
@@ -107,9 +109,14 @@
 //
 // The operator's step (playbook H, forks on many chains at once, R-12):
 //   1. Read the fork alarms' `writer` and `against`: the ID named across most chains is the suspect. Count only IDs
-//      named by heads files; `snapshot` names no one, and never set the jobs leader aside on fork alarms alone. Set
-//      aside only an ID no `impersonated` or `misdated_heads` alarm names (else the copy it names was framed: restart
-//      that revision, set nothing aside).
+//      named by heads files; `snapshot` names no one, and never set the jobs leader aside on fork alarms alone. An ID
+//      is framed only where every fork alarm naming it does so by a file (`file` or its place in `againstFiles`) that a
+//      `misdated_heads` or `impersonated` alarm names (`file`): then restart the revision it names and set nothing
+//      aside. Where fork alarms by any other heads file name it too, set it aside anyway: a copy broken into can write
+//      one back-dated file in its own ID, which never makes it exempt. A file under snapshots/, or `noted`, counts
+//      neither way (it says who kept the head, not when its file landed). Once snapshots name each head's writer
+//      (SNAPSHOT_WRITERS on, the next release), an ID named only through snapshots/ files is not framed by that alone:
+//      look at the fork alarms by its on-time heads files.
 //   2. Find its copy: ContainerAppConsoleLogs where Log has 'audit.witness_writer' and that ID; RevisionName and
 //      ContainerGroupName are the platform's, never the copy's word. An ID no such line names was made up: go to 5.
 //   3. Set it aside: deploy/azure/operator.ts witness-set-aside --writer <ID> --reason <incident>. Every copy passes
@@ -292,14 +299,18 @@ const WAIT_MS = 5_000;
 /** How far past this process's clock a name may be dated, as the anchors' log allows. */
 const MOST_AHEAD_MS = 5 * 60_000;
 
-/** How far before the newest file read a later read looks again: a file named earlier may land later. */
-const LAG_MS = MOST_AHEAD_MS;
-
 /** How finely Azure's Date tells the store's time: whole seconds, rounded down. */
 const DATE_STEP_MS = 1000;
 
 /** How near the store's Date a clock is left as it stands (TR-12): an NTP-synced one always, so it dates as before. */
 const RIGHT_ENOUGH_MS = 60_000;
+
+/**
+ * How far before the newest file read a later read looks again: a file named earlier may land later. Wider than the
+ * misdated threshold by this copy's own clock's leeway (S210 final F1): a reader up to RIGHT_ENOUGH_MS ahead of the store
+ * looking back only MOST_AHEAD_MS never listed a file named exactly that far before it landed, nor was it misdated.
+ */
+const LAG_MS = MOST_AHEAD_MS + RIGHT_ENOUGH_MS + DATE_STEP_MS;
 
 /** The most names a list call asks of the heads' folders: Azure's most, one call where a hundred names took one each. */
 const LIST_PAGE = 5000;
@@ -313,8 +324,20 @@ const LIST_SLACK_MS = 60 * 60_000;
 /** How far back a start with no sound snapshot reads heads files: a day, far past any anchor's turn. */
 const NO_SNAPSHOT_READ_BACK_MS = 24 * 60 * 60_000;
 
-/** How far back a start reads set-aside files (TR-7 D1): every heads file it reads with no snapshot, and the lag. */
-const START_SET_ASIDE_BACK_MS = NO_SNAPSHOT_READ_BACK_MS + LAG_MS;
+/**
+ * How recently the leader's last whole read must have begun for it to write a snapshot (TR-7 D2): a start reads heads
+ * files from the snapshot's time less SNAPSHOT_LAG_MS, so it reads every one that read could have missed.
+ */
+const SNAPSHOT_FRESH_MS = 60_000;
+
+/**
+ * How far before a snapshot's time a start reads heads files: the lag from the whole read it was written after, which
+ * began up to SNAPSHOT_FRESH_MS before it (S210 final F1: the lag alone left that minute's back-dated names unread).
+ */
+const SNAPSHOT_LAG_MS = LAG_MS + SNAPSHOT_FRESH_MS;
+
+/** How far back a start reads set-aside files (TR-7 D1): every heads file it reads, and as far before them as it does. */
+const START_SET_ASIDE_BACK_MS = NO_SNAPSHOT_READ_BACK_MS + SNAPSHOT_LAG_MS;
 
 /** How many spoiled snapshots a start goes back past: a day's at one an hour. */
 const MOST_SPOILED_SNAPSHOTS = 24;
@@ -343,12 +366,6 @@ const MOST_SET_ASIDE_LISTED = 10 * LIST_PAGE;
 
 /** The most a set-aside file may hold: one line and its closing line, with room to spare. */
 const MOST_SET_ASIDE_BYTES = 4096;
-
-/**
- * How recently the leader's last whole read must have begun for it to write a snapshot (TR-7 D2): well inside LAG_MS,
- * so a start reading heads files from the snapshot's time less the lag reads every one named since that read.
- */
-const SNAPSHOT_FRESH_MS = 60_000;
 
 /** How often the leader writes a snapshot. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
@@ -384,11 +401,13 @@ const SOON_RESERVED = MOST_LINES_A_FILE / 10;
 const MOST_FILE_BYTES = 64 * 1024 * 1024;
 
 /**
- * What one head held takes on the heap: its object (a bigint place, a time, its writer's ID shared by its file's heads),
- * its 32-byte hash's Buffer and the list's entry. Measured on Node 24 at 243 bytes (200,000 heads held as note() keeps
- * them, after a full collection; 235 before TR-14's writer).
+ * What one head held takes on the heap: its object (a bigint place, a time, its writer's ID and file's name, both shared
+ * by its file's heads), its 32-byte hash's Buffer and the list's entry. Measured on Node 24 at 362 bytes where each head
+ * came in a file of its own (200,000 heads, names as write-once.ts pageIn copies them out of 5,000-blob List Blobs
+ * pages, after a full collection): the name's own string is the most of the rise, and shared where a file holds many.
+ * 251 with one name for all, 243 before the file's name, 235 before TR-14's writer.
  */
-export const WITNESS_HEAD_BYTES = 250;
+export const WITNESS_HEAD_BYTES = 370;
 
 /**
  * What one compact head (a fingerprint, or a head released) takes: a 32-byte packed record (its place, its hash's first
@@ -469,6 +488,11 @@ interface LostMark {
 /** A head held: the writer whose file brought it in, or who noted it here, beside it (TR-14: the fork alarm names both). */
 interface Held extends WitnessedHead {
   readonly by: string;
+  /**
+   * The file it was read from, its folder leading (none where noted here): the fork alarm names it, so the operator can
+   * tell a fork from a file `misdated_heads` or `impersonated` names from one from an on-time file (playbook H, step 1).
+   */
+  readonly file?: string | undefined;
 }
 
 /** A line of a heads file or snapshot: one chain's head, or (a snapshot's) the heads it let go for memory. */
@@ -483,7 +507,7 @@ type HeadLine =
  * A line as its file of `fileAt` gives it: none where it isn't one, or is dated past the file's name beyond the clocks'
  * spread (no honest copy writes one: the header). Its time never past the name's, so a rebase after the file sets it aside.
  */
-function lineFrom(fields: unknown, fileAt: number, fileBy = '', snapshot = false): HeadLine | undefined {
+function lineFrom(fields: unknown, fileAt: number, fileBy = '', snapshot = false, file?: string): HeadLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
   const { c, s, h, t, l, f, x, r, b, a, w, ...rest } = fields as Record<string, unknown>;
   const dated = timeIn(t)?.getTime();
@@ -499,7 +523,7 @@ function lineFrom(fields: unknown, fileAt: number, fileBy = '', snapshot = false
   if (h !== undefined) {
     return x !== undefined || r !== undefined || typeof h !== 'string' || !HASH.test(h)
       ? undefined
-      : { chain: c, head: { seq, hash: Buffer.from(h, 'hex'), at, by } };
+      : { chain: c, head: { seq, hash: Buffer.from(h, 'hex'), at, by, file } };
   }
   // A fingerprint of a head let go, or a head released: its place and its hash's first bytes (a snapshot's alone).
   if (typeof x === 'string' && PREFIX.test(x) && r === undefined) {
@@ -512,6 +536,12 @@ function lineFrom(fields: unknown, fileAt: number, fileBy = '', snapshot = false
 
 /** What a snapshot's head line names when it doesn't say who wrote the head (one written before TR-14). */
 const FROM_SNAPSHOT = 'snapshot';
+
+/** What the fork alarm names as the file of a head this process noted itself, read from no file. */
+const NOTED_HERE = 'noted';
+
+/** What the fork alarm names as the writer and file of a released head, which keeps neither (a compact head). */
+const RELEASED = 'released';
 
 /**
  * Who wrote a line's head (TR-14): a snapshot's head line says (`w`), as the fork alarm names the head's writer, never
@@ -859,18 +889,25 @@ export function createWitnessLog({
   /**
    * The fork alarm: two heads witnessed at one place with different hashes, no read needed. It names the writer of the
    * head just seen (`writer`) and of those it meets (`against`), as their files' names say (TR-14): which is forged is for
-   * the chain to tell, and the one named across many chains' forks is the copy to set aside (the header).
+   * the chain to tell, and the one named across many chains' forks is the copy to set aside (the header). Each with the
+   * file it came from (`file`, `againstFiles`, in step; `noted` where noted here, `released` for a released head), so a
+   * fork from a file `misdated_heads` or `impersonated` names is told from one from an on-time file (playbook H, step 1).
    */
-  const forked = (name: string, seq: bigint, writer: string, against: readonly string[]): void => {
+  const forked = (name: string, head: Held, against: readonly Held[], released: number): void => {
     const platform = name === 'platform';
     const log = platform ? logger : logger.child({ orgId: name.slice('organisation:'.length) });
     log.error('audit.integrity_failed', {
       chain: platform ? 'platform' : 'organisation',
       check: 'witness',
       reason: 'fork',
-      seq: seq.toString(),
-      writer,
-      against,
+      seq: head.seq.toString(),
+      writer: head.by,
+      file: head.file ?? NOTED_HERE,
+      against: [...against.map(({ by }) => by), ...Array.from({ length: released }, () => RELEASED)],
+      againstFiles: [
+        ...against.map(({ file }) => file ?? NOTED_HERE),
+        ...Array.from({ length: released }, () => RELEASED),
+      ],
     });
   };
 
@@ -1019,12 +1056,9 @@ export function createWitnessLog({
     // Released at its place: the same head again (as good as held), or a fork.
     const releasedThere = released.has(name) ? releasedOf(name).filter(({ seq }) => seq === head.seq) : [];
     if (releasedThere.some((one) => sameCompact(one, head))) return false;
-    // A released head's writer isn't kept (a compact head is its place and hash alone).
-    const rivals = [
-      ...there.filter((one) => stands(name, one)).map(({ by }) => by),
-      ...releasedThere.map(() => 'released'),
-    ];
-    if (rivals.length > 0) forked(name, head.seq, head.by, rivals);
+    // A released head's writer and file aren't kept (a compact head is its place and hash alone).
+    const rivals = there.filter((one) => stands(name, one));
+    if (rivals.length + releasedThere.length > 0) forked(name, head, rivals, releasedThere.length);
     list.splice(place, 0, head);
     held.set(name, list);
     heldCount += 1;
@@ -1288,7 +1322,7 @@ export function createWitnessLog({
     const releasedRead = new Map<string, Compact[]>();
     const by = writerOfName(name);
     for await (const fields of bodyLines(got)) {
-      const line = lineFrom(fields, at, by, kind === SNAPSHOT_FILE);
+      const line = lineFrom(fields, at, by, kind === SNAPSHOT_FILE, name);
       if (line === undefined) continue;
       if ('head' in line) {
         if (keep(line.chain, line.head)) gained.add(line.chain);
@@ -1505,8 +1539,8 @@ export function createWitnessLog({
    * Whether every set-aside back to it was fetched (TR-7 review: else the file is not to be taken).
    */
   const setAsideDownTo = async (at: number, began: number): Promise<boolean> =>
-    at - LAG_MS >= (setAsideFloor ?? setAsideSince(began)) ||
-    (await readSetAside(began, at - LAG_MS - NO_SNAPSHOT_READ_BACK_MS));
+    at - SNAPSHOT_LAG_MS >= (setAsideFloor ?? setAsideSince(began)) ||
+    (await readSetAside(began, at - SNAPSHOT_LAG_MS - NO_SNAPSHOT_READ_BACK_MS));
 
   /**
    * A set-aside pass that fetched every new file: the next one's look back moved on, older names forgotten once read
@@ -1584,8 +1618,8 @@ export function createWitnessLog({
   };
 
   /**
-   * Where a start reads heads files back from (TR-7 D3): a snapshot's time less the lag; with none, a day back (and to
-   * the oldest set-aside one passed over, itself within a day). Once a set-aside writer's snapshots were passed over,
+   * Where a start reads heads files back from (TR-7 D3): a snapshot's time less SNAPSHOT_LAG_MS; with none, a day back
+   * (and to the oldest set-aside one passed over, itself within a day). Once a set-aside writer's snapshots were passed over,
    * never past a day back: an honest older snapshot found under them is still taken whole, its state complete, but the
    * heads files named between it and a day back are not read, which is the alarm (SEV-1: a stop among them is not held
    * here until the chains are rebased, playbook H step 5), as is a walk stopped at a day's set-aside snapshots.
@@ -1596,9 +1630,10 @@ export function createWitnessLog({
   ): number => {
     const readBack = began - SET_ASIDE_READ_BACK_MS;
     const passedAside = snapshot.asideFrom !== undefined || snapshot.capped;
-    let from = Math.min(began - NO_SNAPSHOT_READ_BACK_MS, (snapshot.asideFrom ?? Infinity) - LAG_MS);
-    if (snapshot.at !== undefined) from = passedAside ? Math.max(snapshot.at - LAG_MS, readBack) : snapshot.at - LAG_MS;
-    if (snapshot.capped || (passedAside && snapshot.at !== undefined && snapshot.at - LAG_MS < readBack)) {
+    let from = Math.min(began - NO_SNAPSHOT_READ_BACK_MS, (snapshot.asideFrom ?? Infinity) - SNAPSHOT_LAG_MS);
+    const fromSnapshot = snapshot.at === undefined ? undefined : snapshot.at - SNAPSHOT_LAG_MS;
+    if (fromSnapshot !== undefined) from = passedAside ? Math.max(fromSnapshot, readBack) : fromSnapshot;
+    if (snapshot.capped || (passedAside && fromSnapshot !== undefined && fromSnapshot < readBack)) {
       const fields = {
         folder: 'snapshots',
         snapshotAt: snapshot.at === undefined ? undefined : new Date(snapshot.at).toISOString(),
@@ -1806,8 +1841,9 @@ export function createWitnessLog({
 
   /**
    * The whole held, as a snapshot, where this copy leads, hourly and only while its reads are whole (TR-7 D2): the last
-   * whole pass begun within SNAPSHOT_FRESH_MS. A start reads heads files only from a snapshot's time less the lag, so one
-   * written while reads failed would leave out every head named meanwhile, a stop among them, for good.
+   * whole pass begun within SNAPSHOT_FRESH_MS. A start reads heads files only from a snapshot's time less
+   * SNAPSHOT_LAG_MS, so one written while reads failed would leave out every head named meanwhile, a stop among them,
+   * for good.
    */
   const snapshotOnce = async (): Promise<void> => {
     if (snapshots === undefined || writes?.() !== true || state !== 'read' || !changedSinceSnapshot) return;
