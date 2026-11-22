@@ -29,6 +29,8 @@ const statesWith = (lapses: History, choice: History = history()) => {
       recorded.push(args[5]);
       return Promise.resolve();
     },
+    // Every read held to what the source's state names (TR-3 residual 75): these histories are whole.
+    historyHeld: () => true,
   } as unknown as SignedStates;
   return { states, recorded };
 };

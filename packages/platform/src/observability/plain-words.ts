@@ -837,11 +837,9 @@ export const PLAIN_WORDS = {
     next: 'It is tried again in about an hour. If it keeps failing, check the database.',
   },
   'state_names.chain_unverified': {
-    happened:
-      "One organisation's audit chain did not check out from its start, so its older records were not given the links that protect their history.",
-    broke:
-      'Nothing was changed. Its older stops and choices are still read from the log alone, and the failed check is itself a sign someone went round the app.',
-    next: 'Look at the chain problem named in this line before anything else; it is tried again in about an hour.',
+    happened: "One organisation's audit chain did not check out, so its older records were not linked.",
+    broke: 'Nothing changed, but a failed check may mean someone went round the app.',
+    next: 'Look at the chain problem in this line first. It is tried again in about an hour.',
   },
   'state_names.failed': {
     happened: "One organisation's older records could not all be given the links that protect their history.",
