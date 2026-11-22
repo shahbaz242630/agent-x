@@ -726,7 +726,15 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Its whole walk held to the heads witnessed and the latest anchor, as the anchor check's (TR-7 A2).
     job(
       'state_names',
-      createStateNames({ ...organisationJob, witness, anchors: anchorStore }),
+      createStateNames({
+        ...organisationJob,
+        witness,
+        // A rebased chain's walk from its start skipped, not held (TR-7 D4): rebases are the anchor log's alone.
+        anchors: {
+          latest: (chain) => anchorStore.latest(chain),
+          rebasedAfter: (chain, at) => anchorLog?.rebasedAfter(chain, at) ?? false,
+        },
+      }),
       STATE_NAMES_EVERY_MS,
       LONG_MS,
     ),

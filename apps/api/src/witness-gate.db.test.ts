@@ -1403,7 +1403,10 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
       readonly looked?: (w: World, at: 'read' | 'judged') => Promise<void>;
       readonly unnamedTooLongMs?: number;
       readonly witness?: Pick<WitnessLog, 'heldTo'>;
-      readonly anchors?: { latest(chain: Chain): HeadSeen | undefined };
+      readonly anchors?: {
+        latest(chain: Chain): HeadSeen | undefined;
+        rebasedAfter?(chain: Chain, at: Date): boolean;
+      };
     } = {},
   ) {
     const { w, acting } = await ready();
@@ -1561,6 +1564,54 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
       expect(await heldNow(w)).toBe('held');
     },
   );
+
+  /**
+   * An unnamed organisation whose chain fails its walk from the start at its hidden cancel, anchored at the event `at`
+   * names (its head, above the break, or its first, below it), and rebased or not, as the anchor log would say.
+   */
+  async function brokenAndAnchored(at: 'head' | 'first', rebased: boolean) {
+    let anchored: HeadSeen | undefined;
+    const legacy = await legacyOrganisation(false, undefined, {
+      anchors: { latest: () => anchored, rebasedAfter: (_chain, since) => rebased && since.getTime() === 0 },
+    });
+    const { w } = legacy;
+    await asOwner(w, async (owner) => {
+      const [row] = await owner.query<{ place: string; hash: Buffer }>(
+        `select seq::text as place, hash from audit.events where org_id = $1 order by seq ${at === 'head' ? 'desc' : 'asc'} limit 1`,
+        [w.org],
+      );
+      if (row === undefined) throw new Error('the chain should hold events');
+      anchored = { seq: BigInt(row.place), hash: row.hash };
+    });
+    await hideTheCancel(w);
+    return legacy;
+  }
+
+  it('TR-7 D4 state names: a chain rebased past its break isn’t held each run: said plainly, nothing named', async () => {
+    const { w, job } = await brokenAndAnchored('head', true);
+    await job.run();
+    await job.run();
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('state_names.rebased_unnamed')).toEqual([
+      expect.objectContaining({ level: 'warn', orgId: w.org, reason: 'hash' }),
+      expect.objectContaining({ level: 'warn', orgId: w.org, reason: 'hash' }),
+    ]);
+    expect(lines('state_names.named')).toEqual([]);
+    expect(await heldNow(w)).not.toBe('held');
+  });
+
+  it.each([
+    ['a break above the rebased anchor', 'first', true],
+    ['no rebase', 'head', false],
+  ] as const)('SEC-DB-20 TR-7 D4’s control: %s is still the alarm and the hold', async (_what, at, rebased) => {
+    const { w, job } = await brokenAndAnchored(at, rebased);
+    await job.run();
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ orgId: w.org, chain: 'organisation', check: 'state_names' }),
+    ]);
+    expect(lines('state_names.rebased_unnamed')).toEqual([]);
+    expect(await heldNow(w)).toBe('held');
+  });
 
   it('TR-7 A2’s positive control: held to nothing, as before, the cut chain checks out whole and its rolled-back states are named', async () => {
     const { w, job } = await cutBelowAWitnessedStop('none');

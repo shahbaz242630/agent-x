@@ -15,8 +15,10 @@
 // Spend requests aren't named again: a new event on one would move the times its waits and checks run from.
 //
 // It is the API's, not the operator command's: the operator's role may not write these tables (0079), and the API's
-// writes are witnessed as any are. A chain that fails the whole walk raises the integrity alarm and puts the
-// organisation on its integrity hold, as the anchor check does (TR-10). A run never throws: each failure is logged,
+// writes are witnessed as any are. The walk is held to the heads copies witnessed and the latest anchor (TR-7 A2). A
+// chain that fails the whole walk raises the integrity alarm and puts the organisation on its integrity hold, as the
+// anchor check does (TR-10), unless a rebase covers where it failed: then it is said, unnamed, and not held (TR-7 D4).
+// A run never throws: each failure is logged,
 // naming the organisation, and the run goes on. Retire it, as the grant summaries' build will be, once every environment's objects are named.
 import { AGENTS } from '@agentx/core/modules/agents';
 import {
@@ -200,10 +202,25 @@ export function createStateNames({
   readonly unnamedTooLongMs?: number;
   /** The heads copies witnessed (TR-1), the one held set every consumer reads (TR-9): none without a witness log. */
   readonly witness?: Pick<WitnessLog, 'heldTo'> | undefined;
-  /** The chains' latest anchors: the walk holds to the organisation's too. */
-  readonly anchors?: { latest(chain: Chain): AnchorPoint | undefined } | undefined;
+  /** The chains' latest anchors: the walk holds to the organisation's too. With the anchor log, whether a rebase came after a time. */
+  readonly anchors?:
+    | {
+        latest(chain: Chain): AnchorPoint | undefined;
+        rebasedAfter?(chain: Chain, at: Date): boolean;
+      }
+    | undefined;
 }): StateNames {
   const trail = createAuditTrail({ keys, ids });
+
+  /**
+   * Whether the walk failed where a rebase covers it (TR-7 D4): the chain has one (any rebase is after the epoch), and
+   * the problem is at or below the latest anchor, which the rebase is or comes before. A head cut back is never covered.
+   */
+  const rebasedBelow = (chain: Chain, anchor: AnchorPoint | undefined, problem: ChainProblem): boolean =>
+    anchor !== undefined &&
+    problem.reason !== 'cut_back' &&
+    problem.seq <= anchor.seq &&
+    anchors?.rebasedAfter?.(chain, new Date(0)) === true;
 
   /**
    * The organisation's whole chain walked from its start, its tracked events kept as read; the problem, if it fails.
@@ -362,6 +379,12 @@ export function createStateNames({
       const heldTo = [...(witness?.heldTo(chain) ?? []), ...(anchor === undefined ? [] : [anchor])];
       const walked = await walkedWhole(orgId, heldTo);
       if (!('kept' in walked)) {
+        // A chain rebased after a repair fails a walk from its start at or below the anchor the rebase stands in for
+        // (TR-7 D4): the anchor check vouches for it from there, so no hold, said plainly each run, nothing named.
+        if (rebasedBelow(chain, anchor, walked)) {
+          log.warn('state_names.rebased_unnamed', { reason: walked.reason, seq: walked.seq, anchorSeq: anchor?.seq });
+          return;
+        }
         // A chain that fails its whole walk is tampering, as the anchor check's: the alarm, and the same hold (TR-10).
         log.error('audit.integrity_failed', {
           chain: 'organisation',

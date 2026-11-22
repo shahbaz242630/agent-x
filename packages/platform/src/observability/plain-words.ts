@@ -862,6 +862,13 @@ export const PLAIN_WORDS = {
     broke: 'A missing older event about its records is not caught as tampering.',
     next: 'Read its warnings: an old version still running, database edits, or records changing every run.',
   },
+  'state_names.rebased_unnamed': {
+    happened:
+      "One organisation's audit chain was rebased after a repair, so its history can't be read whole from its start.",
+    broke:
+      'Its older records were not linked this run and nothing was held; the anchor check still checks it from the rebase.',
+    next: 'Check an incident asked for the rebase. Its older records stay unlinked, said each hour, while it stands.',
+  },
   'state_names.failed': {
     happened: "One organisation's older records could not all be given the links that protect their history.",
     broke: 'Those not reached are still read from the log alone; nothing else changed.',
