@@ -763,3 +763,46 @@ describe('SEC-DB-20 TR-14 review: a writer set aside twice, snapshots this relea
     expect(seqs(third.log.heldTo(CHAIN))).toEqual([6n, 5n]);
   });
 });
+
+describe('SEC-DB-20 S210 R1-1 a heads file misdated by its writer', () => {
+  it('a start from an hour-old snapshot reads one named ten minutes back in another ID and created now: the alarm names it', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    await plant(snapshots, 'snapshots', SNAPSHOT, [headLine(3n, 3, AT.getTime() - HOUR)], AT.getTime() - HOUR);
+    // The jobs leader's ID, as a copy broken into would claim it: named back past the leader's own look back.
+    const leader = 'a1b2c3d4e5f6';
+    const namedAt = AT.getTime() - 10 * MINUTE;
+    const name = await plant(store, 'heads', HEADS, [headLine(4n, 4, namedAt)], namedAt, leader);
+    store.created.set(name, AT.getTime());
+    const starting = copyOn(store, { snapshots });
+    await starting.log.refresh();
+    expect(starting.alarms('misdated_heads')).toEqual([
+      expect.objectContaining({ level: 'error', writer: leader, file: name, skewMs: -10 * MINUTE }),
+    ]);
+    // A detector, never a gate: read and held as any other; no clock of this copy's said.
+    expect(seqs(starting.log.pending(CHAIN))).toEqual([4n, 3n]);
+    expect(starting.alarms('clock_skew')).toEqual([]);
+  });
+});
+
+describe('SEC-DB-20 S210 R1-3 a leader that finds its own ID set aside', () => {
+  it('writes a snapshot under its new ID at its next flush after a whole read, not an hour on', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const leader = copyOn(store, { snapshots, leads: true, time });
+    await leader.log.refresh();
+    leader.log.soon(CHAIN, head(2n, 2));
+    await leader.log.flush();
+    const was = leader.log.writer();
+    expect(names(snapshots, 'snapshots').map(writerOfName)).toEqual([was]);
+    time.at += MINUTE;
+    await copyOn(store, { signer: 'operator', time }).log.setAside(was, REASON);
+    time.at += 1000;
+    await leader.log.refresh();
+    expect(leader.log.writer()).not.toBe(was);
+    await leader.log.refresh();
+    await leader.log.flush();
+    expect(names(snapshots, 'snapshots').map(writerOfName).toSorted()).toEqual([was, leader.log.writer()].toSorted());
+  });
+});

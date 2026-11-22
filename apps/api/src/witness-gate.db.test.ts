@@ -1402,7 +1402,7 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     more: {
       readonly looked?: (w: World, at: 'read' | 'judged') => Promise<void>;
       readonly unnamedTooLongMs?: number;
-      readonly witness?: Pick<WitnessLog, 'heldTo'>;
+      readonly witness?: Pick<WitnessLog, 'heldTo' | 'refreshWhole' | 'state'>;
       readonly anchors?: { latest(chain: Chain): HeadSeen | undefined };
     } = {},
   ) {
@@ -1525,7 +1525,7 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     const witnessed: WitnessedHead[] = [];
     let anchored: HeadSeen | undefined;
     const legacy = await legacyOrganisation(false, undefined, {
-      witness: { heldTo: () => witnessed },
+      witness: { heldTo: () => witnessed, refreshWhole: () => Promise.resolve(true), state: () => 'read' },
       anchors: { latest: () => anchored },
     });
     const { w } = legacy;
@@ -1568,6 +1568,38 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     expect(lines('audit.integrity_failed')).toEqual([]);
     expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 2 })]);
     expect(await heldNow(w)).not.toBe('held');
+  });
+
+  it('SEC-DB-20 S210 R1-2 state names: no naming without a whole witness read begun this run; read afresh, named', async () => {
+    const seen = { state: 'unread' as 'unread' | 'read', whole: true, asked: 0 };
+    const { w, job } = await legacyOrganisation(false, undefined, {
+      witness: {
+        heldTo: () => {
+          seen.asked += 1;
+          return [];
+        },
+        refreshWhole: () => Promise.resolve(seen.whole),
+        state: () => seen.state,
+      },
+    });
+    for (const [state, whole] of [
+      ['unread', true],
+      ['read', false],
+    ] as const) {
+      Object.assign(seen, { state, whole });
+      await job.run();
+      expect(lines('state_names.named')).toEqual([]);
+      expect(seen.asked).toBe(0);
+      expect(await heldNow(w)).not.toBe('held');
+    }
+    expect(lines('state_names.witness_stale')).toEqual([
+      expect.objectContaining({ level: 'warn', orgId: w.org }),
+      expect.objectContaining({ level: 'warn', orgId: w.org }),
+    ]);
+    Object.assign(seen, { state: 'read', whole: true });
+    await job.run();
+    expect(seen.asked).toBe(1);
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 2 })]);
   });
 
   /**
