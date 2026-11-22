@@ -47,10 +47,10 @@ const ASSET_NAME = /^[A-Za-z0-9_-]+\.[a-z0-9]+$/;
 
 /**
  * A console page's path: `/`, or segments of lower-case letters, digits and
- * hyphens, the first never one of the API's own (`v1`, `health`, `internal`: Zitadel's machine-ID route, SA3e, which a page answer would give every copy the same ID). The path
+ * hyphens, the first never one of the API's own (`v1`, `health`, `internal`: Zitadel's machine-ID route, SA3e, which a page answer would give every copy the same ID; `operator`: the operators' reserved prefix, access.ts, Shannon p6). The path
  * part, never a dot. One pattern, so browser-errors.ts's contract states it.
  */
-export const PAGE_PATH = /^\/(?!(?:v1|health|internal)(?:\/|$))(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
+export const PAGE_PATH = /^\/(?!(?:v1|health|internal|operator)(?:\/|$))(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
 
 /** Hashed assets: their name changes with their bytes, so a browser may keep them. */
 const KEPT = 'public, max-age=31536000, immutable';

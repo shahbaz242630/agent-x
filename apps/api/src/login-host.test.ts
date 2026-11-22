@@ -146,6 +146,21 @@ describe('the login service’s host on the API (SA1)', () => {
     }
   });
 
+  it('Shannon p6 MISC-01: counts the login host’s requests against the address’s limit, as every request is', async () => {
+    // 1000 a minute shared by 100 copies: 10 for this one.
+    const app = await routeServer({ loginOrigin: LOGIN_ORIGIN, webCopies: 100 });
+    for (let i = 0; i < 10; i += 1) {
+      const answer = await app.inject({ url: '/v1/agents', headers: { host: 'auth.agentx.example' } });
+      expectPlain404(answer, `request ${String(i + 1)}`);
+      expect(answer.headers['x-ratelimit-remaining'], `request ${String(i + 1)}`).toBe(String(9 - i));
+    }
+    for (const host of ['auth.agentx.example', 'app.agentx.example']) {
+      const refused = await app.inject({ url: '/health', headers: { host } });
+      expect(refused.statusCode, host).toBe(429);
+      expect(refused.json(), host).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+    }
+  });
+
   it('leaves every host alone where there is no login service', async () => {
     const app = await routeServer({});
     expect((await app.inject({ url: '/health', headers: { host: 'auth.agentx.example' } })).statusCode).toBe(200);
