@@ -594,10 +594,10 @@ export async function signedRowIds<Schema>(
 }
 
 /**
- * The IDs of the organisation's rows in the table (at most `limit`) pointing at an event past `afterSeq` whose details
- * carry no `detail`: state-names.ts's look for a state with no names written since its walk (TR-16). The pointer is
- * read, never believed: the caller verifies each row, so one pointed at any other event (another subject's, one not a
- * state) is found here and refused as tampering there, never taken as a state.
+ * The organisation's rows in the table (at most `limit`) pointing at an event past `afterSeq` whose details carry no
+ * `detail`, each with that event's seq: state-names.ts's look for a state with no names written since its walk
+ * (TR-16). The pointer is read, never believed: the caller verifies each row, so one pointed at any other event
+ * (another subject's, one not a state) is found here and refused as tampering there, never taken as a state.
  */
 export async function signedRowsLackingSince<Schema>(
   tx: Transaction<Schema>,
@@ -606,19 +606,39 @@ export async function signedRowsLackingSince<Schema>(
   afterSeq: bigint,
   detail: string,
   limit: number,
-): Promise<string[]> {
+): Promise<{ readonly id: string; readonly seq: bigint }[]> {
   checkTable(table);
   if (!UUID.test(orgId)) throw new RangeError('A signed row is named by UUIDs');
   if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
   await assertTenant(tx, orgId);
-  const { rows } = await sql<{ id: string }>`
-    select target.id::text as id from ${sql.table(table.table)} as target
+  const { rows } = await sql<{ id: string; seq: string }>`
+    select target.id::text as id, e.seq::text as seq from ${sql.table(table.table)} as target
     join audit.events as e on e.org_id = target.org_id and e.id = target.state_event_id
     where target.org_id = ${orgId} and e.seq > ${afterSeq} and (e.details::jsonb -> ${detail}) is null
     order by target.id
     limit ${limit}
   `.execute(tx);
-  return rows.map(({ id }) => id);
+  return rows.map(({ id, seq }) => ({ id, seq: BigInt(seq) }));
+}
+
+/**
+ * How long ago, by the database's clock, the organisation's oldest event of any of `actions` was recorded, or null
+ * for none: state-names.ts's age of a naming begun and not ended (TR-16), read from the chain so a restart keeps it.
+ */
+export async function oldestEventAgeMs<Schema>(
+  tx: Transaction<Schema>,
+  orgId: string,
+  actions: readonly string[],
+): Promise<number | null> {
+  if (!UUID.test(orgId)) throw new RangeError('A signed row is named by UUIDs');
+  await assertTenant(tx, orgId);
+  const { rows } = await sql<{ age_ms: string | null }>`
+    select (pg_catalog.date_part('epoch', pg_catalog.now() - pg_catalog.min(e.recorded_at)) * 1000)::bigint::text as age_ms
+    from audit.events as e
+    where e.org_id = ${orgId} and e.action = any(${[...actions]}::text[])
+  `.execute(tx);
+  const age = rows[0]?.age_ms;
+  return age === null || age === undefined ? null : Number(age);
 }
 
 /**

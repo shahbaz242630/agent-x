@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createDatabase, type Database } from './database.ts';
 import {
+  oldestEventAgeMs,
   pointSignedRow,
   readSignedRow,
   type SignedFieldValues,
@@ -280,18 +281,39 @@ describe('looking for a row pointing at an event since a place, its details lack
   it('lists those pointing past the place at an event lacking the key, none at or before it, or carrying it', async () => {
     const first = await newGrant(LOOKED_ORG, await eventAt(1, '{}'));
     await newGrant(LOOKED_ORG, await eventAt(2, '{"named":"yes"}'));
-    expect(await lacking(0n)).toEqual([first]);
+    expect(await lacking(0n)).toEqual([{ id: first, seq: 1n }]);
     expect(await lacking(1n)).toEqual([]);
     const third = await newGrant(LOOKED_ORG, await eventAt(3, '{"other":"x"}'));
-    expect(await lacking(0n)).toEqual([first, third]);
-    expect(await lacking(0n, LOOKED_ORG, 1)).toEqual([first]);
-    expect(await lacking(1n)).toEqual([third]);
+    expect(await lacking(0n)).toEqual([
+      { id: first, seq: 1n },
+      { id: third, seq: 3n },
+    ]);
+    expect(await lacking(0n, LOOKED_ORG, 1)).toEqual([{ id: first, seq: 1n }]);
+    expect(await lacking(1n)).toEqual([{ id: third, seq: 3n }]);
     expect(await lacking(3n)).toEqual([]);
   });
 
   it('refuses an organisation that is not a UUID, or a limit below one, before any SQL', async () => {
     await expect(lacking(0n, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
     await expect(lacking(0n, LOOKED_ORG, 0)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('says how long ago the oldest event of the actions was recorded, by the database clock, or none', async () => {
+    const age = (org: string, actions: readonly string[]) =>
+      withTenant(app, LOOKED_ORG, (tx) => oldestEventAgeMs(tx, org, actions));
+    await eventAt(4, '{}');
+    await admin.query('alter table audit.events disable trigger user');
+    try {
+      await admin.query(
+        "update audit.events set recorded_at = now() - interval '2 hours' where org_id = $1 and seq = 4",
+        [LOOKED_ORG],
+      );
+    } finally {
+      await admin.query('alter table audit.events enable trigger user');
+    }
+    expect(await age(LOOKED_ORG, ['grant.noted'])).toBeGreaterThanOrEqual(2 * 60 * 60_000);
+    expect(await age(LOOKED_ORG, ['grant.never'])).toBeNull();
+    await expect(age('not-a-uuid', ['grant.noted'])).rejects.toBeInstanceOf(RangeError);
   });
 });
 

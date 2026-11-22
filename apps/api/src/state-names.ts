@@ -44,6 +44,7 @@ import type { ChainProblem } from '@agentx/platform/audit-chain';
 import {
   type Database,
   type DatabaseTransaction,
+  oldestEventAgeMs,
   type SignedStateTable,
   signedRowsLackingSince,
 } from '@agentx/platform/db';
@@ -79,10 +80,23 @@ interface Walked {
   readonly kept: ReadonlyMap<string, TrailEvent[]>;
 }
 
-/** A row of another table than the organisation's own, pointing at a state with no names written since the walk. */
-interface Unnamed {
+/** A row of another table than the organisation's own, found pointing at an event since the walk with no names. */
+interface Pointed {
   readonly table: SignedStateTable;
   readonly id: string;
+  /** The event it was found pointing at. */
+  readonly seq: bigint;
+}
+
+/**
+ * Those rows as they verified: at the event they were found at, with no names (the older image's, which holds the
+ * naming back), or at an older state than it (never the app: a row's state only moves on, so someone put it back).
+ * One that can't be believed isn't here: it is the tamper finding, its alarm, and the hold as its transaction ends.
+ * One that verifies at a newer state than it is the app's own later write, retried next run.
+ */
+interface Judged {
+  readonly unnamed: readonly Pointed[];
+  readonly movedBack: readonly Pointed[];
 }
 
 /** The tables such a row is looked for in: every named one but the organisation's own, whose state its naming writes. */
@@ -91,53 +105,43 @@ const OTHER_TABLES = NAMED_TABLES.filter((table) => table !== ORGANIZATIONS);
 /** How many such rows of a table one look reads and verifies: one is enough to hold the naming back. */
 const ROWS_LOOKED_AT = 50;
 
-/** Runs in a row an organisation may be left unnamed before it is an error: a day of the hourly runs. */
-const UNNAMED_RUNS_BEFORE_ERROR = 24;
+/** The actions an object is named with: the oldest of them in a chain is when its naming began (TR-16). */
+const NAMING_ACTIONS = NAMED_TABLES.map((table) => historyNamedOf(table.subject));
+
+/** How long an organisation's naming may go on without ending before it is an error: a day of the hourly runs. */
+const UNNAMED_TOO_LONG_MS = 24 * 60 * 60_000;
 
 /** The naming undone: rows pointing at a state with no names, written since the walk after the first look (TR-16). */
 class UnnamedSinceWalk extends Error {
-  readonly rows: readonly Unnamed[];
-  constructor(rows: readonly Unnamed[]) {
+  readonly rows: readonly Pointed[];
+  constructor(rows: readonly Pointed[]) {
     super('A state with no names was written since the walk');
     this.rows = rows;
   }
 }
 
-/** Each row of the other tables pointing at its own state event since the walk with no names: by its pointer alone. */
-async function pointedSinceWalk(tx: NamesTx, orgId: string, walked: Walked): Promise<Unnamed[]> {
-  const found: Unnamed[] = [];
+/** Each row of the other tables pointing at an event since the walk with no names: by its pointer alone. */
+async function pointedSinceWalk(tx: NamesTx, orgId: string, walked: Walked): Promise<Pointed[]> {
+  const found: Pointed[] = [];
   for (const table of OTHER_TABLES) {
     const rows = await signedRowsLackingSince(tx, table, orgId, walked.reached, TRACKED_BEFORE, ROWS_LOOKED_AT);
-    found.push(...rows.map((id) => ({ table, id })));
+    found.push(...rows.map(({ id, seq }) => ({ table, id, seq })));
   }
   return found;
 }
 
-/**
- * Those rows verified, `share`: one that can't be believed is a tamper finding (its alarm, and the hold as the
- * transaction ends); each that verifies with a state since the walk carrying no names is the older image's.
- */
-async function verifiedUnnamed(
-  tx: NamesTx,
-  states: SignedStates,
-  orgId: string,
-  walked: Walked,
-  rows: readonly Unnamed[],
-): Promise<{ readonly unnamed: readonly Unnamed[]; readonly tampered: boolean }> {
-  const unnamed: Unnamed[] = [];
-  let tampered = false;
+/** Each row verified, `share`, and judged as Judged says. */
+async function judged(tx: NamesTx, states: SignedStates, orgId: string, rows: readonly Pointed[]): Promise<Judged> {
+  const unnamed: Pointed[] = [];
+  const movedBack: Pointed[] = [];
   for (const row of rows) {
     const state = await states.verifiedState(tx, row.table, { orgId, id: row.id }, 'share');
-    if (state.outcome !== 'verified') tampered = true;
-    else if (state.trail !== undefined && state.trail.tracked === undefined && state.trail.seq > walked.reached)
-      unnamed.push(row);
+    if (state.outcome !== 'verified') continue;
+    const trail = state.trail;
+    if (trail === undefined || trail.seq < row.seq) movedBack.push(row);
+    else if (trail.seq === row.seq && trail.tracked === undefined) unnamed.push(row);
   }
-  return { unnamed, tampered };
-}
-
-/** The naming held back a run: each row that held it, on a line of its own. */
-function heldBack(log: Logger, rows: readonly Unnamed[]): void {
-  for (const { table, id } of rows) log.warn('state_names.unnamed_since_walk', { table: table.subject, id });
+  return { unnamed, movedBack };
 }
 
 const objectKey = (type: string, id: string) => `${type}:${id.toLowerCase()}`;
@@ -175,6 +179,8 @@ export function createStateNames({
   ids,
   logger,
   walked: beforeNaming = () => Promise.resolve(),
+  looked = () => Promise.resolve(),
+  unnamedTooLongMs = UNNAMED_TOO_LONG_MS,
 }: {
   /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -184,6 +190,10 @@ export function createStateNames({
   readonly logger: Logger;
   /** Done after an organisation's walk, before each table is named (tests: a move made just then). */
   readonly walked?: (next: SignedStateTable) => Promise<void>;
+  /** Done before a look verifies the rows it found (`read`), and after a first look that found none (`judged`): tests. */
+  readonly looked?: (at: 'read' | 'judged') => Promise<void>;
+  /** How long a naming may go on unended before it is an error (tests: shorter). */
+  readonly unnamedTooLongMs?: number;
 }): StateNames {
   const trail = createAuditTrail({ keys, ids });
 
@@ -207,25 +217,54 @@ export function createStateNames({
     }
   };
 
+  /** Rows found and verified in the caller's transaction (the hook between: tests restore a row just then). */
+  const lookedAt = async (tx: NamesTx, states: SignedStates, orgId: string, rows: readonly Pointed[]) => {
+    if (rows.length > 0) await looked('read');
+    return judged(tx, states, orgId, rows);
+  };
+
+  /** What a look judged, acted on: a row moved back is the alarm and the hold; each state with no names, its warning. */
+  const settled = async (
+    services: SignedStatesServices,
+    orgId: string,
+    log: Logger,
+    { unnamed, movedBack }: Judged,
+  ) => {
+    for (const { table, id } of movedBack) {
+      log.error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'state_names',
+        reason: 'moved_back',
+        table: table.subject,
+        id,
+      });
+    }
+    if (movedBack.length > 0) await holdOrganisation(database, orgId, services, 'moved_back');
+    for (const { table, id } of unnamed) log.warn('state_names.unnamed_since_walk', { table: table.subject, id });
+  };
+
   /**
    * The organisation's own state named, last (TR-16): not while any other table holds a state with no names written
-   * since the walk (the older image's, in a deploy), which the naming would make read as tampering. Those rows are
-   * found and verified before the head's lock (ADR-006 §6): one that can't be believed is the tamper finding and hold;
-   * one that verifies holds the naming back a run. Once the naming's event holds the head's lock, a row written since
-   * the look undoes it, and is verified in a transaction of its own.
+   * since the walk (the older image's, in a deploy), which the naming would make read as tampering. The first look, its
+   * rows found and verified `share`, is a transaction of its own: those tables come after the organisation's in ADR-006
+   * §6's order, so their locks are never held while its row is locked for its naming. The naming's own transaction
+   * locks no row of them: once its event holds the head's lock (every event before it committed, so seen), a row
+   * written since the first look undoes it, and is verified and judged in a transaction of its own.
    */
   const ownNamed = async (services: SignedStatesServices, orgId: string, walked: Walked, log: Logger) => {
-    let late: readonly Unnamed[];
+    const first = await withSignedStates(database, orgId, services, async (tx, states) => {
+      const rows = await pointedSinceWalk(tx, orgId, walked);
+      return { rows, ...(await lookedAt(tx, states, orgId, rows)) };
+    });
+    if (first.rows.length > 0) {
+      await settled(services, orgId, log, first);
+      return 'left';
+    }
+    await looked('judged');
+    let late: readonly Pointed[];
     try {
       return await withSignedStates(database, orgId, services, async (tx, states) => {
-        const looked = await verifiedUnnamed(tx, states, orgId, walked, await pointedSinceWalk(tx, orgId, walked));
-        if (looked.tampered) return 'left';
-        if (looked.unnamed.length > 0) {
-          heldBack(log, looked.unnamed);
-          return 'left';
-        }
         const came = await namedOne(tx, states, ORGANIZATIONS, { orgId, id: orgId }, walked);
-        // Under the head's lock: every event before the naming's has committed, so this read sees them.
         const since = came === 'named' ? await pointedSinceWalk(tx, orgId, walked) : [];
         if (since.length > 0) throw new UnnamedSinceWalk(since);
         return came;
@@ -234,8 +273,8 @@ export function createStateNames({
       if (!(error instanceof UnnamedSinceWalk)) throw error;
       late = error.rows;
     }
-    await withSignedStates(database, orgId, services, (tx, states) => verifiedUnnamed(tx, states, orgId, walked, late));
-    heldBack(log, late);
+    const after = await withSignedStates(database, orgId, services, (tx, states) => lookedAt(tx, states, orgId, late));
+    await settled(services, orgId, log, after);
     return 'left';
   };
 
@@ -275,18 +314,16 @@ export function createStateNames({
     return { named: came === 'named' ? 1 : 0, left: came === 'left' ? 1 : 0 };
   };
 
-  // Runs in a row each organisation was left unnamed, this process's memory: a day of them is an error (TR-16).
-  const unnamedRuns = new Map<string, number>();
-
-  /** The organisation's run counted: named, its count gone; else one more, an error once a day's worth have passed. */
-  const runCounted = (orgId: string, named: boolean, log: Logger) => {
-    if (named) {
-      unnamedRuns.delete(orgId);
-      return;
-    }
-    const runs = (unnamedRuns.get(orgId) ?? 0) + 1;
-    unnamedRuns.set(orgId, runs);
-    if (runs >= UNNAMED_RUNS_BEFORE_ERROR) log.error('state_names.unnamed_too_long', { runs });
+  /**
+   * An organisation left unnamed this run: an error once its naming began (its first object named, by the database's
+   * clock) longer ago than a day of runs, read from its chain so no restart or change of leader resets it (TR-16).
+   */
+  const tooLong = async (services: SignedStatesServices, orgId: string, log: Logger) => {
+    const ageMs = await withSignedStates(database, orgId, services, (tx) =>
+      oldestEventAgeMs(tx, orgId, NAMING_ACTIONS),
+    );
+    if (ageMs !== null && ageMs >= unnamedTooLongMs)
+      log.error('state_names.unnamed_too_long', { hours: Math.floor(ageMs / 3_600_000) });
   };
 
   const nameIn = async (orgId: string, signal: AbortSignal | undefined): Promise<void> => {
@@ -322,7 +359,7 @@ export function createStateNames({
         named += count.named;
         left += count.left;
       }
-      runCounted(orgId, left === 0, log);
+      if (left > 0) await tooLong(services, orgId, log);
       log.info('state_names.named', { named, left });
     } catch (error) {
       log.error('state_names.failed', { err: error });

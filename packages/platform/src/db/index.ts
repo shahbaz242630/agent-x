@@ -95,6 +95,7 @@ export {
   type SignedStateTable,
   signedRowIds,
   signedRowsLackingSince,
+  oldestEventAgeMs,
   signedRowPointed,
   signedRowPointing,
   brakeSharedLookedUp,
