@@ -981,7 +981,7 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(12);
   });
 
-  it('SEC-DB-17 (AT13) counts the same trips with every read held to the signed states’ digest: it is memory, no trip', async () => {
+  it('AT13 counts the same trips with every read held to the signed states’ digest: it is memory, no trip', async () => {
     const { w, acting } = await ready();
     decidedOf(await ask(acting, asking(w)));
     // The anchor check's walk of the whole chain, kept as job-list.ts keeps it, every signed object in it.

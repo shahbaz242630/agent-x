@@ -693,7 +693,7 @@ describe('a person’s own page and download (6E1a)', () => {
     );
   });
 
-  it('TR-13 counts twenty downloads a day per person, past the hour’s five, warned once a minute', async () => {
+  it('SEC-LIM-13 TR-13 counts twenty downloads a day per person, past the hour’s five, warned once a minute', async () => {
     // Twenty of Ana's, recorded now on the platform chain as the app records them.
     await app.transaction().execute(async (tx) => {
       for (let one = 1; one <= 20; one += 1) {

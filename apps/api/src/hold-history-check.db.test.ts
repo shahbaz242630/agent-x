@@ -181,7 +181,7 @@ afterEach(async () => {
   await owner.end();
 });
 
-describe(`the whole history checked while a hold stands (Phase 2 D1c, Postgres ${server.version})`, () => {
+describe(`SEC-DB-20 the whole history checked while a hold stands (Phase 2 D1c, Postgres ${server.version})`, () => {
   it('checks every row, ended ones too, a batch at a time across runs, and records it once whole', async () => {
     await request('LIVE');
     await request('ENDED');
