@@ -348,6 +348,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         chain: { kind: 'platform' },
         // A head held below its anchor walked from to it, a pass step at a time (TR-1).
         confirm: (cursor, target, watch) => platform.passStep(database, cursor, target, CONFIRM_STEP, watch),
+        // Between runs too, after each read of the witness log (TR-3): a cut found at once, confirmed heads let go.
+        probe: (heldTo) => platform.probeWitnessed(database, heldTo, JOB_ANSWER_WITHIN_MS),
         // From its anchor, and whole once a day (4D2e E8), or when the digest owes it a walk (AT13c).
         verify: platformChainCheck({
           // Held to the heads copies witnessed (TR-1), asked before the walk.

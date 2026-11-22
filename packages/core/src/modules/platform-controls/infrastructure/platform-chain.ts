@@ -198,6 +198,15 @@ export interface PlatformChain {
     upTo: bigint,
     answeredWithinMs?: number,
   ): Promise<{ readonly orgIds: readonly string[]; readonly seq: bigint }>;
+  /**
+   * The chain's head against the heads copies witnessed (TR-3, the anchor check's probe between runs), in one statement:
+   * the one it was cut back below (below the highest, none, two, not sealed, or another event at a place), or none.
+   */
+  probeWitnessed(
+    db: Kysely<PlatformControlsTables>,
+    heldTo: readonly HeadSeen[],
+    answeredWithinMs?: number,
+  ): Promise<HeadSeen | undefined>;
 }
 
 /** A whole check's report, and for one that holds, the signed objects it read (AT13c). */
@@ -963,6 +972,17 @@ export function createPlatformChain({
         orgIds: rows.map((row) => orgIdIn(row.details)).filter((id) => id !== undefined),
         seq: rows.at(-1)?.seq ?? afterSeq,
       });
+    },
+
+    async probeWitnessed(db: Kysely<PlatformControlsTables>, heldTo: readonly HeadSeen[], answeredWithinMs?: number) {
+      if (heldTo.length === 0) return undefined;
+      const rows = await limitedTransaction(
+        db,
+        (tx) => tx.selectNoFrom(platformHeadRead(heldTo)).execute(),
+        answeredWithinMs === undefined ? {} : { answeredWithinMs },
+      );
+      // A watch of its own, raising nothing: the probe only judges.
+      return platformCutBack(keys, {}, { heldTo, saw: () => undefined }, (rows[0] ?? {}) as PlatformHeadOfRow);
     },
   });
 }

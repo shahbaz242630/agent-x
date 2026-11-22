@@ -33,6 +33,7 @@ export {
   type WitnessAnchors,
   type WitnessClass,
   type WitnessedHead,
+  WITNESS_HEAD_BYTES,
   type WitnessLog,
   type WitnessSigner,
   WitnessUnconfirmed,

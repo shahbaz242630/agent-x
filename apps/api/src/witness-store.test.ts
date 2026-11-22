@@ -4,13 +4,13 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Chain } from '@agentx/platform/audit-chain';
+import { type Chain, createWitnessLog, WITNESS_HEAD_BYTES } from '@agentx/platform/audit-chain';
 import type { Config } from '@agentx/platform/config';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { LogCapture, testLogger } from '@agentx/testing';
+import { createFakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createWitnessJob, storeAt, witnessOf } from './witness-store.ts';
+import { createWitnessJob, storeAt, witnessMostBytes, witnessOf } from './witness-store.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -125,6 +125,56 @@ describe('TR-1 the witness log’s job', () => {
     await job.work.run();
     expect(calls).toEqual(['flush', 'refresh', 'flush', 'flush', 'refresh']);
     expect(probed).toEqual([[CHAIN]]);
+  });
+
+  it('TR-3: hands the leader’s probe the chains holding most too, each once, even where a read gained none', async () => {
+    const OTHER: Chain = { kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000002' };
+    const probed: (readonly Chain[])[] = [];
+    let gained: readonly Chain[] = [CHAIN];
+    let at = 0;
+    const job = createWitnessJob({
+      witness: {
+        flush: () => Promise.resolve(),
+        refresh: () => Promise.resolve(gained),
+        crowded: () => [{ kind: 'organisation', orgId: CHAIN.orgId.toUpperCase() }, OTHER],
+      },
+      refreshEveryMs: 10_000,
+      now: () => at,
+      afterRefresh: (chains) => {
+        probed.push(chains);
+        return Promise.resolve();
+      },
+    });
+    await job.work.run();
+    at += 10_000;
+    gained = [];
+    await job.work.run();
+    expect(probed).toEqual([
+      [CHAIN, OTHER],
+      [{ kind: 'organisation', orgId: CHAIN.orgId.toUpperCase() }, OTHER],
+    ]);
+  });
+
+  it('TR-3: holds an anchor interval of a burst at twice the target rate, which the heap share alone would not; never past a tenth of the heap', () => {
+    const heap = 768 * 1024 * 1024;
+    const burst = 2 * 170 * 300;
+    expect(Math.floor((heap * 0.005) / WITNESS_HEAD_BYTES)).toBeLessThan(burst);
+    expect(Math.floor(witnessMostBytes(300, heap) / WITNESS_HEAD_BYTES)).toBeGreaterThanOrEqual(burst);
+    expect(witnessMostBytes(300, 64 * 1024 * 1024)).toBe(Math.floor(6.4 * 1024 * 1024));
+    expect(witnessMostBytes(1, 4 * 1024 * 1024 * 1024)).toBe(Math.floor(4 * 1024 * 1024 * 1024 * 0.005));
+    // The burst itself, one organisation's, into a log of that size: none let go.
+    const log = createWitnessLog({
+      store: createFakeWriteOnceStore().store,
+      keys,
+      logger: testLogger(new LogCapture()),
+      now: () => AT,
+      epoch: 1,
+      alertAfterMs: 1,
+      mostBytes: witnessMostBytes(300, heap),
+    });
+    for (let seq = 1; seq <= burst; seq += 1) log.soon(CHAIN, { seq: BigInt(seq), hash: Buffer.alloc(32, seq % 256) });
+    expect(log.beyondMemory(CHAIN)).toBe(false);
+    expect(log.pending(CHAIN, 1)[0]?.seq).toBe(BigInt(burst));
   });
 
   it('writes what waits once its runs stop', async () => {

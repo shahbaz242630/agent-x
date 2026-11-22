@@ -6,7 +6,8 @@
 // The heads are asked before the walk's first statement, so each was committed before it: a head above where the walk
 // ended its reach (`to`, the head it read) is the chain cut back below it, and one at a place the walk read with another
 // hash is a fork. A head at or below where the walk began, or past where a capped step stopped short of `to`, is not
-// this walk's to judge: it stays held, for the next.
+// this walk's to judge: it stays held, for the next. A fingerprint of a head the witness log let go for memory (its
+// place and its hash's first 8 bytes) is held to as a head, by those bytes (TR-3).
 import type { ChainReport, StoredEntry } from './chain.ts';
 import type { HeadSeen } from './digest-log.ts';
 import type { ChainReader } from './store.ts';
@@ -57,7 +58,8 @@ export function heldToWitnessed<Report extends ChainReport & { readonly to?: big
       if (seq > goal) return true;
       if (seq <= from || seq > reached) return false;
       const there = seq === reached ? report.hash : found.get(seq);
-      return there?.equals(hash) !== true;
+      // A fingerprint of a head let go for memory (TR-3) carries its hash's first bytes alone: those compared.
+      return there?.subarray(0, hash.length).equals(hash) !== true;
     })
     .map(({ seq }) => seq);
   if (missed.length === 0) return report;

@@ -146,6 +146,12 @@
 // (CONFIRM_EVENTS_A_HAND_OFF), apart from the run's.
 // On the chain, it is let go; a fork is the alarm and the hold; one that can't be walked is kept, said
 // (`audit.witness_head_unconfirmed`), and the chain anchored no more until it is: never let go unseen.
+// Between runs (TR-3), the leader's probe after each read of the log (the chains that gained a head, and those holding
+// most) releases every head above the anchor it found on the chain but the highest, compact, the next walk from the
+// anchor held to them until it passes them (never let go on the probe alone, as it reads no link): so a burst never
+// fills what the log may hold. A chain that let heads go for memory anyway anchors again once a walk held to every head
+// still held and to the fingerprints of those let go (each its place and its hash's first 8 bytes, checked as a head's)
+// runs from below the lowest let go to at or past the highest (the log's walkedPast), with no rebase.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type Anchor,
@@ -281,6 +287,11 @@ export interface CheckedChain {
    * on it. None, and such a head is never confirmed.
    */
   readonly confirm?: (cursor: CheckedPoint, target: CheckedPoint, watch?: WatchedPlaces) => Promise<ChainStep>;
+  /**
+   * The chain's head read against the heads copies witnessed, in one statement (TR-3: the platform chain's probe between
+   * runs): the one it was cut back below, or none. None given, it waits for the run.
+   */
+  readonly probe?: (heldTo: readonly Witnessed[]) => Promise<Witnessed | undefined>;
 }
 
 /** What the probe found of one organisation's chain against its anchor, or that its read failed (the trail's probeHeads). */
@@ -394,7 +405,10 @@ export interface AnchorCheckOptions {
   /** How many of the probe's pages are read at once, each on a connection of its own: never more than the lanes. */
   readonly probePages?: number;
   /** The witness log (TR-1): the heads each probe and walk is held to, let go once confirmed. None, held to none. */
-  readonly witness?: Pick<WitnessLog, 'pending' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> | undefined;
+  readonly witness?:
+    | (Pick<WitnessLog, 'pending' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> &
+        Partial<Pick<WitnessLog, 'walkedPast' | 'fingerprints' | 'release' | 'baseBelow'>>)
+    | undefined;
 }
 
 /** See `stopFlushMs`. */
@@ -486,6 +500,7 @@ const PROBE = 'probe';
 
 /** The in-flight key of the probe after a refresh of the witness log (TR-1): one at a time. */
 const WITNESS_PROBE = 'witness_probe';
+const PLATFORM_WITNESS_PROBE = 'witness_probe|platform';
 
 /** A chain the run's probe answered for, and the anchor it was compared with. */
 interface Probed {
@@ -685,18 +700,28 @@ export function createAnchorCheck({
 
   const sameHead = (one: Witnessed, other: Witnessed): boolean => one.seq === other.seq && one.hash.equals(other.hash);
 
+  /** Whether the hash read at a head's place is its own: all of it, or a compact head's first bytes (TR-3). */
+  const holdsAt = (there: Buffer | undefined, head: Witnessed): boolean =>
+    there?.subarray(0, head.hash.length).equals(head.hash) === true;
+
   /**
    * Where a chain's confirming walk starts: where it reached at the last run, where every head below that was checked on
-   * it; else afresh from the lowest head (one that came in since below where it reached starts it again).
+   * it; else afresh from the lowest head (one that came in since below where it reached starts it again). A compact one
+   * lowest (a head released, or a fingerprint: TR-3) gives no whole hash to link from: from the highest anchor at or
+   * below it that the log kept as one its compact heads went above (baseBelow), else from the chain's start. A wrong
+   * start can't pass: the walk links every event from it and must end on the anchor's own hash.
    */
-  const walkStart = (key: string, heads: readonly Witnessed[], lowest: Witnessed) => {
-    const saved = confirming.get(key);
+  const walkStart = (chain: Chain, heads: readonly Witnessed[], lowest: Witnessed) => {
+    const saved = confirming.get(keyOf(chain));
     const resumes =
       saved !== undefined &&
       heads.every((head) => head.seq > saved.cursor.seq || saved.checked.some((one) => sameHead(one, head)));
-    return resumes
-      ? { cursor: saved.cursor, checked: [...saved.checked] }
-      : { cursor: { seq: lowest.seq, hash: lowest.hash, macKeyVersion: 0 }, checked: [] as Witnessed[] };
+    if (resumes) return { cursor: saved.cursor, checked: [...saved.checked] };
+    const base = lowest.hash.length === CHAIN_START.hash.length ? lowest : witness?.baseBelow?.(chain, lowest.seq);
+    return {
+      cursor: base === undefined ? CHAIN_START : { seq: base.seq, hash: base.hash, macKeyVersion: 0 },
+      checked: [] as Witnessed[],
+    };
   };
 
   /** Each head a step passed over checked against the hash it read at the head's place: whether all hold, those kept. */
@@ -708,8 +733,7 @@ export function createAnchorCheck({
     checked: Witnessed[],
   ): boolean => {
     for (const head of heads.filter(({ seq }) => seq > from && seq <= step.seq)) {
-      const there = head.seq === step.seq ? step.hash : found.get(head.seq);
-      if (there?.equals(head.hash) !== true) return false;
+      if (!holdsAt(head.seq === step.seq ? step.hash : found.get(head.seq), head)) return false;
       checked.push(head);
     }
     return true;
@@ -732,12 +756,13 @@ export function createAnchorCheck({
     const [lowest] = heads;
     if (lowest === undefined) return 'holds';
     if (confirm === undefined) return 'waiting';
-    let { cursor } = walkStart(key, heads, lowest);
-    const { checked } = walkStart(key, heads, lowest);
+    const started = walkStart(chain, heads, lowest);
+    let { cursor } = started;
+    const { checked } = started;
     // Those at the walk's own starting place: its hash, or a fork.
     const start = cursor;
     const atStart = heads.filter((one) => one.seq === start.seq && !checked.some((done) => sameHead(done, one)));
-    if (atStart.some((head) => !head.hash.equals(start.hash))) return 'cut';
+    if (atStart.some((head) => !holdsAt(start.hash, head))) return 'cut';
     checked.push(...atStart);
     while (cursor.seq < anchor.seq) {
       const from = cursor;
@@ -764,6 +789,8 @@ export function createAnchorCheck({
    * there, where this process made the anchor and kept it; the rest by one walk from the lowest of them (above). All on
    * the chain, let go; a fork, the alarm and the hold (`failed`); a walk not done (its budget, the run's end, the database,
    * no way to walk) keeps them, said, and the chain anchored no more until it is (`unconfirmed`). Never let go unseen.
+   * The compact heads at or below the anchor (TR-3: released, or fingerprints, that no anchoring walk passed, as after a
+   * restart or a new leader) are judged the same way, by their hashes' first bytes, and let go on the chain.
    */
   const lateHeadsHold = async (
     checked: CheckedChain,
@@ -776,7 +803,8 @@ export function createAnchorCheck({
     unconfirmed.delete(key);
     const anchor = anchors.latest(chain);
     if (witness === undefined || anchor === undefined) return 'held';
-    const late = witness.pending(chain).filter(({ seq }) => seq <= anchor.seq);
+    const compact = (witness.fingerprints?.(chain) ?? []).filter(({ seq }) => seq <= anchor.seq);
+    const late = [...witness.pending(chain).filter(({ seq }) => seq <= anchor.seq), ...compact];
     if (late.length === 0) {
       confirming.delete(key);
       return 'held';
@@ -784,7 +812,7 @@ export function createAnchorCheck({
     const here = anchoredHere.get(key);
     const recent = here?.seq === anchor.seq ? here.recent : new Map<bigint, Buffer>();
     const known = late.filter(({ seq }) => recent.has(seq));
-    const fork = known.find(({ seq, hash }) => recent.get(seq)?.equals(hash) !== true);
+    const fork = known.find((head) => !holdsAt(recent.get(head.seq), head));
     if (fork !== undefined) {
       alarmed(chain, log, 'cut_back', fork.seq);
       return 'failed';
@@ -803,11 +831,17 @@ export function createAnchorCheck({
       alarmed(chain, log, 'cut_back', others[0]?.seq);
       return 'failed';
     }
+    // Compact ones confirmed, told as passed by a walk from the chain's start (the log's walkedPast), so they go too.
+    const confirmed = (heads: readonly Witnessed[]): void => {
+      witness.prune(chain, heads);
+      const compactOnes = heads.filter((head) => compact.includes(head));
+      if (compactOnes.length > 0) witness.walkedPast?.(chain, 0n, anchor.seq, compactOnes);
+    };
     if (verdict === 'holds') {
-      witness.prune(chain, late);
+      confirmed(late);
       return 'held';
     }
-    witness.prune(chain, known);
+    confirmed(known);
     unconfirmed.add(key);
     log.error('audit.witness_head_unconfirmed', {
       chain: chain.kind,
@@ -832,14 +866,18 @@ export function createAnchorCheck({
   ): readonly Witnessed[] | undefined => {
     if (witness === undefined) return [];
     if (!readSince(report.began) || unconfirmed.has(keyOf(chain))) return undefined;
-    if (witness.beyondMemory(chain)) {
-      log.error('audit.witness_beyond_memory', { chain: chain.kind, anchoring: false });
-      return undefined;
-    }
     const asked = report.heldTo ?? [];
     const from = report.walkedFrom ?? last?.seq ?? 0n;
     const askedOf = (head: Witnessed) => asked.some(({ seq, hash }) => seq === head.seq && hash.equals(head.hash));
     if (witness.pending(chain).some((head) => head.seq <= report.seq && !askedOf(head))) return undefined;
+    // The compact heads it was held to (TR-3), told: released ones it passed, linked from the anchor, let go; heads let go
+    // for memory set aside once it passed every fingerprint, from below the lowest to at or past the highest; else the
+    // chain waits for a walk that does (or a rebase), said. A place holding another event was this walk's `cut_back`.
+    const beyond = witness.walkedPast?.(chain, from, report.seq, asked) ?? witness.beyondMemory(chain);
+    if (beyond) {
+      log.error('audit.witness_beyond_memory', { chain: chain.kind, anchoring: false });
+      return undefined;
+    }
     return asked.filter(({ seq }) => seq > from && seq <= report.seq);
   };
 
@@ -1098,7 +1136,8 @@ export function createAnchorCheck({
       const walkBegan = clock.now();
       // The heads it is held to, asked before its first statement (TR-1): each committed before it began. Its last
       // events' hashes kept, for a head landing after it anchors.
-      const heldTo = witness?.pending(chain) ?? [];
+      // With the fingerprints of heads let go for memory (TR-3): a place holding another event is a fork, as at a head.
+      const heldTo = [...(witness?.pending(chain) ?? []), ...(witness?.fingerprints?.(chain) ?? [])];
       const recent: RecentPlaces = { since: new Date(walkBegan.getTime() - RECENT_MS), found: new Map() };
       const checking = Promise.resolve()
         .then(() => (witness === undefined ? verify(last) : verify(last, heldTo, recent)))
@@ -1289,6 +1328,7 @@ export function createAnchorCheck({
    * start, as only the heads are judged. One cut back below a head is the alarm and the hold; the rest wait for the run.
    */
   const probeWitnessedNow = async (orgIds: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
+    await probeChainsWitnessed(signal);
     const probe = organizations?.probe?.bind(organizations);
     if (organizations === undefined || probe === undefined || inFlight.has(PROBE) || storeUnread()) return;
     const asked = orgIds.flatMap((orgId) => {
@@ -1304,13 +1344,65 @@ export function createAnchorCheck({
       () => probe(asked, stop, 1),
       signal,
     );
-    for (const { orgId } of asked) {
+    for (const { orgId, heldTo } of asked) {
       const answer = answers.get(orgId);
-      if (answer?.kind !== 'failed' || answer.problem.reason !== 'cut_back') continue;
       const chain = { kind: 'organisation', orgId } as const;
+      if (answer === undefined || answer.kind === 'missed') continue;
+      if (answer.kind !== 'failed') {
+        letGoBelowHighest(chain, heldTo);
+        continue;
+      }
+      if (answer.problem.reason !== 'cut_back') continue;
       alarmed(chain, logger.child({ orgId }), 'cut_back', answer.problem.seq);
       await settle(organizations, orgId, signal);
     }
+  };
+
+  /**
+   * The chains the check covers that can be probed (the platform's: TR-3), each against the heads copies witnessed, after
+   * every read of the log as the organisations that gained one are: a cut below one is the alarm, as in a run; all on the
+   * chain, all but the highest let go. A miss is a warning: the run asks the same.
+   */
+  const probeChainsWitnessed = async (signal: AbortSignal | undefined): Promise<void> => {
+    for (const { chain, probe } of chains) {
+      const heldTo = heldToOf(chain);
+      if (probe === undefined || heldTo.length === 0 || inFlight.has(PLATFORM_WITNESS_PROBE) || storeUnread(chain)) {
+        continue;
+      }
+      try {
+        const cut = await tracked(
+          PLATFORM_WITNESS_PROBE,
+          'the last witness probe has not finished',
+          () => probe(heldTo),
+          signal,
+        );
+        if (cut === undefined) letGoBelowHighest(chain, heldTo);
+        else alarmed(chain, logger, 'cut_back', cut.seq);
+      } catch (error) {
+        if (!(error instanceof Stopped)) {
+          logger.warn('audit.anchor_check_failed', { chain: chain.kind, check: 'probe', chains: 1, err: error });
+        }
+      }
+    }
+  };
+
+  /**
+   * The heads above the chain's anchor a probe found on the chain, each its event's hash at its place in the probe's one
+   * statement (TR-3), released but the highest: compact, and every later walk held to them until one from the anchor
+   * passes them (the log's release), so a burst between anchor runs never fills what may be held. Never let go outright:
+   * the probe reads no link between them, so rows put back beside a cut branch for its statement alone would pass it.
+   * Those at or below the anchor wait for their own linked walk (lateHeadsHold). With no anchor known (never anchored,
+   * or its shard let go: PL-65), none released.
+   */
+  const letGoBelowHighest = (chain: Chain, heldTo: readonly Witnessed[]): void => {
+    // The anchor as held (its shard read, as withAnchors asks it): with none known, nothing released.
+    const anchored = (durable !== undefined && anchors === durable ? durable.heldAnchor(chain) : anchors.latest(chain))
+      ?.seq;
+    if (anchored === undefined) return;
+    const [, ...below] = heldTo
+      .filter(({ seq }) => seq > anchored)
+      .toSorted((one, other) => (one.seq > other.seq ? -1 : 1));
+    if (below.length > 0) witness?.release?.(chain, below);
   };
 
   /** A probe's answers kept for the turns: unmoved or failing as found, read anyway; its misses said in one line. */
