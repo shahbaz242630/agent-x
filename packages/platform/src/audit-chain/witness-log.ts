@@ -22,7 +22,8 @@
 // key could otherwise date heads in 2099, which no rebase would ever set aside).
 //
 // Writing (group commit): a `now` head (a stop, an approval, every class but the decision path's: witness-class.ts) is
-// written at once, at most one Put in flight a process, each taking every head waiting; `now` resolves once a Put holding
+// written at once, at most one Put in flight a process, each taking every head waiting, `now` ones first (TR-11: a stop
+// never queues behind a backlog of decisions, which still fill what a file has left); `now` resolves once a Put holding
 // it succeeded. A `soon` head (an agent's decision) waits for the next flush, every few seconds while any waits, and at
 // a stop. A Put that fails is tried again, backing off; a `now` waiter gives up after `waitMs` (`WitnessUnconfirmed`,
 // the request answered 503), but its head stays queued, and every later wait for that chain on this process waits for
@@ -225,6 +226,9 @@ const MOST_WRITTEN_REMEMBERED = 10_000;
 
 /** The most lines one heads file carries: more wait for the next Put. */
 const MOST_LINES_A_FILE = 10_000;
+
+/** The lines of a file kept for `soon` heads where any wait, however many `now` heads do (TR-11): a tenth. */
+const SOON_RESERVED = MOST_LINES_A_FILE / 10;
 
 /** The most a heads file or snapshot may hold to be fetched. */
 const MOST_FILE_BYTES = 64 * 1024 * 1024;
@@ -774,10 +778,25 @@ export function createWitnessLog({
     }
   };
 
-  /** The queue's first file's worth written: whether it was. Taken back into the queue where it wasn't. */
+  /**
+   * The next file's heads, taken from the queue (TR-11): every `now` head first, so a stop never waits behind a backlog
+   * of decisions, then `soon` ones to fill it; past a file's worth of `now` heads, SOON_RESERVED lines still go to `soon`
+   * ones, so neither class waits for good.
+   */
+  const nextFile = (): Queued[] => {
+    const nowHeads: Queued[] = [];
+    const soonHeads: Queued[] = [];
+    for (const queued of queue) (queued.klass === 'now' ? nowHeads : soonHeads).push(queued);
+    const nowTaken = nowHeads.slice(0, MOST_LINES_A_FILE - Math.min(soonHeads.length, SOON_RESERVED));
+    const taking = [...nowTaken, ...soonHeads.slice(0, MOST_LINES_A_FILE - nowTaken.length)];
+    const taken = new Set(taking);
+    queue = queue.filter((queued) => !taken.has(queued));
+    return taking;
+  };
+
+  /** The next file's worth written: whether it was. Taken back into the queue where it wasn't. */
   const writeOnce = async (): Promise<boolean> => {
-    const taking = queue.slice(0, MOST_LINES_A_FILE);
-    queue = queue.slice(taking.length);
+    const taking = nextFile();
     try {
       const at = now().getTime();
       const name = fileName(ownFolder, at);

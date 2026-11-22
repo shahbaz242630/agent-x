@@ -233,6 +233,41 @@ describe('SEC-DB-20 the witness log: writing', () => {
     expect(seqs(reader.log.pending(PLATFORM))).toEqual([9n]);
     expect(integrity(reader.capture)).toEqual([]);
   });
+
+  it('TR-11: a `now` head goes in the next Put ahead of a queued `soon` backlog, which still drains after it', async () => {
+    // Two files' worth of decisions and more (10,000 lines a file), so a queue taken in order would write the stop third.
+    const backlog = 20_001;
+    const { log, heads } = witnessOn(undefined, { waitMs: 60_000, mostBytes: forHeads(backlog + 10) });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let putStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      putStarted = resolve;
+    });
+    heads.instead.put = async (name, bytes) => {
+      putStarted();
+      await gate;
+      return heads.real.put(name, bytes);
+    };
+    for (let seq = 1; seq <= backlog; seq += 1) log.soon(CHAIN, head(BigInt(seq), seq % 250));
+    const flushed = log.flush();
+    await started;
+    // The first file of decisions is in flight; a stop is noted behind the rest of them.
+    const stop = log.now(OTHER, head(1n, 7));
+    release();
+    await stop;
+    expect(heads.calls.puts).toBe(2);
+    await flushed;
+    await log.flush();
+    // Every decision went too: three files, every head once.
+    expect(namesUnder(heads.files, 'heads')).toHaveLength(3);
+    const reader = witnessOn(heads, { mostBytes: forHeads(backlog + 10) });
+    await reader.log.refresh();
+    expect(reader.log.pending(CHAIN)).toHaveLength(backlog);
+    expect(seqs(reader.log.pending(OTHER))).toEqual([1n]);
+  });
 });
 
 describe('SEC-DB-20 the witness log: reading', () => {
