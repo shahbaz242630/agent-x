@@ -58,8 +58,8 @@ import {
   keepClientMetadata,
   newFlowCookie,
   type OauthTables,
-  QUIET_NETWORK_FLOWS,
-  QUIET_NETWORK_REGISTRATIONS,
+  BUSY_SOURCE_FLOWS,
+  BUSY_NETWORK_REGISTRATIONS,
   sweepClients,
 } from '@agentx/core/modules/oauth';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
@@ -670,7 +670,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     });
   });
 
-  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} are open, refuses only a busy network's new flow, with the warning; a quiet one still opens`, async () => {
+  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} are open, refuses only a busy source’s new flow, with the warning; one holding a few still opens (R2-1)`, async () => {
     const admin = database.as('admin');
     // The server's cap filled by a crowd of 400 networks, each under its own share.
     await admin.query(
@@ -683,8 +683,8 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     const authorize = (ip: string) => authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), ip);
     const busy = '198.51.100.40';
     try {
-      // A network with fewer than its few open is let in, up to them,
-      for (let open = 0; open < QUIET_NETWORK_FLOWS; open += 1) {
+      // An address holding fewer than the busy share open is let in, up to it (R2-1),
+      for (let open = 0; open < BUSY_SOURCE_FLOWS; open += 1) {
         expect(await authorize(busy)).toMatchObject({ outcome: 'opened' });
       }
       expect(lines('oauth.flows_capped')).toEqual([]);
@@ -853,7 +853,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     });
   });
 
-  it(`SEC-OAUTH-13 S210 TR-7: past ${String(MOST_REGISTRATIONS_A_DAY)} a day, a quiet network still registers; a busy one is refused, warned once a minute`, async () => {
+  it(`SEC-OAUTH-13 S210 TR-7: past ${String(MOST_REGISTRATIONS_A_DAY)} a day, a network under the busy share still registers; a busy one is refused, warned once a minute (R2-1)`, async () => {
     const admin = database.as('admin');
     // The day's cap filled by a crowd of 14 networks, each under its own share.
     await admin.query(
@@ -866,14 +866,14 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     const register = (address: string) =>
       authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, address);
     try {
-      // A network registering its first few today is let in,
-      for (let made = 0; made < QUIET_NETWORK_REGISTRATIONS; made += 1) {
+      // A shared network registering fewer than the busy share today is let in, up to it (R2-1),
+      for (let made = 0; made < BUSY_NETWORK_REGISTRATIONS; made += 1) {
         expect(await register(`203.0.113.${String(made + 1)}`)).toMatchObject({ outcome: 'registered' });
       }
       expect(lines('oauth.registrations_capped')).toEqual([]);
       // and refused past them: busy now, it meets the server's cap, warned once a minute with how many.
-      expect(await register('203.0.113.50')).toEqual({ outcome: 'capped' });
-      expect(await register('203.0.113.51')).toEqual({ outcome: 'capped' });
+      expect(await register('203.0.113.150')).toEqual({ outcome: 'capped' });
+      expect(await register('203.0.113.151')).toEqual({ outcome: 'capped' });
       expect(lines('oauth.registrations_capped')).toEqual([
         expect.objectContaining({ level: 'warn', most: MOST_REGISTRATIONS_A_DAY, refused: 1 }),
       ]);

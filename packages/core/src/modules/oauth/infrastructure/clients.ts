@@ -24,18 +24,11 @@ import { newClientId } from './codes.ts';
 import type { OauthTables } from './tables.ts';
 
 /**
- * The clients that may register in any 24 hours, from every address together, past which only a quiet network's
- * (S210 TR-7): the table's backstop, never a lockout. A crowd of networks filling it would otherwise refuse every
- * organisation's next app for the day (no fixed user ceiling: load may slow the system, never break it).
+ * The clients that may register in any 24 hours, from every address together, past which only a busy network's are
+ * refused (S210 TR-7, R2-1): the table's backstop, never a lockout. A crowd of networks filling it would otherwise
+ * refuse every organisation's next app for the day (no fixed user ceiling: load may slow the system, never break it).
  */
 export const MOST_REGISTRATIONS_A_DAY = 2000;
-
-/**
- * How few registrations in 24 hours make a network quiet: let in even past MOST_REGISTRATIONS_A_DAY (S210 TR-7), as a
- * quiet network's sign-in is past the sign-ins' backstop (login-flows.ts, S206 V8). The table then grows only with
- * each new network's few.
- */
-export const QUIET_NETWORK_REGISTRATIONS = 3;
 
 /**
  * The most clients that may register in any 24 hours from one network (6F1 G4): an IPv4 /24 or an IPv6 /48, so a few
@@ -45,6 +38,14 @@ export const QUIET_NETWORK_REGISTRATIONS = 3;
  */
 export const MOST_REGISTRATIONS_A_NETWORK_A_DAY = 150;
 
+/**
+ * How many registrations in 24 hours make a network busy: past MOST_REGISTRATIONS_A_DAY only a busy network is refused
+ * (S210 TR-7, R2-1), any other still held to its own MOST_REGISTRATIONS_A_NETWORK_A_DAY. A third of that share: a
+ * shared network (a hosted agent platform, an office's one address) adding a few dozen organisations' apps a day stays
+ * under it, while filling the server's cap takes at least 14 networks at their full 150, each far past it.
+ */
+export const BUSY_NETWORK_REGISTRATIONS = MOST_REGISTRATIONS_A_NETWORK_A_DAY / 3;
+
 /** A registered client, as kept. */
 export interface Client extends ClientRegistration {
   readonly clientId: string;
@@ -53,7 +54,7 @@ export interface Client extends ClientRegistration {
 
 /**
  * Registered, with its ID and when; or a day's cap reached, nothing kept: this network's, or the whole server's with
- * this network not quiet.
+ * this network busy.
  */
 export type Registered =
   | { readonly outcome: 'registered'; readonly client: Client }
@@ -62,8 +63,8 @@ export type Registered =
 /**
  * Registers the client from `network` (6F1 G4: its client address's /24, or /48 for IPv6), in a transaction of its own
  * whose statements are limited to 10 seconds: the day's counts, the server's and the network's, taken under the
- * registrations' one lock, so two at once can't both take the last place. Past the server's cap a network holding fewer
- * than QUIET_NETWORK_REGISTRATIONS that day still registers (S210 TR-7).
+ * registrations' one lock, so two at once can't both take the last place. Past the server's cap only a network holding
+ * BUSY_NETWORK_REGISTRATIONS that day is refused (S210 TR-7, R2-1).
  */
 export async function registerClient(
   db: Kysely<OauthTables>,
@@ -83,10 +84,10 @@ export async function registerClient(
       ])
       .where('created_at', '>', new Date(now.getTime() - DAY_MS))
       .executeTakeFirstOrThrow();
-    if (registered >= MOST_REGISTRATIONS_A_DAY && fromNetwork >= QUIET_NETWORK_REGISTRATIONS) {
+    if (fromNetwork >= MOST_REGISTRATIONS_A_NETWORK_A_DAY) return { outcome: 'capped', cap: 'network' };
+    if (registered >= MOST_REGISTRATIONS_A_DAY && fromNetwork >= BUSY_NETWORK_REGISTRATIONS) {
       return { outcome: 'capped', cap: 'server' };
     }
-    if (fromNetwork >= MOST_REGISTRATIONS_A_NETWORK_A_DAY) return { outcome: 'capped', cap: 'network' };
     const client: Client = { ...registration, clientId: newClientId(), createdAt: now };
     const seal = registeredSealed(keys, client);
     await tx

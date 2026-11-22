@@ -26,7 +26,7 @@ import {
   clientSeen,
   MOST_REGISTRATIONS_A_DAY,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
-  QUIET_NETWORK_REGISTRATIONS,
+  BUSY_NETWORK_REGISTRATIONS,
   registerClient,
   sweepClientNetworks,
   sweepClients,
@@ -49,7 +49,7 @@ import {
   MOST_OPEN_FLOWS_A_SOURCE,
   openCodeFlow,
   openDeviceFlow,
-  QUIET_NETWORK_FLOWS,
+  BUSY_SOURCE_FLOWS,
   sweepFlows,
 } from './flows.ts';
 import type { OauthTables } from './tables.ts';
@@ -167,30 +167,38 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     await expect(sweepClients(app, NOW, 0)).rejects.toBeInstanceOf(RangeError);
   });
 
-  it(`SEC-OAUTH-13 past ${String(MOST_REGISTRATIONS_A_DAY)} in 24 hours, refuses only a busy network and still takes a quiet one: no lockout (S210 TR-7)`, async () => {
+  it(`SEC-OAUTH-13 past ${String(MOST_REGISTRATIONS_A_DAY)} in 24 hours, refuses only a network holding ${String(BUSY_NETWORK_REGISTRATIONS)}; a busy shared one under it still registers: no lockout (S210 TR-7, R2-1)`, async () => {
     const day = new Date('2026-12-01T09:00:00Z');
     const admin = database.as('admin');
-    // The day's cap filled from 14 networks, each under its own share (about 143 of 150): a spread-out crowd.
+    // The day's cap filled by an attacker's 14 networks: 13 at their full 150, one at 45; and a shared network (a hosted
+    // agent platform's) with 5 of its customers' apps today, all counted in the 2,000.
+    const shared = fresh();
     await admin.query(
       `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at, network)
        select 'axcl_' || lpad(to_hex(n), 32, '0'), 'Filler', array['https://a.example/cb'], 'web', array['authorization_code'], $1,
-         'tr7-net-' || (n % 14)
+         case when n <= 1950 then 'tr7-net-' || (n % 13) when n <= 1995 then 'tr7-net-13' else $3 end
        from generate_series(1, $2::int) as n`,
-      [day, MOST_REGISTRATIONS_A_DAY],
+      [day, MOST_REGISTRATIONS_A_DAY, shared],
     );
     try {
       const at = new Date(day.getTime() + 1000);
-      // A network of the crowd is refused, the server's cap,
+      // An attacker's network at its full share is refused its 151st,
       expect(await registerClient(app, keys, registration(), at, 'tr7-net-1')).toEqual({
+        outcome: 'capped',
+        cap: 'network',
+      });
+      // the one at 45 registers up to the busy share, and is then refused, the server's cap,
+      for (let made = 45; made < BUSY_NETWORK_REGISTRATIONS; made += 1) {
+        expect(await registerClient(app, keys, registration(), at, 'tr7-net-13')).toMatchObject({
+          outcome: 'registered',
+        });
+      }
+      expect(await registerClient(app, keys, registration(), at, 'tr7-net-13')).toEqual({
         outcome: 'capped',
         cap: 'server',
       });
-      // while a network that has registered fewer than its few today still registers, up to them, and only then is refused.
-      const quiet = fresh();
-      for (let made = 0; made < QUIET_NETWORK_REGISTRATIONS; made += 1) {
-        expect(await registerClient(app, keys, registration(), at, quiet)).toMatchObject({ outcome: 'registered' });
-      }
-      expect(await registerClient(app, keys, registration(), at, quiet)).toEqual({ outcome: 'capped', cap: 'server' });
+      // while the shared network with 5 registers its 6th: it was refused here when it held 3 or more (R2-1).
+      expect(await registerClient(app, keys, registration(), at, shared)).toMatchObject({ outcome: 'registered' });
       // Another fresh network is let in all the same.
       expect(await registerClient(app, keys, registration(), at, fresh())).toMatchObject({ outcome: 'registered' });
       // A day on, the crowd's network registers again.
@@ -506,7 +514,7 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     ).rejects.toMatchObject({ code: '23514', constraint: 'a_device_flow_is_a_device' });
   });
 
-  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} flows are open, refuses only a busy network, of either kind; a quiet one still opens: no lockout`, async () => {
+  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} flows are open, refuses only a busy source or network, of either kind; one holding a few still opens: no lockout (R2-1)`, async () => {
     const admin = database.as('admin');
     const later = new Date('2027-01-01T09:00:00Z');
     // The server's cap filled by a crowd of 400 networks, 50 open flows each: every one under its own share of 100.
@@ -539,12 +547,33 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
           { source: fresh(), network },
         );
       expect(await codeFlow('tr7-net-2')).toBe('full');
-      // while a network holding fewer than its few open still opens them, of either kind, and only then is refused.
-      const quiet = fresh();
-      expect((await device(later, undefined, fresh(), quiet)).opened).toBe('opened');
-      for (let open = 1; open < QUIET_NETWORK_FLOWS; open += 1) expect(await codeFlow(quiet)).toBe('opened');
-      expect(await codeFlow(quiet)).toBe('full');
-      expect((await device(later, undefined, fresh(), quiet)).opened).toBe('full');
+      // while an address holding 3 open (an office's one IPv4 address, its own network) opens its 4th: it was refused
+      // here when its network held 3 or more (R2-1). It opens up to the busy share, of either kind, and only then is
+      // refused.
+      const office = fresh();
+      const fromOffice = () =>
+        openCodeFlow(
+          app,
+          keys,
+          {
+            id: flowId(),
+            clientId: 'axcl_0123456789abcdef0123456789abcdef',
+            redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+            state: null,
+            codeChallenge: challengeOf('v'.repeat(43)),
+            scopesAsked: ['requests:read'],
+            resource: 'https://app.agentx.example/v1/mcp',
+            browserHash: hashOf(fresh()),
+            createdAt: later,
+          },
+          { source: office, network: office },
+        );
+      expect((await device(later, undefined, office, office)).opened).toBe('opened');
+      for (let open = 1; open < 3; open += 1) expect(await fromOffice()).toBe('opened');
+      expect(await fromOffice()).toBe('opened');
+      for (let open = 4; open < BUSY_SOURCE_FLOWS; open += 1) expect(await fromOffice()).toBe('opened');
+      expect(await fromOffice()).toBe('full');
+      expect((await device(later, undefined, office, office)).opened).toBe('full');
       // Another fresh network opens all the same.
       expect(await codeFlow(fresh())).toBe('opened');
     } finally {
