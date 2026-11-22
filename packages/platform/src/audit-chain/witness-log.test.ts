@@ -1,5 +1,5 @@
 import { createFakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
@@ -31,6 +31,9 @@ const START = new Date('2026-11-20T09:00:00.000Z');
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 
+/** What a log may hold to keep `heads` heads: theirs, and the fingerprints' tenth on top (TR-3). */
+const forHeads = (heads: number): number => Math.ceil((heads * WITNESS_HEAD_BYTES * 11) / 10);
+
 const hash = (fill: number): Buffer => Buffer.alloc(32, fill);
 const head = (seq: bigint, fill: number) => ({ seq, hash: hash(fill) });
 
@@ -49,7 +52,8 @@ function anchorsWith(rebases = new Map<string, Date>(), latest = new Map<string,
     },
     latest: (chain) => {
       const seq = latest.get(name(chain));
-      return seq === undefined ? undefined : { seq };
+      // Its whole hash as the anchors' log keeps it (TR-3: the base a confirming walk starts from).
+      return seq === undefined ? undefined : { seq, hash: hash(Number(seq) + 100) };
     },
   };
 }
@@ -288,16 +292,25 @@ describe('the witness log: reading', () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
     const at = START.getTime();
-    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 1n, 1)], { at: at - 3 * HOUR });
-    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 2n, 1)], { at: at - HOUR });
+    // Each line dated when its file was named, as every writer dates them.
+    const plant = (into: Map<string, Buffer>, folder: string, kind: FileKind, seq: bigint, fileAt: number) =>
+      planted(into, folder, kind, [line(`organisation:${ORG}`, seq, 1, new Date(fileAt))], { at: fileAt });
+    await plant(snapshots.files, 'snapshots', SNAPSHOT, 1n, at - 3 * HOUR);
+    await plant(snapshots.files, 'snapshots', SNAPSHOT, 2n, at - HOUR);
     // A spoiled newer one is passed over, said.
-    await planted(snapshots.files, 'snapshots', SNAPSHOT, [line(`organisation:${ORG}`, 3n, 1)], {
-      at: at - 30 * MINUTE,
-      signing: otherKeys,
-    });
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 10n, 1)], { at: at - HOUR - 10 * MINUTE });
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 11n, 1)], { at: at - HOUR - 2 * MINUTE });
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 12n, 1)], { at: at - MINUTE });
+    await planted(
+      snapshots.files,
+      'snapshots',
+      SNAPSHOT,
+      [line(`organisation:${ORG}`, 3n, 1, new Date(at - 30 * MINUTE))],
+      {
+        at: at - 30 * MINUTE,
+        signing: otherKeys,
+      },
+    );
+    await plant(store.files, 'heads', HEADS, 10n, at - HOUR - 10 * MINUTE);
+    await plant(store.files, 'heads', HEADS, 11n, at - HOUR - 2 * MINUTE);
+    await plant(store.files, 'heads', HEADS, 12n, at - MINUTE);
     const { log, capture } = witnessOn(store, { snapshots });
     expect(log.state()).toBe('unread');
     await log.refresh();
@@ -305,7 +318,7 @@ describe('the witness log: reading', () => {
     expect(seqs(log.pending(CHAIN))).toEqual([12n, 11n, 2n]);
     expect(integrity(capture)).toHaveLength(1);
     // A later refresh lists only what is newer than it read, less the lag: a file landing late within it is read.
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 13n, 1)], { at: at - 2 * MINUTE });
+    await plant(store.files, 'heads', HEADS, 13n, at - 2 * MINUTE);
     await log.refresh();
     expect(seqs(log.pending(CHAIN))).toEqual([13n, 12n, 11n, 2n]);
   });
@@ -313,8 +326,14 @@ describe('the witness log: reading', () => {
   it('with no sound snapshot, a start reads a day of heads files back', async () => {
     const store = createFakeWriteOnceStore();
     const at = START.getTime();
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 1n, 1)], { at: at - 25 * HOUR });
-    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 2n, 1)], { at: at - 23 * HOUR });
+    for (const [seq, fileAt] of [
+      [1n, at - 25 * HOUR],
+      [2n, at - 23 * HOUR],
+    ] as const) {
+      await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, seq, 1, new Date(fileAt))], {
+        at: fileAt,
+      });
+    }
     const { log } = witnessOn(store, { withSnapshots: false });
     await log.refresh();
     expect(seqs(log.pending(CHAIN))).toEqual([2n]);
@@ -556,7 +575,7 @@ describe('the witness log: memory and snapshots', () => {
   it('past what it may hold, the chain holding most lets its lowest head go, loudly, and reads beyondMemory until a rebase: anchors and prunes clear nothing, a snapshot keeps it', async () => {
     const snapshots = createFakeWriteOnceStore();
     const time = clock();
-    const { log, capture } = witnessOn(undefined, { mostBytes: 3 * WITNESS_HEAD_BYTES, snapshots, leads: true, time });
+    const { log, capture } = witnessOn(undefined, { mostBytes: forHeads(3), snapshots, leads: true, time });
     const rebases = new Map<string, Date>();
     log.useAnchors(anchorsWith(rebases, new Map([[ORG, 9n]])));
     for (const seq of [1n, 2n, 3n]) log.soon(CHAIN, head(seq, 1));
@@ -608,5 +627,327 @@ describe('the witness log: memory and snapshots', () => {
     await fresh.log.refresh();
     expect(seqs(fresh.log.pending(CHAIN))).toEqual([5n]);
     expect(seqs(fresh.log.pending(OTHER))).toEqual([2n]);
+  });
+});
+
+describe('TR-3 the witness log: dates, memory, Puts and replays', () => {
+  it('a line dated past its file’s name beyond the clocks’ spread spoils the file; one within it counts, dated at the name, so a rebase after sets it aside', async () => {
+    const store = createFakeWriteOnceStore();
+    const fileAt = START.getTime() - MINUTE;
+    const far = new Date('2099-01-01T00:00:00Z');
+    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 7n, 1, far)], { at: fileAt });
+    // Control: past its name by less than the spread.
+    const near = new Date(fileAt + 4 * MINUTE);
+    await planted(store.files, 'heads', HEADS, [line(`organisation:${OTHER_ORG}`, 7n, 1, near)], { at: fileAt - 1 });
+    const { log, capture } = witnessOn(store);
+    await log.refresh();
+    expect(log.pending(CHAIN)).toEqual([]);
+    expect(integrity(capture).map(({ reason }) => reason)).toEqual(['spoiled']);
+    expect(log.pending(OTHER).map(({ seq, at }) => [seq, at])).toEqual([[7n, fileAt - 1]]);
+    log.useAnchors(anchorsWith(new Map([[OTHER_ORG, new Date(fileAt)]])));
+    expect(log.pending(OTHER)).toEqual([]);
+  });
+
+  it('gives way from the organisation chain holding most, never the platform’s while one is held, its lowest above the anchor first', () => {
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(4) });
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    for (const seq of [1n, 2n, 3n]) log.soon(PLATFORM, head(seq, 1));
+    log.soon(CHAIN, head(1n, 1));
+    log.soon(CHAIN, head(3n, 1));
+    expect(seqs(log.pending(PLATFORM))).toEqual([3n, 2n, 1n]);
+    expect(seqs(log.pending(CHAIN))).toEqual([1n]);
+    expect(log.beyondMemory(CHAIN)).toBe(true);
+    expect(log.beyondMemory(PLATFORM)).toBe(false);
+    // The anchor its fingerprint went above kept, for a walk confirming it to start from.
+    expect(log.baseBelow(CHAIN, 3n)).toEqual({ seq: 2n, hash: hash(102) });
+    // Only the platform's held: it gives way then.
+    const alone = witnessOn(undefined, { mostBytes: forHeads(2) });
+    for (const seq of [1n, 2n, 3n]) alone.log.soon(PLATFORM, head(seq, 1));
+    expect(alone.log.beyondMemory(PLATFORM)).toBe(true);
+  });
+
+  it('each head let go leaves a fingerprint; a walk held to them all, from below the lowest to past the highest, sets the mark aside; one short of either, or not held to one, leaves it', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    // Room for 4 heads and 2 fingerprints.
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(4), snapshots, leads: true, time });
+    for (const seq of [5n, 6n, 7n, 8n, 9n, 10n]) log.soon(CHAIN, head(seq, Number(seq)));
+    expect(seqs(log.pending(CHAIN))).toEqual([10n, 9n, 8n, 7n]);
+    const prints = log.fingerprints(CHAIN);
+    expect(prints.map(({ seq, hash: prefix }) => [seq, prefix.toString('hex')])).toEqual([
+      [5n, hash(5).subarray(0, 16).toString('hex')],
+      [6n, hash(6).subarray(0, 16).toString('hex')],
+    ]);
+    expect(log.fingerprints(OTHER)).toEqual([]);
+    expect(log.walkedPast(CHAIN, 5n, 10n, prints)).toBe(true);
+    expect(log.walkedPast(CHAIN, 4n, 5n, prints)).toBe(true);
+    expect(log.walkedPast(CHAIN, 4n, 10n, prints.slice(1))).toBe(true);
+    // The leader's snapshot keeps the lowest and the fingerprints too: a start from it is set aside the same way.
+    await log.refresh();
+    await log.flush();
+    const restarted = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
+    await restarted.log.refresh();
+    expect(restarted.log.beyondMemory(CHAIN)).toBe(true);
+    expect(restarted.log.fingerprints(CHAIN)).toEqual(prints);
+    expect(restarted.log.walkedPast(CHAIN, 4n, 6n, prints)).toBe(false);
+    expect(log.walkedPast(CHAIN, 4n, 6n, prints)).toBe(false);
+    expect(log.beyondMemory(CHAIN)).toBe(false);
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+  });
+
+  it('fingerprints past their share let the chain holding most go, an organisation’s before the platform’s: said, and a rebase alone sets it aside', () => {
+    const time = clock();
+    const rebases = new Map<string, Date>();
+    // Room for 2 heads, and one fingerprint: forHeads(2) / 11 bytes, of 32 each.
+    const { log, capture } = witnessOn(undefined, { mostBytes: forHeads(2), time });
+    log.useAnchors(anchorsWith(rebases));
+    log.soon(PLATFORM, head(1n, 1));
+    log.soon(PLATFORM, head(2n, 2));
+    log.soon(PLATFORM, head(3n, 3));
+    expect(log.fingerprints(PLATFORM).map(({ seq }) => seq)).toEqual([1n]);
+    log.soon(CHAIN, head(1n, 1));
+    log.soon(CHAIN, head(2n, 2));
+    // CHAIN's head went, and its fingerprint was one too many: its fingerprints let go, the platform's kept.
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+    expect(log.fingerprints(PLATFORM).map(({ seq }) => seq)).toEqual([1n]);
+    expect(log.walkedPast(CHAIN, 0n, 100n, [])).toBe(true);
+    // Said once: a head it let go after (its 2) leaves no fingerprint to overflow again.
+    expect(capture.lines().filter(({ fingerprints }) => fingerprints === false)).toEqual([
+      expect.objectContaining({ event: 'audit.witness_beyond_memory', chain: `organisation:${ORG}` }),
+    ]);
+    rebases.set(ORG, new Date(time.held.at + 1));
+    expect(log.beyondMemory(CHAIN)).toBe(false);
+  });
+
+  it('a rebase after the heads let go sets their fingerprints aside too, asked first', () => {
+    const time = clock();
+    const rebases = new Map<string, Date>();
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(2), time });
+    log.useAnchors(anchorsWith(rebases));
+    for (const seq of [1n, 2n, 3n]) log.soon(CHAIN, head(seq, 1));
+    expect(log.fingerprints(CHAIN).map(({ seq }) => seq)).toEqual([1n]);
+    rebases.set(ORG, new Date(time.held.at + 1));
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+  });
+
+  it('holds what its share says, past ten heads too: the fingerprints’ tenth taken from it', () => {
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(20) });
+    for (let seq = 1n; seq <= 20n; seq += 1n) log.soon(CHAIN, head(seq, 1));
+    expect(log.beyondMemory(CHAIN)).toBe(false);
+    log.soon(CHAIN, head(21n, 1));
+    expect(log.beyondMemory(CHAIN)).toBe(true);
+  });
+
+  it('a heads file can’t carry a fingerprint: only a snapshot does', async () => {
+    const store = createFakeWriteOnceStore();
+    const at = START.getTime() - MINUTE;
+    const print = JSON.stringify({
+      c: `organisation:${ORG}`,
+      s: '4',
+      x: '0'.repeat(32),
+      t: new Date(at).toISOString(),
+    });
+    const released = JSON.stringify({
+      c: `organisation:${ORG}`,
+      s: '3',
+      r: '0'.repeat(32),
+      t: new Date(at).toISOString(),
+    });
+    await planted(store.files, 'heads', HEADS, [print, released, line(`organisation:${ORG}`, 5n, 1, new Date(at))], {
+      at,
+    });
+    const { log } = witnessOn(store, { mostBytes: forHeads(2) });
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([5n]);
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+    // Its own head let go: its fingerprint alone, none from the file.
+    log.soon(CHAIN, head(6n, 6));
+    log.soon(CHAIN, head(7n, 7));
+    expect(log.fingerprints(CHAIN).map(({ seq }) => seq)).toEqual([5n]);
+  });
+
+  it('a snapshot’s mark with no lowest is set aside by a rebase alone; one whose lowest is past its highest spoils it', async () => {
+    const at = START.getTime() - MINUTE;
+    const lost = (more: Record<string, string>) =>
+      JSON.stringify({ c: `organisation:${ORG}`, l: '9', ...more, t: new Date(at).toISOString() });
+    const snapshots = createFakeWriteOnceStore();
+    await planted(snapshots.files, 'snapshots', SNAPSHOT, [lost({})], { at });
+    const { log } = witnessOn(createFakeWriteOnceStore(), { snapshots });
+    await log.refresh();
+    expect(log.walkedPast(CHAIN, 0n, 100n, [])).toBe(true);
+    const bad = createFakeWriteOnceStore();
+    await planted(bad.files, 'snapshots', SNAPSHOT, [lost({ f: '10' })], { at });
+    const spoiled = witnessOn(createFakeWriteOnceStore(), { snapshots: bad });
+    await spoiled.log.refresh();
+    expect(spoiled.log.beyondMemory(CHAIN)).toBe(false);
+    expect(integrity(spoiled.capture).map(({ reason }) => reason)).toEqual(['spoiled']);
+  });
+
+  it('crowded: the organisation chains holding more than one head, the most first, never the platform’s', () => {
+    const { log } = witnessOn();
+    for (const seq of [1n, 2n, 3n]) log.soon(PLATFORM, head(seq, 1));
+    for (const seq of [1n, 2n]) log.soon(CHAIN, head(seq, 1));
+    for (const seq of [1n, 2n, 3n]) log.soon(OTHER, head(seq, 1));
+    log.soon({ kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000003' }, head(1n, 1));
+    expect(log.crowded(5)).toEqual([OTHER, CHAIN]);
+    expect(log.crowded(1)).toEqual([OTHER]);
+  });
+
+  it('a Put not answered within a minute failed: its heads go again in a file named afresh', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { log, heads, capture } = witnessOn(undefined, { waitMs: 10 * MINUTE });
+      let hung = true;
+      let putStarted: () => void = () => undefined;
+      const started = new Promise<void>((resolve) => {
+        putStarted = resolve;
+      });
+      heads.instead.put = (name, bytes) => {
+        putStarted();
+        return hung ? new Promise<void>(() => undefined) : heads.real.put(name, bytes);
+      };
+      const waiting = log.now(CHAIN, head(5n, 1));
+      await started;
+      await vi.advanceTimersByTimeAsync(MINUTE - 1);
+      expect(capture.lines().map(({ event }) => event)).not.toContain('audit.witness_write_failed');
+      hung = false;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(capture.lines().map(({ event }) => event)).toContain('audit.witness_write_failed');
+      await vi.advanceTimersByTimeAsync(1_000);
+      await waiting;
+      expect(namesUnder(heads.files, 'heads')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a head this process wrote already is not queued again (a replay’s); one not yet written is', async () => {
+    const { log, heads } = witnessOn();
+    await log.now(CHAIN, head(5n, 1));
+    expect(heads.calls.puts).toBe(1);
+    await log.now(CHAIN, head(5n, 1));
+    log.soon(CHAIN, head(5n, 1));
+    await log.flush();
+    expect(heads.calls.puts).toBe(1);
+    // Control: another head goes out; one noted twice before its Put goes in it.
+    log.soon(CHAIN, head(6n, 2));
+    log.soon(CHAIN, head(6n, 2));
+    await log.flush();
+    expect(heads.calls.puts).toBe(2);
+    await log.now(CHAIN, head(6n, 2));
+    expect(heads.calls.puts).toBe(2);
+  });
+});
+
+describe('TR-3 heads released on a probe’s finding', () => {
+  it('keep the anchor they went above, in the snapshot too, as the base a confirming walk starts from; let go with them, or by a rebase', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const rebases = new Map<string, Date>();
+    const latest = new Map([[ORG, 2n]]);
+    const { log } = witnessOn(undefined, { snapshots, leads: true, time });
+    log.useAnchors(anchorsWith(rebases, latest));
+    for (const seq of [3n, 4n, 5n]) log.soon(CHAIN, head(seq, Number(seq)));
+    log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    latest.set(ORG, 6n);
+    expect(log.baseBelow(CHAIN, 3n)).toEqual({ seq: 2n, hash: hash(102) });
+    expect(log.baseBelow(CHAIN, 1n)).toBeUndefined();
+    expect(log.baseBelow(OTHER, 9n)).toBeUndefined();
+    await log.refresh();
+    await log.flush();
+    const restarted = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
+    await restarted.log.refresh();
+    expect(restarted.log.baseBelow(CHAIN, 4n)).toEqual({ seq: 2n, hash: hash(102) });
+    // Passed by a walk, the released heads go, and their base with them.
+    restarted.log.walkedPast(CHAIN, 2n, 6n, restarted.log.fingerprints(CHAIN));
+    expect(restarted.log.fingerprints(CHAIN)).toEqual([]);
+    expect(restarted.log.baseBelow(CHAIN, 4n)).toBeUndefined();
+    rebases.set(ORG, new Date(time.held.at + 1));
+    expect(log.baseBelow(CHAIN, 3n)).toBeUndefined();
+  });
+
+  it('a snapshot’s base line with anything else on it spoils the snapshot', async () => {
+    const at = START.getTime() - MINUTE;
+    const base = (more: Record<string, string>) =>
+      JSON.stringify({ c: `organisation:${ORG}`, b: '2', a: 'ab'.repeat(32), ...more, t: new Date(at).toISOString() });
+    const good = createFakeWriteOnceStore();
+    await planted(good.files, 'snapshots', SNAPSHOT, [base({})], { at });
+    const { log, capture } = witnessOn(createFakeWriteOnceStore(), { snapshots: good });
+    await log.refresh();
+    expect(integrity(capture)).toEqual([]);
+    const bad = createFakeWriteOnceStore();
+    await planted(bad.files, 'snapshots', SNAPSHOT, [base({ s: '3' })], { at });
+    const spoiled = witnessOn(createFakeWriteOnceStore(), { snapshots: bad });
+    await spoiled.log.refresh();
+    expect(integrity(spoiled.capture).map(({ reason }) => reason)).toEqual(['spoiled']);
+  });
+
+  const forks = (capture: LogCapture) =>
+    capture.lines().filter((one) => one.event === 'audit.integrity_failed' && one.reason === 'fork');
+
+  it('leave the list as compact heads every walk is held to; the same head noted again stays released, another at its place is a fork', () => {
+    const { log, capture } = witnessOn();
+    for (const seq of [3n, 4n, 5n]) log.soon(CHAIN, head(seq, Number(seq)));
+    // No anchor known for the chain (never anchored, or its shard let go): nothing released.
+    log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    expect(seqs(log.pending(CHAIN))).toEqual([5n, 4n, 3n]);
+    // Anchored at 3: those above it alone.
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 3n]])));
+    log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    expect(seqs(log.pending(CHAIN))).toEqual([5n, 3n]);
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    log.release(CHAIN, [head(3n, 3)]);
+    expect(seqs(log.pending(CHAIN))).toEqual([5n]);
+    expect(log.beyondMemory(CHAIN)).toBe(false);
+    expect(log.fingerprints(CHAIN).map(({ seq, hash: prefix }) => [seq, prefix.toString('hex')])).toEqual([
+      [4n, hash(4).subarray(0, 16).toString('hex')],
+      [3n, hash(3).subarray(0, 16).toString('hex')],
+    ]);
+    log.soon(CHAIN, head(4n, 4));
+    expect(seqs(log.pending(CHAIN))).toEqual([5n]);
+    expect(forks(capture)).toEqual([]);
+    log.soon(CHAIN, head(3n, 9));
+    expect(forks(capture).map(({ seq }) => seq)).toEqual(['3']);
+    // One not held is not released.
+    log.release(CHAIN, [head(7n, 7)]);
+    expect(log.fingerprints(CHAIN)).toHaveLength(2);
+  });
+
+  it('a walk from the anchor held to them that passes them lets them go; one that began at or above, stopped below, or wasn’t held to them, none', () => {
+    const { log } = witnessOn();
+    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
+    for (const seq of [3n, 4n, 5n]) log.soon(CHAIN, head(seq, Number(seq)));
+    log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    const asked = log.fingerprints(CHAIN);
+    const three = asked.filter(({ seq }) => seq === 3n);
+    // Began at 3: 3 is not its to pass. Stopped at 3: 4 not passed. Not held to 4: 4 stays.
+    log.walkedPast(CHAIN, 3n, 3n, asked);
+    expect(log.fingerprints(CHAIN)).toHaveLength(2);
+    log.walkedPast(CHAIN, 0n, 9n, three);
+    expect(log.fingerprints(CHAIN).map(({ seq }) => seq)).toEqual([4n]);
+    expect(log.walkedPast(CHAIN, 3n, 4n, asked)).toBe(false);
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+  });
+
+  it('kept in the leader’s snapshot; past the compact heads’ share a head stays held; a rebase after one sets it aside', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const rebases = new Map<string, Date>();
+    // Room for 2 heads and 1 compact one.
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(2), snapshots, leads: true, time });
+    log.useAnchors(anchorsWith(rebases, new Map([[ORG, 2n]])));
+    log.soon(CHAIN, head(3n, 3));
+    log.soon(CHAIN, head(4n, 4));
+    log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    expect(seqs(log.pending(CHAIN))).toEqual([3n]);
+    expect(log.fingerprints(CHAIN).map(({ seq }) => seq)).toEqual([4n]);
+    await log.refresh();
+    await log.flush();
+    const restarted = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
+    await restarted.log.refresh();
+    expect(restarted.log.fingerprints(CHAIN)).toEqual(log.fingerprints(CHAIN));
+    expect(seqs(restarted.log.pending(CHAIN))).toEqual([3n]);
+    rebases.set(ORG, new Date(time.held.at + 1));
+    expect(log.fingerprints(CHAIN)).toEqual([]);
   });
 });

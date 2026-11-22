@@ -311,6 +311,24 @@ describe('checking in a transaction of its own, as the anchor check does', () =>
     });
   });
 
+  it('TR-3 probes the head against the heads copies witnessed, in one statement: all on the chain, none; one above the head, at another event, or a head not sealed, that one', async () => {
+    await record(started(1), started(2));
+    const { rows } = await sql<{ seq: bigint; hash: Buffer }>`
+      select seq, hash from platform_controls.audit_events order by seq
+    `.execute(app);
+    const [one, two] = rows;
+    if (one === undefined || two === undefined) throw new Error('Two events should be recorded');
+    expect(await chain.probeWitnessed(app, [])).toBeUndefined();
+    expect(await chain.probeWitnessed(app, [two, one])).toBeUndefined();
+    const above = { seq: 3n, hash: Buffer.alloc(32, 3) };
+    expect(await chain.probeWitnessed(app, [above, two])).toEqual(above);
+    const elsewhere = { seq: one.seq, hash: Buffer.alloc(32, 9) };
+    expect(await chain.probeWitnessed(app, [two, elsewhere])).toEqual(elsewhere);
+    // The head's seal broken past the app: no head believed, so the highest held to is the cut.
+    await tamperAsOwner("update platform_controls.audit_head set mac = pg_catalog.decode(repeat('00', 32), 'hex')");
+    expect(await chain.probeWitnessed(app, [two, one])).toEqual(two);
+  });
+
   it('gives up on a statement after 10 seconds, a wait for a lock included, rather than hang', async () => {
     await record(started(1));
     const holder = await database.connect('admin');

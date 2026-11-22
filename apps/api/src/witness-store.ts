@@ -11,11 +11,15 @@
 // Its job (`createWitnessJob`), on every copy: what waits written every few seconds (the `soon` heads; a `now` head
 // goes at once, without it), the store read again on the copy's cadence (the jobs copy every 10 s, as its hand-offs and
 // probes need it fresh; a web copy every minute, as its anchors), and the leader's probe of the chains that gained a
-// head (anchor-check.ts's probeWitnessed). As the API stops, what waits is written.
+// head, and of those holding most (anchor-check.ts's probeWitnessed: TR-3, the heads it confirms let go between anchor
+// runs, so a burst never fills what may be held). As the API stops, what waits is written.
+//
+// What may be held (TR-3): enough for an anchor interval's heads at the target rate, with headroom, or the heap share
+// where that is more, and never past a tenth of the heap: a spike may slow a chain's anchoring, never stop it.
 import { getHeapStatistics } from 'node:v8';
 
 import type { Clock } from '@agentx/core/shared-kernel';
-import { type Chain, createWitnessLog, type WitnessLog } from '@agentx/platform/audit-chain';
+import { type Chain, createWitnessLog, WITNESS_HEAD_BYTES, type WitnessLog } from '@agentx/platform/audit-chain';
 import { type Config, LOCAL_ONLY, type StorePlace } from '@agentx/platform/config';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -39,8 +43,31 @@ export const JOBS_WITNESS_EVERY_MS = 10_000;
 /** How often a web copy reads it again: as its anchors (web-anchors.ts). */
 export const WEB_WITNESS_EVERY_MS = 60_000;
 
-/** The share of the heap the witnessed heads may take: 80,000 heads in a 1 GiB heap. */
+/** The share of the heap the witnessed heads may take at least: 80,000 heads in a 1 GiB heap. */
 const HEAP_SHARE = 0.005;
+
+/** The most of the heap they may take, however busy: a tenth, as the digest's. */
+const MOST_HEAP_SHARE = 0.1;
+
+/** The chain writes a second what may be held is sized for (4D2e's target: 170 a second), and the headroom on it. */
+const TARGET_WRITES_A_SECOND = 170;
+const HEADROOM = 4;
+
+/** How many of the chains holding most the leader probes after each read, beside those that gained a head. */
+const CROWDED_PROBED = 50;
+
+/**
+ * What the witnessed heads may take (the header): an anchor interval's heads at the target rate, with headroom, or the
+ * heap share where that is more; never past MOST_HEAP_SHARE.
+ */
+export function witnessMostBytes(anchorSeconds: number, heapLimit: number): number {
+  // With the fingerprints' tenth on top (witness-log.ts).
+  const forTheRate = (anchorSeconds * TARGET_WRITES_A_SECOND * HEADROOM * WITNESS_HEAD_BYTES * 11) / 10;
+  return Math.floor(Math.min(heapLimit * MOST_HEAP_SHARE, Math.max(heapLimit * HEAP_SHARE, forTheRate)));
+}
+
+/** A chain's name, to tell two apart. */
+const chainNamed = (chain: Chain): string => (chain.kind === 'platform' ? 'platform' : chain.orgId.toLowerCase());
 
 /** The store a place names, or none. */
 export function storeAt({ directory, container }: StorePlace): WriteOnceStore | undefined {
@@ -89,13 +116,14 @@ export function witnessOf(
     dropsAtAnchor: config.role === 'web',
     // As the anchor check's own stale limit: what the store may fail before that is the alert.
     alertAfterMs: config.audit.anchorSeconds * 3 * 1000,
-    mostBytes: Math.floor(getHeapStatistics().heap_size_limit * HEAP_SHARE),
+    mostBytes: witnessMostBytes(config.audit.anchorSeconds, getHeapStatistics().heap_size_limit),
   });
 }
 
 /**
  * The witness log's job (the header): its writes every WITNESS_FLUSH_EVERY_MS, its reads every `refreshEveryMs`, each
- * read's gained chains handed to `afterRefresh` (the leader's probe). Writes what waits as it stops. Never throws.
+ * read's gained chains and the chains holding most handed to `afterRefresh` (the leader's probe). Writes what waits as
+ * it stops. Never throws.
  */
 export function createWitnessJob({
   witness,
@@ -103,7 +131,7 @@ export function createWitnessJob({
   now,
   afterRefresh,
 }: {
-  readonly witness: Pick<WitnessLog, 'flush' | 'refresh'>;
+  readonly witness: Pick<WitnessLog, 'flush' | 'refresh'> & Partial<Pick<WitnessLog, 'crowded'>>;
   readonly refreshEveryMs: number;
   readonly now: () => number;
   readonly afterRefresh?: (gained: readonly Chain[], signal?: AbortSignal) => Promise<void>;
@@ -116,7 +144,12 @@ export function createWitnessJob({
       if (refreshedAt !== undefined && at - refreshedAt < refreshEveryMs) return;
       refreshedAt = at;
       const gained = await witness.refresh();
-      if (gained.length > 0) await afterRefresh?.(gained, signal);
+      // Those holding most too, so heads confirmed between anchor runs are let go (TR-3), each chain once.
+      const probed = [...gained];
+      for (const chain of witness.crowded?.(CROWDED_PROBED) ?? []) {
+        if (!probed.some((one) => chainNamed(one) === chainNamed(chain))) probed.push(chain);
+      }
+      if (probed.length > 0) await afterRefresh?.(probed, signal);
     },
   };
   return {
