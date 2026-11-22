@@ -33,7 +33,11 @@
 //   starts, that network's oldest unfinished sign-ins giving way (S208): one
 //   caller can't lock everyone behind a shared address out. That is warned of
 //   the same way; a flow that gave way finds nothing at its callback, so that
-//   browser is refused SIGN_IN_FAILED and starts again.
+//   browser is refused SIGN_IN_FAILED and starts again. So that one caller
+//   can't push the others out at the address's whole rate, sign-ins started
+//   are held to SIGN_IN_STARTS a minute per network, as the open flows are
+//   counted (an IPv4 address, an IPv6 /48: clientSite) (TR-17):
+//   past it RATE_LIMITED, 429 with Retry-After, and no flow begun.
 // - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
 //   a step-up for a challenge of the signed-in person's own session: a flow
 //   cookie, and off to the login service to sign in again (`prompt=login`).
@@ -84,7 +88,7 @@ import { z } from 'zod';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { capWarning } from './oauth-authorizing.ts';
-import { clientSite } from './rate-limit.ts';
+import { clientSite, createAddressCounter, type ProxyTrust, shareOfCopies } from './rate-limit.ts';
 import type { SecurityEventSink } from './security-recorder.ts';
 
 export const FLOW_COOKIE = '__Host-agentx-flow';
@@ -108,6 +112,10 @@ export interface SignInRoutesOptions {
   readonly securityEvents: SecurityEventSink;
   /** When a cap's warning was last said (S206 V8); the system's clock when not given. */
   readonly clock?: Clock;
+  /** Which proxies are trusted to name the client's address, for the sign-ins' own limit per address (TR-17). */
+  readonly trust: ProxyTrust;
+  /** How many `web` copies share that limit, each counting its share. */
+  readonly copies: number;
 }
 
 /** The attributes both cookies share: a `__Host-` cookie must be Secure, on Path=/, with no Domain. */
@@ -226,12 +234,28 @@ const SIGN_OUT_BODY_LIMIT = 1;
 
 const PUBLIC = { access: ['public'] } as const;
 
+/**
+ * The most sign-ins one network starts in a minute, across every `web` copy (TR-17): an IPv4 address or an IPv6 /48,
+ * as its open flows are counted (`clientSite`), so a caller with many /64s in one /48 can't make that network's oldest
+ * unfinished sign-ins give way (S208) at the address's whole rate; yet room for an office behind one address.
+ */
+export const SIGN_IN_STARTS = { most: 20, windowMs: 60_000 } as const;
+
 /** How long to wait before starting again when the login service can't be reached: long enough for it to wake from zero. */
 const UNAVAILABLE_RETRY_SECONDS = 15;
 
 export function registerSignIn(
   app: FastifyInstance,
-  { signIn, sessionSeconds, loginSessions, logger, securityEvents, clock = systemClock }: SignInRoutesOptions,
+  {
+    signIn,
+    sessionSeconds,
+    loginSessions,
+    logger,
+    securityEvents,
+    clock = systemClock,
+    trust,
+    copies,
+  }: SignInRoutesOptions,
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   // S206 V8: each cap's refusals said at most once a minute, with how many, so a flood is a line a minute.
@@ -302,34 +326,45 @@ export function registerSignIn(
       .send({});
   };
 
-  routes.get('/v1/auth/sign-in', { schema: SIGN_IN_SCHEMA, config: PUBLIC }, async (request, reply) => {
-    if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
-    let begun;
-    try {
-      begun = await signIn.begin(request.query.returnTo, clientSite(request.ip));
-    } catch (thrown) {
-      if (thrown instanceof SignInFailed && thrown.failure === 'provider_unavailable') {
-        return unavailable(request, reply, thrown.message);
+  const startLimit = createAddressCounter(
+    app,
+    { most: shareOfCopies(SIGN_IN_STARTS.most, copies), windowMs: SIGN_IN_STARTS.windowMs },
+    trust,
+    clientSite,
+  );
+
+  routes.get(
+    '/v1/auth/sign-in',
+    { schema: SIGN_IN_SCHEMA, config: PUBLIC, onRequest: startLimit },
+    async (request, reply) => {
+      if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
+      let begun;
+      try {
+        begun = await signIn.begin(request.query.returnTo, clientSite(request.ip));
+      } catch (thrown) {
+        if (thrown instanceof SignInFailed && thrown.failure === 'provider_unavailable') {
+          return unavailable(request, reply, thrown.message);
+        }
+        if (thrown instanceof SignInBusy) {
+          capped();
+          return sendErrorBody(
+            reply.header('retry-after', String(UNAVAILABLE_RETRY_SECONDS)),
+            503,
+            'SIGN_IN_UNAVAILABLE',
+            request.id,
+          );
+        }
+        throw thrown;
       }
-      if (thrown instanceof SignInBusy) {
-        capped();
-        return sendErrorBody(
-          reply.header('retry-after', String(UNAVAILABLE_RETRY_SECONDS)),
-          503,
-          'SIGN_IN_UNAVAILABLE',
-          request.id,
-        );
-      }
-      throw thrown;
-    }
-    const { url, flowId } = begun;
-    if (begun.gaveWay === true) gaveWay();
-    return reply
-      .code(302)
-      .header('location', url)
-      .header('set-cookie', cookie(FLOW_COOKIE, flowId, 'Lax', FLOW_COOKIE_SECONDS))
-      .send({});
-  });
+      const { url, flowId } = begun;
+      if (begun.gaveWay === true) gaveWay();
+      return reply
+        .code(302)
+        .header('location', url)
+        .header('set-cookie', cookie(FLOW_COOKIE, flowId, 'Lax', FLOW_COOKIE_SECONDS))
+        .send({});
+    },
+  );
 
   routes.get('/v1/auth/callback', { schema: CALLBACK_SCHEMA, config: PUBLIC }, async (request, reply) => {
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);

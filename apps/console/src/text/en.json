@@ -1346,7 +1346,7 @@
   "myActivity.exports.range": "{from} to {to}, {count} requests",
   "myActivity.exports.case": "case {ref}",
   "myActivity.tooLarge": "This range holds more than 50,000 requests, too many for one download. Pick a shorter range and download it in parts.",
-  "myActivity.spent": "You've made 5 downloads of your activity in the last hour. Try again later.",
+  "myActivity.spent": "You've made as many downloads of your activity as you may for now: 5 an hour, 20 a day. Try again later.",
   "agents.refused.CONNECTION_REVOKED": "This connection is already revoked. Nothing was changed.",
   "connect.title": "Connect an app to Agent X",
   "connect.says": "An app that says it is “{name}” asks to act as one of your agents. Agent X can't check that name: the app chose it itself.",
