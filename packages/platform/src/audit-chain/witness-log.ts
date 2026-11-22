@@ -1388,6 +1388,29 @@ export function createWitnessLog({
     }
   };
 
+  /** The set-aside names not read yet back to `since`, newest first, and how many were misdated (readSetAside). */
+  const setAsideNames = async (
+    at: string,
+    since: number | undefined,
+  ): Promise<{
+    readonly waiting: readonly { readonly name: string; readonly at: number }[];
+    readonly misdated: number;
+  }> => {
+    const waiting: { readonly name: string; readonly at: number }[] = [];
+    let misdated = 0;
+    for await (const file of namesOf(timed, at, since)) {
+      if (since !== undefined && file.at < since) break;
+      if (setAsideRead.has(file.name)) continue;
+      if (file.created !== undefined && Math.abs(file.at - file.created) > MOST_AHEAD_MS) {
+        misdated += 1;
+        setAsideRead.add(file.name);
+      } else {
+        waiting.push(file);
+      }
+    }
+    return { waiting, misdated };
+  };
+
   /**
    * The set-aside files not read yet, each signed with the operator's key, which no copy of the API holds: back to
    * `since` (setAsideSince; none, the whole folder: the operator's own check), at most MOST_SET_ASIDE_READS a pass, so
@@ -1398,18 +1421,7 @@ export function createWitnessLog({
    */
   const readSetAside = async (began: number, since: number | undefined): Promise<void> => {
     const at = folder('set-aside');
-    const waiting: { readonly name: string; readonly at: number }[] = [];
-    let misdated = 0;
-    for await (const file of namesOf(timed, at, since)) {
-      if (since !== undefined && file.at < since) break;
-      if (setAsideRead.has(file.name)) continue;
-      if (file.created !== undefined && Math.abs(file.at - file.created) > MOST_AHEAD_MS) {
-        misdated += 1;
-        setAsideRead.add(file.name);
-        continue;
-      }
-      waiting.push(file);
-    }
+    const { waiting, misdated } = await setAsideNames(at, since);
     // A start's reach so far (setAsideDownTo), and where its next pass looks back to if this one stops short.
     if (since !== undefined && state === 'unread') setAsideFloor = Math.min(setAsideFloor ?? since, since);
     // Listed newest first.
@@ -1492,6 +1504,22 @@ export function createWitnessLog({
   };
 
   /**
+   * Whether a start's snapshot walk stops at a file dated `at` (TR-7 D3): past a set-aside writer's snapshots it goes no
+   * further back than a day, nor past a day's of them, as a long-lived leader's would otherwise have a start read
+   * months of heads files before it reads at all.
+   */
+  const pastSetAsideReach = (
+    at: number,
+    kind: 'aside' | 'late' | undefined,
+    asideSoFar: number,
+    began: number,
+  ): boolean => {
+    const old = at < began - SET_ASIDE_READ_BACK_MS;
+    if (kind === 'aside') return old || asideSoFar >= MOST_SET_ASIDE_SNAPSHOTS;
+    return old && asideSoFar > 0;
+  };
+
+  /**
    * The newest sound snapshot taken in, and its time (`at`); none with no snapshots' store, or none sound past a day's
    * spoiled ones. Those of a writer set aside are passed over apart (TR-14: a long-lived leader's would otherwise use up
    * the spoiled ones' count, and a start lose what older snapshots held), said once, with the oldest's time (`asideFrom`):
@@ -1510,10 +1538,7 @@ export function createWitnessLog({
     for await (const file of namesOf(snapshots, folder('snapshots'))) {
       await setAsideDownTo(file.at, began);
       const kind = asideOf(file);
-      // Past a set-aside writer's snapshots, no further back than a day (TR-7 D3: a long-lived leader's would otherwise
-      // have a start read months of heads files before it reads at all).
-      const old = file.at < began - SET_ASIDE_READ_BACK_MS;
-      if ((kind === 'aside' && (old || aside.count >= MOST_SET_ASIDE_SNAPSHOTS)) || (old && aside.count > 0)) {
+      if (pastSetAsideReach(file.at, kind, aside.count, began)) {
         capped = true;
         break;
       }
