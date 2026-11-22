@@ -316,6 +316,62 @@ describe('TR-14 attribution through snapshots', () => {
   });
 });
 
+describe('TR-7 review: a start under a set-aside flood', () => {
+  it('fetches a bounded number, takes no snapshot past them, holds a stop from the day’s heads files, and says so', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const leader = copyOn(store, { snapshots, leads: true, time });
+    await leader.log.refresh();
+    leader.log.soon(OTHER, head(1n, 1));
+    await leader.log.flush();
+    // A stop named before the leader's snapshot, left out of it.
+    const honest = copyOn(store, { time });
+    time.at -= 10 * MINUTE;
+    await honest.log.now(CHAIN, head(7n, 7));
+    time.at += 11 * MINUTE;
+    for (let one = 0; one < 1500; one += 1) {
+      const name = fileName('e1/set-aside/', time.at - 1500 + one);
+      store.files.set(name, Buffer.from('junk'));
+      store.created.set(name, time.at - 1500 + one);
+    }
+    time.at += 1000;
+    const real = await setAsideFile(store, leader.log.writer(), time.at);
+    store.created.set(real, time.at);
+    const before = { ...store.calls };
+    const starting = copyOn(store, { snapshots, time });
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(starting.log.state()).toBe('read');
+    // The set-asides fetched at most the start's share, and the day's few heads files.
+    expect(store.calls.smallGets - before.smallGets).toBeLessThanOrEqual(1000 + 5);
+    expect(snapshots.calls.smallGets).toBe(0);
+    expect(seqs(starting.log.pending(CHAIN))).toEqual([7n]);
+    // Said once a pass, never once a junk file.
+    expect(starting.alarms('spoiled')).toEqual([expect.objectContaining({ folder: 'e1/set-aside/', files: 1000 })]);
+    expect(starting.alarms('set_aside_flood')).toHaveLength(1);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+  });
+});
+
+describe('TR-7 review: a start reading set-asides further back for an old snapshot', () => {
+  it('takes no snapshot that a set-aside it left unfetched could pass over', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const old = AT.getTime() - 48 * HOUR;
+    await plant(snapshots, 'snapshots', SNAPSHOT, [headLine(4n, 4, old)], old);
+    for (let one = 0; one < 1001; one += 1) {
+      const name = fileName('e1/set-aside/', old + one);
+      store.files.set(name, Buffer.from('junk'));
+      store.created.set(name, old + one);
+    }
+    const starting = copyOn(store, { snapshots });
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(snapshots.calls.smallGets).toBe(0);
+    expect(starting.log.pending(CHAIN)).toEqual([]);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+  });
+});
+
 describe('TR-14 set-aside snapshots at a start', () => {
   it("goes back past a day's of a set-aside leader's snapshots, a quarter hour apart, to an older one, its state whole", async () => {
     const store = createFakeWriteOnceStore();
