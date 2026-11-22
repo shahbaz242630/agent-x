@@ -35,7 +35,12 @@
 // newest-first to what it read already, less five minutes for the clocks and late writes; a start reads the newest sound
 // snapshot first (passing over at most a day's spoiled ones), then every heads file since, less the same; with no sound
 // snapshot, a day of heads files back (a head older than that above its chain's anchor means the anchor check has been
-// stalled a day, its own alarm).
+// stalled a day, its own alarm). A name carries its writer's clock, so a copy running slow would name files behind every
+// reader's look back and never be read (TR-12): a start, and every five minutes a wide pass, also lists an hour further
+// back by name and takes every file the store says landed since the last wide pass saw (its own Creation-Time, never
+// the writer's clock). A file named further than the clocks' spread from its landing is the alarm (`clock_skew`), each
+// copy's own files too, so a copy slower than the hour says so itself; a name is dated past the later of the reader's
+// clock and its landing for `future`.
 //
 // Held: every head read or noted (`pending`, a list per chain, never only the highest: a stale copy's head on a cut
 // branch must not bury the honest one below it), set aside by a rebase dated after it. Let go only once confirmed on the
@@ -193,6 +198,15 @@ const MOST_AHEAD_MS = 5 * 60_000;
 
 /** How far before the newest file read a later read looks again: a file named earlier may land later. */
 const LAG_MS = MOST_AHEAD_MS;
+
+/**
+ * How far back by name a wide pass lists for files landed since the last, however named (TR-12): a writer whose clock
+ * runs up to this slow still has its files read, and said; one slower is said by its own reads (the header).
+ */
+const MOST_SLOW_MS = 60 * 60_000;
+
+/** How often a read is a wide pass (TR-12): a slow writer's head is read this late at most, and said. */
+const WIDE_EVERY_MS = 5 * 60_000;
 
 /** How far back a start with no sound snapshot reads heads files: a day, far past any anchor's turn. */
 const NO_SNAPSHOT_READ_BACK_MS = 24 * 60 * 60_000;
@@ -404,6 +418,10 @@ function firstBelow(list: readonly WitnessedHead[], seq: bigint): number {
   return low;
 }
 
+/** The later of two times, either perhaps unknown. */
+const laterOf = (one: number | undefined, other: number | undefined): number | undefined =>
+  one === undefined || other === undefined ? (one ?? other) : Math.max(one, other);
+
 /** The chain's object, from its name. */
 const chainOfName = (name: string): Chain =>
   name === 'platform' ? { kind: 'platform' } : { kind: 'organisation', orgId: name.slice('organisation:'.length) };
@@ -511,7 +529,13 @@ export function createWitnessLog({
   // short newest-first would otherwise pass over the older files it never reached.
   let headsFrom: number | undefined;
   let wholeFrom: number | undefined;
-  const namesRead = new Set<string>();
+  // Each name read, with when it landed by the store's clock where a list said (TR-12): this copy's own, none till listed.
+  const namesRead = new Map<string, number | undefined>();
+  // The store's time up to which a wide pass saw every file landed, when this copy began the last, and when a slow or
+  // fast clock was last said (TR-12).
+  let landedTo: number | undefined;
+  let wideAt: number | undefined;
+  let skewSaidAt: number | undefined;
   let lastSnapshotAt: number | undefined;
   let changedSinceSnapshot = false;
   let prunedSinceSnapshot = 0;
@@ -808,7 +832,7 @@ export function createWitnessLog({
         taking.map(({ chain, head }) => lineText(chain, head)),
       );
       await putWithin(name, bytes);
-      namesRead.add(name);
+      namesRead.set(name, undefined);
       for (const queued of taking) {
         remember(queued.chain, queued.head);
         unconfirmed.get(queued.chain)?.delete(queued);
@@ -960,12 +984,15 @@ export function createWitnessLog({
     else releasedRead.set(line.chain, [...(releasedRead.get(line.chain) ?? []), line.released]);
   };
 
-  /** Every well-named file of a folder, newest first; a name dated past the clock the alarm, passed over. */
+  /**
+   * Every well-named file of a folder, newest first; a name dated past the clocks' spread from the later of this clock
+   * and its landing in the store (TR-12: a slow reader still reads honest files) the alarm, passed over.
+   */
   const namesOf = (from: WriteOnceStore, at: string) =>
     namesIn(
       from,
       at,
-      () => now().getTime() + MOST_AHEAD_MS,
+      (created) => Math.max(now().getTime(), created ?? 0) + MOST_AHEAD_MS,
       (fileAt) => {
         alarm('future', { folder: at, fileAt: new Date(fileAt).toISOString() });
       },
@@ -1001,56 +1028,121 @@ export function createWitnessLog({
   };
 
   /**
-   * Every heads file of both folders named at or after `since`, not read yet, each under its own folder's key: the
-   * newest name read, for the next pass to look back from once this one has ended whole.
+   * A file seen in a list, kept with when it landed (TR-12); its name dated further from that than the clocks' spread
+   * said, at most once a SAY_EVERY_MS: a copy whose clock is off, whose files a later reader may find late.
    */
-  const readHeads = async (since: number, gained: Set<string>): Promise<number | undefined> => {
+  const landedAs = (
+    at: string,
+    file: { readonly name: string; readonly at: number; readonly created: number | undefined },
+  ): void => {
+    namesRead.set(file.name, file.created);
+    if (file.created === undefined || Math.abs(file.at - file.created) <= MOST_AHEAD_MS) return;
+    const said = now().getTime();
+    if (skewSaidAt !== undefined && said - skewSaidAt < SAY_EVERY_MS) return;
+    skewSaidAt = said;
+    const fields = {
+      folder: at,
+      fileAt: new Date(file.at).toISOString(),
+      landedAt: new Date(file.created).toISOString(),
+      skewMs: file.at - file.created,
+    };
+    logger.error('audit.witness_clock_skew', fields);
+    alarm('clock_skew', fields);
+  };
+
+  /**
+   * Whether a listed file is to be read: not read yet, and named at or after `since` or landed at or after `landedFrom`
+   * (a wide pass). This copy's own, listed for the first time, has its clock judged by its landing too.
+   */
+  const wanted = (
+    at: string,
+    file: { readonly name: string; readonly at: number; readonly created: number | undefined },
+    since: number,
+    landedFrom: number | undefined,
+  ): boolean => {
+    if (namesRead.has(file.name)) {
+      if (namesRead.get(file.name) === undefined) landedAs(at, file);
+      return false;
+    }
+    return file.at >= since || (landedFrom !== undefined && (file.created ?? file.at) >= landedFrom);
+  };
+
+  /** Ended whole: where the next pass looks back from, and the names no later pass reaches let go. */
+  const endedWhole = (
+    { newest, landed }: { readonly newest: number | undefined; readonly landed: number | undefined },
+    began: number,
+    wide: boolean,
+  ): void => {
+    if (newest !== undefined) headsFrom = Math.max(headsFrom ?? newest, newest);
+    wholeFrom = began;
+    if (wide) {
+      wideAt = began;
+      landedTo = laterOf(landedTo, landed);
+    }
+    // Names older than any later look back reaches, and landed before any wide pass takes again, need no remembering.
+    const keepFrom = Math.min(headsFrom ?? 0, wholeFrom) - 2 * LAG_MS;
+    const keepLanded = landedTo === undefined ? keepFrom : landedTo - 2 * LAG_MS;
+    for (const [name, created] of namesRead) {
+      const countdown = name.slice(name.lastIndexOf('/') + 1, name.lastIndexOf('/') + 14);
+      const at = timeOfName(countdown);
+      if (at < keepFrom && (created ?? at) < keepLanded) namesRead.delete(name);
+    }
+  };
+
+  /**
+   * Every heads file of both folders not read yet, each under its own folder's key: named at or after `since`, or on a
+   * wide pass (TR-12) landed in the store at or after `landedFrom`, however named, back to MOST_SLOW_MS before `since`,
+   * so a writer's slow clock never hides its files. The newest name read, for the next pass to look back from once this
+   * one has ended whole, and the newest landing listed.
+   */
+  const readHeads = async (
+    since: number,
+    gained: Set<string>,
+    landedFrom?: number,
+  ): Promise<{ readonly newest: number | undefined; readonly landed: number | undefined }> => {
     let newest: number | undefined;
+    let landed: number | undefined;
+    const listFrom = landedFrom === undefined ? since : since - MOST_SLOW_MS;
     for (const [at, kind] of [
       [folder('heads'), HEADS_FILE],
       [folder('operator'), OPERATOR_FILE],
     ] as const) {
       for await (const file of namesOf(store, at)) {
-        if (file.at < since) break;
-        if (namesRead.has(file.name)) continue;
+        if (file.at < listFrom) break;
+        landed = laterOf(landed, file.created);
+        if (!wanted(at, file, since, landedFrom)) continue;
         if (!(await takeFile(store, file, kind, gained))) {
           alarm('spoiled', { folder: at, fileAt: new Date(file.at).toISOString() });
         }
-        namesRead.add(file.name);
+        landedAs(at, file);
         newest = Math.max(newest ?? file.at, file.at);
       }
     }
-    return newest;
+    return { newest, landed };
   };
 
   const refreshOnce = async (): Promise<Refreshed> => {
     const began = now();
     const gained = new Set<string>();
+    // A wide pass every WIDE_EVERY_MS, a start's always (TR-12).
+    const wide = wideAt === undefined || began.getTime() - wideAt >= WIDE_EVERY_MS;
     try {
-      let newest: number | undefined;
+      let read: Awaited<ReturnType<typeof readHeads>>;
       if (state === 'read') {
         // From the older of the newest file the last whole pass read and when it began, so nothing it didn't reach is
         // passed over, less the lag for a file named earlier that landed later.
-        const from = Math.min(headsFrom ?? began.getTime(), wholeFrom ?? began.getTime());
-        newest = await readHeads(from - LAG_MS, gained);
+        const from = Math.min(headsFrom ?? began.getTime(), wholeFrom ?? began.getTime()) - LAG_MS;
+        // A wide one also takes what landed since the last saw every landing, less the lag for a Put landing late.
+        read = await readHeads(from, gained, wide ? (landedTo ?? from) - LAG_MS : undefined);
       } else {
         const snapshot = await readSnapshot(gained);
         if (snapshot !== undefined) lastSnapshotAt = snapshot;
-        newest = await readHeads(
-          snapshot === undefined ? began.getTime() - NO_SNAPSHOT_READ_BACK_MS : snapshot - LAG_MS,
-          gained,
-        );
+        const since = snapshot === undefined ? began.getTime() - NO_SNAPSHOT_READ_BACK_MS : snapshot - LAG_MS;
+        read = await readHeads(since, gained, since);
         state = 'read';
       }
       // Ended whole: only now does the next pass look back from here.
-      if (newest !== undefined) headsFrom = Math.max(headsFrom ?? newest, newest);
-      wholeFrom = began.getTime();
-      // Names older than any later look back reaches need no remembering.
-      const keepFrom = Math.min(headsFrom ?? 0, wholeFrom) - 2 * LAG_MS;
-      for (const name of namesRead) {
-        const countdown = name.slice(name.lastIndexOf('/') + 1, name.lastIndexOf('/') + 14);
-        if (timeOfName(countdown) < keepFrom) namesRead.delete(name);
-      }
+      endedWhole(read, began.getTime(), wide);
       readFailingSince = undefined;
       freshAt = began;
       return { chains: [...gained].map(chainOfName), whole: true };

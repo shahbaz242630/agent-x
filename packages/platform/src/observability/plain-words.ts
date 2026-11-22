@@ -388,6 +388,11 @@ export const PLAIN_WORDS = {
     broke: 'That organisation’s chain is anchored no more, and its payments wait, until the head is checked.',
     next: 'Nothing if it clears at the next check. If it repeats, check the database and the anchor check’s lines.',
   },
+  'audit.witness_clock_skew': {
+    happened: 'A copy of the API has a clock more than five minutes off the witness store’s.',
+    broke: 'Its chain heads reach other copies up to five minutes late; over an hour slow, never.',
+    next: 'Restart the copy whose clock is off so it resyncs: playbook section H.',
+  },
   'audit.witness_beyond_memory': {
     happened: 'This copy had more audit chain heads than its memory allows, and let the oldest go.',
     broke: 'The chain named is anchored no more and its payments wait: a head let go cannot be checked.',

@@ -53,6 +53,11 @@ export interface WriteOncePage {
   readonly foreign: number;
   /** What to give the next call to go on; none at the end. */
   readonly next: string | undefined;
+  /**
+   * When each listed file landed, by the store's own clock (Azure's Creation-Time), where the store says: never the
+   * writer's clock, which a file's name carries (TR-12). Left out where the store keeps none.
+   */
+  readonly created?: ReadonlyMap<string, number>;
 }
 
 export interface WriteOnceStore {
@@ -143,13 +148,32 @@ function pageIn(xml: string): WriteOncePage {
   if (!/<EnumerationResults[\s>]/.test(xml) || !xml.includes('</EnumerationResults>')) {
     throw new BlobStoreFailed(STORE, 'the blob service answered a list with something that is not a whole list');
   }
-  const listed = [...xml.matchAll(/<Blob>\s*<Name>([^<]*)<\/Name>/g)].map((match) => match[1] ?? '');
+  // Each blob as its name and what follows it up to the next blob: its Properties.
+  const blobs = xml
+    .split('<Blob>')
+    .slice(1)
+    .flatMap((part) => {
+      const name = /^\s*<Name>([^<]*)<\/Name>/.exec(part)?.[1];
+      return name === undefined ? [] : [{ name, part }];
+    });
+  const listed = blobs.map(({ name }) => name);
   const names = listed.filter(isBlobName);
+  // Each file's landing, as its Properties give it (Creation-Time; Last-Modified is the same for a file never changed).
+  const created = new Map<string, number>();
+  for (const { name, part } of blobs) {
+    const at = Date.parse(/<(Creation-Time|Last-Modified)>([^<]*)<\/\1>/.exec(part)?.[2] ?? '');
+    if (isBlobName(name) && Number.isFinite(at)) created.set(name, at);
+  }
   const marker = /<NextMarker>([^<]*)<\/NextMarker>/.exec(xml)?.[1] ?? '';
   if (marker !== '' && !MARKER.test(marker)) {
     throw new BlobStoreFailed(STORE, 'the blob service answered a list with a continuation of another form');
   }
-  return { names, foreign: listed.length - names.length, next: marker === '' ? undefined : marker };
+  return {
+    names,
+    foreign: listed.length - names.length,
+    next: marker === '' ? undefined : marker,
+    ...(created.size > 0 ? { created } : {}),
+  };
 }
 
 export function azureWriteOnceStore({

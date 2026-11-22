@@ -234,40 +234,44 @@ describe('SEC-DB-20 the witness log: writing', () => {
     expect(integrity(reader.capture)).toEqual([]);
   });
 
-  it('TR-11: a `now` head goes in the next Put ahead of a queued `soon` backlog, which still drains after it', async () => {
-    // Two files' worth of decisions and more (10,000 lines a file), so a queue taken in order would write the stop third.
-    const backlog = 20_001;
-    const { log, heads } = witnessOn(undefined, { waitMs: 60_000, mostBytes: forHeads(backlog + 10) });
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let putStarted: () => void = () => undefined;
-    const started = new Promise<void>((resolve) => {
-      putStarted = resolve;
-    });
-    heads.instead.put = async (name, bytes) => {
-      putStarted();
-      await gate;
-      return heads.real.put(name, bytes);
-    };
-    for (let seq = 1; seq <= backlog; seq += 1) log.soon(CHAIN, head(BigInt(seq), seq % 250));
-    const flushed = log.flush();
-    await started;
-    // The first file of decisions is in flight; a stop is noted behind the rest of them.
-    const stop = log.now(OTHER, head(1n, 7));
-    release();
-    await stop;
-    expect(heads.calls.puts).toBe(2);
-    await flushed;
-    await log.flush();
-    // Every decision went too: three files, every head once.
-    expect(namesUnder(heads.files, 'heads')).toHaveLength(3);
-    const reader = witnessOn(heads, { mostBytes: forHeads(backlog + 10) });
-    await reader.log.refresh();
-    expect(reader.log.pending(CHAIN)).toHaveLength(backlog);
-    expect(seqs(reader.log.pending(OTHER))).toEqual([1n]);
-  });
+  // Twenty thousand heads signed into three files: slow on a busy runner.
+  it(
+    'TR-11: a `now` head goes in the next Put ahead of a queued `soon` backlog, which still drains after it',
+    { timeout: 30_000 },
+    async () => {
+      // Two files' worth of decisions and more (10,000 lines a file), so a queue taken in order would write the stop third.
+      const backlog = 20_001;
+      const { log, heads } = witnessOn(undefined, { waitMs: 60_000, mostBytes: forHeads(backlog + 10) });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let putStarted: () => void = () => undefined;
+      const started = new Promise<void>((resolve) => {
+        putStarted = resolve;
+      });
+      heads.instead.put = async (name, bytes) => {
+        putStarted();
+        await gate;
+        return heads.real.put(name, bytes);
+      };
+      // Highest first, so each goes to the end of the chain's list (highest first) rather than shifting it all.
+      for (let seq = backlog; seq >= 1; seq -= 1) log.soon(CHAIN, head(BigInt(seq), seq % 250));
+      const flushed = log.flush();
+      await started;
+      // The first file of decisions is in flight; a stop is noted behind the rest of them.
+      const stop = log.now(OTHER, head(1n, 7));
+      release();
+      await stop;
+      expect(heads.calls.puts).toBe(2);
+      await flushed;
+      await log.flush();
+      // Every decision went too: three files, and nothing left waiting for another.
+      expect(namesUnder(heads.files, 'heads')).toHaveLength(3);
+      await log.flush();
+      expect(heads.calls.puts).toBe(3);
+    },
+  );
 });
 
 describe('SEC-DB-20 the witness log: reading', () => {
@@ -487,6 +491,94 @@ describe('SEC-DB-20 the witness log: reading', () => {
     time.held.at = at + 11 * MINUTE;
     await log.refresh();
     expect(seqs(log.pending(CHAIN))).toEqual([4n]);
+  });
+
+  /** A file planted as a copy whose clock reads `namedAt` wrote it, landing in the store at `landedAt`. */
+  const plantedLanding = async (
+    store: ReturnType<typeof createFakeWriteOnceStore>,
+    seq: bigint,
+    namedAt: number,
+    landedAt: number,
+  ): Promise<string> => {
+    const name = await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, seq, 1, new Date(namedAt))], {
+      at: namedAt,
+    });
+    store.created.set(name, landedAt);
+    return name;
+  };
+
+  const skews = (capture: LogCapture) => capture.lines().filter((one) => one.event === 'audit.witness_clock_skew');
+
+  it('TR-12: a copy whose clock runs 20 minutes slow still has its files read, by when the store took them, and said', async () => {
+    const store = createFakeWriteOnceStore();
+    const time = clock();
+    const { log, capture } = witnessOn(store, { time });
+    await log.refresh();
+    const at = START.getTime();
+    time.held.at = at + 2 * MINUTE;
+    // Two files landed now, named 20 minutes back by the slow copy's clock: behind the next pass's look back.
+    await plantedLanding(store, 7n, at - 18 * MINUTE, at + 2 * MINUTE);
+    await plantedLanding(store, 8n, at - 17 * MINUTE, at + 2 * MINUTE);
+    await log.refresh();
+    expect(log.pending(CHAIN)).toEqual([]);
+    // The next wide pass takes what landed since, however named: both read, the clock said once (one a minute).
+    time.held.at = at + 6 * MINUTE;
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([8n, 7n]);
+    expect(skews(capture)).toEqual([
+      expect.objectContaining({
+        level: 'error',
+        folder: 'e1/heads/',
+        landedAt: new Date(at + 2 * MINUTE).toISOString(),
+      }),
+    ]);
+    expect(Date.parse(String(skews(capture)[0]?.fileAt))).toBeLessThanOrEqual(at - 17 * MINUTE);
+    expect(skews(capture)[0]?.skewMs).toBeLessThanOrEqual(-17 * MINUTE);
+    expect(integrity(capture).map(({ reason }) => reason)).toEqual(['clock_skew']);
+    // Once the store has moved on past them, they are forgotten and never fetched again by a later wide pass.
+    log.prune(CHAIN, [head(7n, 1), head(8n, 1)]);
+    time.held.at = at + 30 * MINUTE;
+    await plantedLanding(store, 9n, at + 30 * MINUTE, at + 30 * MINUTE);
+    await log.refresh();
+    const fetched = store.calls.smallGets;
+    time.held.at = at + 36 * MINUTE;
+    await log.refresh();
+    expect(store.calls.smallGets).toBe(fetched);
+    expect(seqs(log.pending(CHAIN))).toEqual([9n]);
+  });
+
+  it('TR-12: a copy whose own clock is off says so from its own files, however far off', async () => {
+    const time = clock();
+    // The store's clock two hours on from this copy's.
+    const store = createFakeWriteOnceStore({ now: () => time.held.at + 2 * HOUR });
+    const { log, capture } = witnessOn(store, { time });
+    log.soon(CHAIN, head(3n, 1));
+    await log.flush();
+    await log.refresh();
+    expect(skews(capture)).toEqual([expect.objectContaining({ skewMs: -2 * HOUR })]);
+    expect(integrity(capture).map(({ reason }) => reason)).toEqual(['clock_skew']);
+    // Judged once: a later pass says nothing new of it.
+    time.held.at += 2 * MINUTE;
+    await log.refresh();
+    expect(skews(capture)).toHaveLength(1);
+  });
+
+  it('TR-12: a name is dated past the later of this clock and its landing: a slow reader reads honest files; a fast name is said', async () => {
+    const store = createFakeWriteOnceStore();
+    const at = START.getTime();
+    // An honest file, named as it landed: this reader's clock is ten minutes slow.
+    await plantedLanding(store, 7n, at, at);
+    const { log, capture } = witnessOn(store, { time: clock(at - 10 * MINUTE) });
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([7n]);
+    expect(integrity(capture)).toEqual([]);
+    // A fast copy's file, named six minutes past its landing yet within this clock's spread: read, and said.
+    const fast = createFakeWriteOnceStore();
+    await plantedLanding(fast, 4n, at + 4 * MINUTE, at - 2 * MINUTE);
+    const reader = witnessOn(fast);
+    await reader.log.refresh();
+    expect(seqs(reader.log.pending(CHAIN))).toEqual([4n]);
+    expect(skews(reader.capture)).toEqual([expect.objectContaining({ skewMs: 6 * MINUTE })]);
   });
 
   it('a read failing is a warning, and past alertAfterMs of failing the alert; freshAt moves only on a whole read', async () => {

@@ -10,14 +10,20 @@ export interface FakeWriteOnceStore {
   /** The store itself, whatever `instead` says. */
   readonly real: WriteOnceStore;
   readonly files: Map<string, Buffer>;
+  /**
+   * When each file landed by the store's clock, as Azure's list gives it (TR-12): set by a Put where the store was given
+   * a clock, or by a test for a file it planted. A list gives those of its page, where any.
+   */
+  readonly created: Map<string, number>;
   /** How many of each call reached `store`. */
   readonly calls: { puts: number; lists: number; gets: number; smallGets: number };
   /** Set to make a call do something else. */
   readonly instead: Partial<WriteOnceStore>;
 }
 
-export function createFakeWriteOnceStore(): FakeWriteOnceStore {
+export function createFakeWriteOnceStore({ now }: { readonly now?: () => number } = {}): FakeWriteOnceStore {
   const files = new Map<string, Buffer>();
+  const created = new Map<string, number>();
   const calls = { puts: 0, lists: 0, gets: 0, smallGets: 0 };
   const instead: Partial<WriteOnceStore> = {};
 
@@ -25,6 +31,7 @@ export function createFakeWriteOnceStore(): FakeWriteOnceStore {
     put(name, bytes) {
       if (files.has(name)) return Promise.reject(new OverwriteRefused());
       files.set(name, bytes);
+      if (now !== undefined) created.set(name, now());
       return Promise.resolve();
     },
     list(start, most, after) {
@@ -32,7 +39,18 @@ export function createFakeWriteOnceStore(): FakeWriteOnceStore {
         .filter((name) => name.startsWith(start) && (after === undefined || name > after))
         .toSorted();
       const page = names.slice(0, most);
-      return Promise.resolve({ names: page, foreign: 0, next: names.length > most ? page.at(-1) : undefined });
+      const landed = new Map(
+        page.flatMap((name) => {
+          const at = created.get(name);
+          return at === undefined ? [] : [[name, at] as const];
+        }),
+      );
+      return Promise.resolve({
+        names: page,
+        foreign: 0,
+        next: names.length > most ? page.at(-1) : undefined,
+        ...(landed.size > 0 ? { created: landed } : {}),
+      });
     },
     get(name) {
       const bytes = files.get(name);
@@ -64,5 +82,5 @@ export function createFakeWriteOnceStore(): FakeWriteOnceStore {
     },
   };
 
-  return { store, real, files, calls, instead };
+  return { store, real, files, created, calls, instead };
 }

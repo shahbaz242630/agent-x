@@ -406,6 +406,25 @@ describe('SEC-ANC-01 4D2e E3 the write-once store on Azure', () => {
     expect(page).toEqual({ names: ['e1/deltas/1'], foreign: 1, next: undefined });
   });
 
+  it('gives each file’s landing by the store’s clock, as its Properties say it (TR-12); none where they don’t', async () => {
+    const page = await answering(
+      '<EnumerationResults><Blobs>' +
+        '<Blob><Name>e1/heads/1</Name><Properties><Creation-Time>Fri, 20 Nov 2026 09:00:00 GMT</Creation-Time><Last-Modified>Fri, 20 Nov 2026 09:00:01 GMT</Last-Modified></Properties></Blob>' +
+        '<Blob><Name>e1/heads/2</Name><Properties><Last-Modified>Fri, 20 Nov 2026 09:05:00 GMT</Last-Modified></Properties></Blob>' +
+        '<Blob><Name>e1/heads/3</Name><Properties><Creation-Time>not a time</Creation-Time></Properties></Blob>' +
+        '<Blob><Name>../odd</Name><Properties><Creation-Time>Fri, 20 Nov 2026 09:00:00 GMT</Creation-Time></Properties></Blob>' +
+        '</Blobs><NextMarker /></EnumerationResults>',
+    ).list('e1/', 10);
+
+    expect(page.names).toEqual(['e1/heads/1', 'e1/heads/2', 'e1/heads/3']);
+    expect(page.created).toEqual(
+      new Map([
+        ['e1/heads/1', Date.parse('2026-11-20T09:00:00Z')],
+        ['e1/heads/2', Date.parse('2026-11-20T09:05:00Z')],
+      ]),
+    );
+  });
+
   it('refuses a continuation of another form rather than send it on', async () => {
     await expect(
       answering('<EnumerationResults><NextMarker>a&amp;b</NextMarker></EnumerationResults>').list('e1/', 10),
