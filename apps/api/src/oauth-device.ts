@@ -53,6 +53,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { capWarning, flowSourceOf } from './oauth-authorizing.ts';
+import { createOauthCeilings, type OauthCeilings, oauthTableCounts } from './oauth-ceilings.ts';
 import type { OauthClients } from './oauth-clients.ts';
 import type { OauthError } from './oauth-errors.ts';
 import type { Capabilities } from './oauth-wire.ts';
@@ -141,6 +142,7 @@ export function createOauthDevice({
   capabilities,
   clients,
   copies = 1,
+  ceilings = createOauthCeilings({ counts: oauthTableCounts(database), clock, logger }),
 }: {
   readonly database: Database<OauthTables>;
   /** Seals each flow as it opens, and checks a flow's seal as it is claimed (S205, oauth/flow-seals.ts). */
@@ -152,6 +154,8 @@ export function createOauthDevice({
   readonly clients: OauthClients;
   /** The API's `web` copies (AGENTX_WEB_COPIES): each holds its share of the failed lookups. */
   readonly copies?: number;
+  /** The alarm-only ceilings (S210 final), shared with the code flow's; undefined: its own. */
+  readonly ceilings?: OauthCeilings | undefined;
 }): OauthDevice {
   const sourceCapped = capWarning(logger, clock, 'oauth.source_capped', {
     kind: 'device',
@@ -265,6 +269,7 @@ export function createOauthDevice({
           return refused(400, 'invalid_target', 'The resource is not this server’s MCP endpoint.');
         }
         const flow = await opened(client.clientId, scopes, flowSourceOf(ip));
+        await ceilings.flows();
         if (flow.outcome !== 'opened') {
           capNoted(flow.outcome, correlationId);
           return refused(

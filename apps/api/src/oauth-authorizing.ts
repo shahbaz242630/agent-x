@@ -44,6 +44,7 @@ import { type Database, isRetryable, isStatementLimit } from '@agentx/platform/d
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 
+import { createOauthCeilings, type OauthCeilings, oauthTableCounts } from './oauth-ceilings.ts';
 import type { OauthClients } from './oauth-clients.ts';
 import { backToClient, type Capabilities } from './oauth-wire.ts';
 import { clientKey, clientNetwork, clientSite } from './rate-limit.ts';
@@ -178,6 +179,7 @@ export function createOauthAuthorizing({
   logger,
   capabilities,
   clients,
+  ceilings = createOauthCeilings({ counts: oauthTableCounts(database), clock, logger }),
 }: {
   readonly database: Database<OauthTables>;
   /** Seals each flow as it opens (S205, oauth/flow-seals.ts). */
@@ -188,6 +190,8 @@ export function createOauthAuthorizing({
   readonly capabilities: Capabilities;
   /** Registered clients, and those named by an allowlisted metadata document (6E3c). */
   readonly clients: OauthClients;
+  /** The alarm-only ceilings (S210 final), shared with the device flow's; undefined: its own. */
+  readonly ceilings?: OauthCeilings | undefined;
 }): OauthAuthorizing {
   const flowsCapped = capWarning(logger, clock, 'oauth.flows_capped', { most: MOST_OPEN_FLOWS });
   const sourceFlowsCapped = capWarning(logger, clock, 'oauth.source_capped', {
@@ -244,6 +248,7 @@ export function createOauthAuthorizing({
       const checked = checkRegistration(asked);
       if (checked.outcome === 'invalid') return checked;
       const registered = await registerClient(database, keys, checked.client, clock.now(), clientNetwork(ip));
+      await ceilings.registrations();
       if (registered.outcome === 'registered') return registered;
       if (registered.cap === 'server') registrationsCapped();
       else networkRegistrationsCapped();
@@ -306,6 +311,7 @@ export function createOauthAuthorizing({
       },
       from,
     );
+    await ceilings.flows();
     const why = notOpened(opened);
     return why === undefined ? { outcome: 'opened', flowId, cookie: browser } : refused('temporarily_unavailable', why);
   }

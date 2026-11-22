@@ -74,6 +74,7 @@ export {
   BUSY_NETWORK_REGISTRATIONS,
   type Registered,
   registerClient,
+  registrationsSince,
   sweepClientNetworks,
   sweepClients,
 } from './infrastructure/clients.ts';
@@ -109,6 +110,7 @@ export {
   type FlowDecision,
   type FlowRead,
   openCodeFlow,
+  openFlowsHeld,
   sweepFlows,
 } from './infrastructure/flows.ts';
 export type { OauthTables } from './infrastructure/tables.ts';

@@ -42,6 +42,7 @@ import { connectionsOfLeaving, createConnectionChanges } from './connection-chan
 import { createConnectionConsents } from './connection-consents.ts';
 import { createCredentialCheck } from './credentials.ts';
 import { createOauthAuthorizing } from './oauth-authorizing.ts';
+import { createOauthCeilings, oauthTableCounts } from './oauth-ceilings.ts';
 import { createClientMetadataFetch } from './oauth-client-metadata.ts';
 import { createOauthClients } from './oauth-clients.ts';
 import { createOauthDevice } from './oauth-device.ts';
@@ -169,6 +170,8 @@ export async function startWeb(
             trusted: metadataOrigins,
           }),
   });
+  // One for the code flow and the device flow both, so each table's alarm is counted at most once a minute (S210 final).
+  const oauthCeilings = createOauthCeilings({ counts: oauthTableCounts(database), clock: systemClock, logger });
   const checkCredential = createCredentialCheck({
     keys: keyCheck,
     connections: config.http.mcpOauth
@@ -344,6 +347,7 @@ export async function startWeb(
         logger,
         capabilities,
         clients: oauthClients,
+        ceilings: oauthCeilings,
       }),
       device: createOauthDevice({
         database,
@@ -354,6 +358,7 @@ export async function startWeb(
         capabilities,
         clients: oauthClients,
         copies: config.http.webCopies,
+        ceilings: oauthCeilings,
       }),
       grants: createOauthGrants({
         database,

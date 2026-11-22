@@ -657,6 +657,21 @@ export const PLAIN_WORDS = {
     broke: "Only busy networks wait; a network's first few apps still register, and registered apps still connect.",
     next: 'Look for many networks registering over and over: a spread-out attack.',
   },
+  'oauth.registrations_past_ceiling': {
+    happened: "Today's MCP app registrations passed five times Agent X's daily total, from many quiet networks.",
+    broke: 'Nobody was refused: quiet networks still register. The table grows far faster than any real day.',
+    next: 'Look for many networks each registering a few apps: a spread-out attack. Block them at the front door.',
+  },
+  'oauth.flows_past_ceiling': {
+    happened: 'Open OAuth sign-ins passed five times their total, from many quiet networks.',
+    broke: 'Nobody was refused: quiet networks still connect. The table grows far faster than any real use.',
+    next: 'Look for many addresses each opening a few sign-ins: a spread-out attack. Block them at the front door.',
+  },
+  'oauth.ceiling_unread': {
+    happened: 'The check that counts MCP app registrations or open OAuth sign-ins against their alarm could not read.',
+    broke: 'Nothing was refused; only that alarm was not checked this minute.',
+    next: 'Nothing if rare: it counts again within a minute. If it repeats, check the database is healthy.',
+  },
   'oauth.flows_capped': {
     happened:
       'So many OAuth sign-ins were under way that Agent X refused new ones from networks already holding a few.',
