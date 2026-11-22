@@ -36,8 +36,25 @@ const countedDown = (ms: number): string => String(LAST_MS - ms).padStart(13, '0
 /** The time a name's countdown stands for. */
 export const timeOfName = (countdown: string): number => LAST_MS - Number(countdown);
 
-/** A new file's name in `folder` (ending `/`), dated `at`. */
-export const fileName = (folder: string, at: number): string => `${folder}${countedDown(at)}-${randomUUID()}`;
+/**
+ * A new file's name in `folder` (ending `/`), dated `at`; where a `writer` (WRITER_ID) is given, its 12 hex characters
+ * open the UUID (TR-14), so a list names who wrote each file, its closing line signs it with the name, and readers of
+ * any build take the name as before.
+ */
+export const fileName = (folder: string, at: number, writer?: string): string => {
+  const random = randomUUID();
+  const id = writer === undefined ? random : writer.slice(0, 8) + '-' + writer.slice(8) + random.slice(13);
+  return `${folder}${countedDown(at)}-${id}`;
+};
+
+/** A writer's ID (TR-14): 12 hex characters, made at random by each process that writes witness files. */
+export const WRITER_ID = /^[0-9a-f]{12}$/;
+
+/** The writer a well-formed name says (fileName): the first 12 hex characters of its UUID. */
+export const writerOfName = (name: string): string => {
+  const id = name.slice(name.lastIndexOf('/') + 15);
+  return `${id.slice(0, 8)}${id.slice(9, 13)}`;
+};
 
 /** A line as JSON, or undefined where it isn't. */
 export function parsed(line: string): unknown {

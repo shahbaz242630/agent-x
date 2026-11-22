@@ -27,6 +27,7 @@ import {
   stateRecoveryRequest,
   stateRestoreRequest,
   UUID_V7,
+  witnessSetAsideRequest,
 } from '../../apps/operator/src/request.ts';
 import type { Az, AzResult } from './deploy.ts';
 import { jobName, JOBS_API, UsageError } from './jobs.ts';
@@ -64,6 +65,8 @@ import {
   stateRecoveryPlan,
   stateRestore,
   USAGE,
+  parseWitnessSetAside,
+  witnessSetAside,
 } from './operator.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
 
@@ -272,6 +275,8 @@ type Ending =
   | 'contacts-none'
   | 'contacts-refused'
   | 'contacts-other'
+  | 'set-aside'
+  | 'set-aside-other'
   | 'person-exported'
   | 'person-exported-sealed'
   | 'person-exported-unsealed';
@@ -824,6 +829,9 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     said({ event: 'operator.counting_contacts', orgId: OTHER_ID, count: 0, contacts: [] }),
     TERMINATED,
   ],
+  // A set-aside's line names its writer, the request's only ID.
+  'set-aside': (writer) => [said({ event: 'operator.witness_writer_set_aside', writer }), TERMINATED],
+  'set-aside-other': () => [said({ event: 'operator.witness_writer_set_aside', writer: '0123456789ab' }), TERMINATED],
   'resumed-other': () => [
     said({ event: 'operator.handoff_resumed', platformEventId: OTHER_ID }),
     said({ event: 'operator.handoff_told', platformEventId: OTHER_ID, told: 3, toldBefore: 0, failed: 0 }),
@@ -867,6 +875,8 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'contacts-listed',
   'contacts-none',
   'contacts-other',
+  'set-aside',
+  'set-aside-other',
 ]);
 
 /** How Azure settles a change: the state it ends in, or never. */
@@ -1129,6 +1139,7 @@ class FakeAzure implements Az {
         'chain-rebase': 12,
         'factor-reset-notice': 8,
         'counting-contacts': 2,
+        'witness-set-aside': 2,
       }[String(words[0])] ?? 4;
     const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
@@ -3330,5 +3341,82 @@ describe("PL-29 follow-up: an organisation's authority rows planned and repaired
     ).resolves.toBe(2);
     expect(az.calls).toEqual([]);
     expect(lines).toEqual([`${problem}\n${USAGE}`]);
+  });
+});
+
+describe("TR-14 a witness writer set aside, on the operator's job (playbook H)", () => {
+  const WRITER = 'a1b2c3d4e5f6';
+  const shape = 'say witness-set-aside --writer <writer ID, 12 hex>, and nothing else';
+
+  async function setAsideRun(script: Script = {}) {
+    const az = new FakeAzure({ ending: 'set-aside', ...script });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await witnessSetAside(
+      { writer: WRITER },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+    );
+    return { status, az, said: lines };
+  }
+
+  it('reads the writer alone, 12 lower-case hex, and refuses anything else before writing anything', () => {
+    expect(parseWitnessSetAside(['witness-set-aside', '--writer', WRITER])).toEqual({ writer: WRITER });
+    for (const argv of [
+      ['witness-set-aside'],
+      ['witness-set-aside', '--id', WRITER],
+      ['witness-set-aside', '--writer', WRITER, '--id', EARLIER_ID],
+    ]) {
+      expect(() => parseWitnessSetAside(argv)).toThrow(shape);
+    }
+    for (const writer of [WRITER.toUpperCase(), `${WRITER}0`, 'a1b2c3d4e5fg']) {
+      expect(() => parseWitnessSetAside(['witness-set-aside', '--writer', writer])).toThrow(
+        "the writer's ID is 12 hex characters in lower case",
+      );
+    }
+  });
+
+  it("writes the operator's request, runs it, puts [] back, and says the next steps once the line is in the store", async () => {
+    const done = await setAsideRun();
+    expect(done.status).toBe(0);
+    expect(done.az.heldAtStart).toBe(witnessSetAsideRequest(WRITER));
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.at(-1)).toBe(
+      `Writer ${WRITER} is set aside: every copy of the API passes over its witness files from its next read, each said as the alarm. Restart its copy, wait five minutes, then rebase each chain held (playbook H).`,
+    );
+  });
+
+  it('never takes a line about another writer for this one, nor a run whose lines say nothing; a refusal is said', async () => {
+    for (const ending of ['set-aside-other', 'silent'] as const) {
+      const done = await setAsideRun({ ending });
+      expect({ ending, status: done.status }).toEqual({ ending, status: 1 });
+      expect(done.said.at(-1)).toBe(
+        "The run's lines don't say what it did: they may not all have arrived. Read the lines above. Run the same command again: a writer set aside twice is set aside once.",
+      );
+    }
+    const empty = await setAsideRun({ ending: 'no-request', states: ['Failed'] });
+    expect(empty.status).toBe(1);
+    expect(empty.said.at(-1)).toBe(
+      "The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again: a writer set aside twice is set aside once.",
+    );
+  });
+
+  it('is read by main as its own command, saying how to use it, and ending 2, when asked it wrongly', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['witness-set-aside', '--writer'],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([`${shape}${String.fromCharCode(10)}${USAGE}`]);
   });
 });

@@ -87,9 +87,12 @@ describe('TR-1 the witness log as the config names it', () => {
     witness.soon(CHAIN, { seq: 3n, hash: Buffer.alloc(32, 3) });
     await witness.flush();
     expect(capture.lines().map(({ event }) => event)).toEqual([
+      // TR-14: its writer's ID, said once as it starts, beside the platform's own columns naming the copy.
+      'audit.witness_writer',
       'audit.web_witness_read_failed',
       'audit.witness_write_failed',
     ]);
+    expect(capture.lines()[0]).toEqual(expect.objectContaining({ writer: witness.writer() }));
   });
 });
 

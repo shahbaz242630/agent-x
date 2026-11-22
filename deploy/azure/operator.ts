@@ -15,6 +15,12 @@
 //   node deploy/azure/operator.ts factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>]
 //   node deploy/azure/operator.ts counting-contacts --org <organisation ID>
 //   node deploy/azure/operator.ts person-activity-export --user <user ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
+//   node deploy/azure/operator.ts witness-set-aside --writer <writer ID>
+//
+// witness-set-aside (TR-14, playbook H) sets a witness writer aside: every copy
+// of the API passes over its witness files from its next read, each said as
+// the alarm. The ID is the fork alarm's `writer` (the operator's step in
+// witness-log.ts's header says which). Run again, it sets nothing aside twice.
 //
 // person-activity-export (CO8b, D2) exports one person's own activity log
 // for a case, as activity-export does an organisation's: recorded on the
@@ -160,6 +166,10 @@ import {
   PLAN_DIGEST_HEX,
   restoreCheckRequest,
   UUID_V7,
+  WITNESS_SET_ASIDE,
+  WITNESS_SET_ASIDE_USAGE,
+  WITNESS_WRITER,
+  witnessSetAsideRequest,
 } from '../../apps/operator/src/request.ts';
 import { MOST_EXPORT_DAYS } from '../../packages/core/src/modules/evidence/domain/exports.ts';
 import { EVIDENCE_REFERENCE, REBASE_REASONS } from '../../packages/platform/src/audit-chain/rebase.ts';
@@ -276,6 +286,7 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>]
   node deploy/azure/operator.ts counting-contacts --org <organisation ID>
   node deploy/azure/operator.ts person-activity-export --user <user ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
+  node deploy/azure/operator.ts ${WITNESS_SET_ASIDE_USAGE}
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -1134,6 +1145,49 @@ export function countingContacts(asked: CountingContactsArguments, steps: JobSte
   }));
 }
 
+/** A witness writer to set aside (TR-14, playbook H): its ID alone. */
+export interface WitnessSetAsideArguments {
+  readonly writer: string;
+}
+
+/** What was asked for, or a UsageError saying why it can't be done. */
+export function parseWitnessSetAside(argv: readonly string[]): WitnessSetAsideArguments {
+  const [command, flag, writer, ...rest] = argv;
+  if (command !== WITNESS_SET_ASIDE || flag !== '--writer' || writer === undefined || rest.length > 0) {
+    throw new UsageError(`say ${WITNESS_SET_ASIDE_USAGE}, and nothing else`);
+  }
+  if (!WITNESS_WRITER.test(writer)) {
+    throw new UsageError("the writer's ID is 12 hex characters in lower case, as the fork alarm's `writer` names it");
+  }
+  return { writer };
+}
+
+/** Said after anything unclear: a writer set aside twice is set aside once. */
+const SET_ASIDE_AGAIN = 'Run the same command again: a writer set aside twice is set aside once.';
+
+/** What a set-aside's run found, from the command's own line about this writer: 0 once it is in the store. */
+function witnessSetAsideOutcome(steps: JobSteps, lines: readonly LogLine[], writer: string): number {
+  const said = commandLines(lines);
+  if (said.some((line) => line.event === 'operator.witness_writer_set_aside' && line.writer === writer)) {
+    steps.say(
+      `Writer ${writer} is set aside: every copy of the API passes over its witness files from its next read, each said as the alarm. Restart its copy, wait five minutes, then rebase each chain held (playbook H).`,
+    );
+    return 0;
+  }
+  return refusedOrUnclear(steps, said, SET_ASIDE_AGAIN);
+}
+
+/** Sets a witness writer aside, on the operator's job (TR-14): 0 once its line is in the witness store. */
+export function witnessSetAside(asked: WitnessSetAsideArguments, steps: JobSteps): Promise<number> {
+  return runRequest(steps, () => ({
+    text: witnessSetAsideRequest(asked.writer),
+    intro: `Setting witness writer ${asked.writer} aside: one line signed with the operator's key, to the witness store.`,
+    tryAgain: SET_ASIDE_AGAIN,
+    mayStillHold: `The request may still be on ${jobName('operator')}. ${SET_ASIDE_AGAIN} It takes the request off at its end, as does deploy.ts apps.`,
+    judge: (_run, lines) => witnessSetAsideOutcome(steps, lines, asked.writer),
+  }));
+}
+
 /**
  * A chain recovery plan the partner asked for (4D2e E9): the organisation, whether a fork may be planned away, and
  * whether the plan may end short of its anchor (AT9).
@@ -1747,6 +1801,10 @@ export function main(
       if (argv[0] === COUNTING_CONTACTS) {
         const asked = parseCountingContacts(argv);
         return (steps) => countingContacts(asked, steps);
+      }
+      if (argv[0] === WITNESS_SET_ASIDE) {
+        const asked = parseWitnessSetAside(argv);
+        return (steps) => witnessSetAside(asked, steps);
       }
       if (argv[0] === 'chain-recovery-plan') {
         const asked = parseRecoveryPlan(argv);

@@ -76,13 +76,50 @@
 // released head left only the anchor check holding it, so a stop released on a fooled probe, its cut branch put back,
 // was paid before the next anchor run raised the alarm. Kept as released rather than held whole until a linked walk
 // passes it, as release exists to keep a busy chain's memory flat between anchor runs.
+//
+// Writers (TR-14, threat R-12): every copy shares the `audit-anchor` key, so one broken into can sign heads that fork
+// every organisation's chain, each held until rebased. Each process makes a writer ID at random (12 hex characters)
+// that opens every file name it writes (signed-files.ts: fileName), so the closing line signs it; the API says it once
+// as it starts (witness-store.ts: `audit.witness_writer`), where the platform's own columns on the line (RevisionName, ContainerGroupName: the
+// replica) tell which copy holds it. The fork alarm names the writer of both heads (`writer`, `against`; a head from a
+// snapshot names the snapshot's writer). A copy can claim any ID, so a name is never trusted alone: a file named for a
+// process's own ID that it never wrote is the alarm (`impersonated`), and the operator signs the set-aside list,
+// `e<epoch>/set-aside/` beside the heads (`operator-signing`, which no copy of the API holds, and the store, which the
+// database's owner can't reach), each file's lines `{w}` a writer set aside. Every copy reads it first in every
+// refresh, then passes over each heads file and snapshot of those writers, each the alarm (`set_aside`, by name), so
+// nothing is skipped unsaid. A copy that finds its own ID set aside says so (`own_writer_set_aside`) and writes on
+// under a new one. A set-aside is for good, as the store keeps it: a new process never has the old ID.
+//
+// The operator's step (playbook H, forks on many chains at once, R-12):
+//   1. Read the fork alarms' `writer` and `against`: the ID named across most chains is the suspect. No
+//      `impersonated` alarm may name it (else the copy it names was framed: restart that revision, set nothing aside).
+//   2. Find its copy: ContainerAppConsoleLogs where Log has 'audit.witness_writer' and that ID; RevisionName and
+//      ContainerGroupName are the platform's, never the copy's word. An ID no such line names was made up: go to 5.
+//   3. Set it aside: deploy/azure/operator.ts witness-set-aside --writer <ID>. Every copy passes over its files from
+//      its next read (a web copy's within a minute), and says each.
+//   4. Restart that replica or deactivate its revision, then wait five minutes (a file named up to the clocks' spread
+//      ahead, read before the set-aside, then dates before the rebase).
+//   5. Rebase each chain held (chain-rebase). A writer with new IDs each file (no `audit.witness_writer` line for
+//      them) can't be set aside by ID: restart every copy and rotate the `audit-anchor` key before rebasing.
+import { randomBytes } from 'node:crypto';
+
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import type { WriteOnceStore } from '../storage/write-once.ts';
 import { type Chain, chainName } from './chain.ts';
 import { COMPACT_HASH_BYTES } from './digest-log.ts';
 import { timeIn } from './rebase.ts';
-import { bodyLines, fileName, type FileKind, isSoundFile, namesIn, signedFile, timeOfName } from './signed-files.ts';
+import {
+  bodyLines,
+  fileName,
+  type FileKind,
+  isSoundFile,
+  namesIn,
+  signedFile,
+  timeOfName,
+  WRITER_ID,
+  writerOfName,
+} from './signed-files.ts';
 
 /**
  * A head a copy wrote, as witnessed: its place, its event's hash, and when it was noted, by the store's clock as its
@@ -209,6 +246,10 @@ export interface WitnessLog extends ChainWitness {
   /** The anchors' log this one goes by, once it is made: none until then, and no head is set aside or let go by it. */
   useAnchors(anchors: WitnessAnchors): void;
   state(): 'unread' | 'read';
+  /** This process's writer ID (TR-14, the header), which opens each of its files' names. */
+  writer(): string;
+  /** The operator's alone: a writer's files passed over by every copy from its next read (TR-14). Throws as a Put does. */
+  setAside(writer: string): Promise<void>;
 }
 
 /** Who writes this copy's heads, and so where and under which key. */
@@ -217,6 +258,7 @@ export type WitnessSigner = 'app' | 'operator';
 const HEADS_FILE: FileKind = { label: 'audit-witness-file', purpose: 'audit-anchor' };
 const OPERATOR_FILE: FileKind = { label: 'audit-witness-file', purpose: 'operator-signing' };
 const SNAPSHOT_FILE: FileKind = { label: 'audit-witness-snapshot', purpose: 'audit-anchor' };
+const SET_ASIDE_FILE: FileKind = { label: 'audit-witness-set-aside', purpose: 'operator-signing' };
 
 /** How long a `now` waiter waits for its Put: past it, WitnessUnconfirmed, the head still queued. */
 const WAIT_MS = 5_000;
@@ -276,10 +318,11 @@ const SOON_RESERVED = MOST_LINES_A_FILE / 10;
 const MOST_FILE_BYTES = 64 * 1024 * 1024;
 
 /**
- * What one head held takes on the heap: its object (a bigint place, a time), its 32-byte hash's Buffer and the list's
- * entry. Measured on Node 24 at 234 bytes (200,000 heads held as note() keeps them, after a full collection).
+ * What one head held takes on the heap: its object (a bigint place, a time, its writer's ID shared by its file's heads),
+ * its 32-byte hash's Buffer and the list's entry. Measured on Node 24 at 243 bytes (200,000 heads held as note() keeps
+ * them, after a full collection; 235 before TR-14's writer).
  */
-export const WITNESS_HEAD_BYTES = 240;
+export const WITNESS_HEAD_BYTES = 250;
 
 /**
  * What one compact head (a fingerprint, or a head released) takes: a 32-byte packed record (its place, its hash's first
@@ -357,9 +400,14 @@ interface LostMark {
   readonly at: number;
 }
 
+/** A head held: the writer whose file brought it in, or who noted it here, beside it (TR-14: the fork alarm names both). */
+interface Held extends WitnessedHead {
+  readonly by: string;
+}
+
 /** A line of a heads file or snapshot: one chain's head, or (a snapshot's) the heads it let go for memory. */
 type HeadLine =
-  | { readonly chain: string; readonly head: WitnessedHead }
+  | { readonly chain: string; readonly head: Held }
   | { readonly chain: string; readonly lost: LostMark }
   | { readonly chain: string; readonly print: Compact }
   | { readonly chain: string; readonly released: Compact }
@@ -369,7 +417,7 @@ type HeadLine =
  * A line as its file of `fileAt` gives it: none where it isn't one, or is dated past the file's name beyond the clocks'
  * spread (no honest copy writes one: the header). Its time never past the name's, so a rebase after the file sets it aside.
  */
-function lineFrom(fields: unknown, fileAt: number): HeadLine | undefined {
+function lineFrom(fields: unknown, fileAt: number, by = ''): HeadLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
   const { c, s, h, t, l, f, x, r, b, a, ...rest } = fields as Record<string, unknown>;
   const dated = timeIn(t)?.getTime();
@@ -383,7 +431,7 @@ function lineFrom(fields: unknown, fileAt: number): HeadLine | undefined {
   if (h !== undefined) {
     return x !== undefined || r !== undefined || typeof h !== 'string' || !HASH.test(h)
       ? undefined
-      : { chain: c, head: { seq, hash: Buffer.from(h, 'hex'), at } };
+      : { chain: c, head: { seq, hash: Buffer.from(h, 'hex'), at, by } };
   }
   // A fingerprint of a head let go, or a head released: its place and its hash's first bytes (a snapshot's alone).
   if (typeof x === 'string' && PREFIX.test(x) && r === undefined) {
@@ -406,6 +454,20 @@ function baseLine(
   if (typeof b !== 'string' || !SEQ.test(b) || typeof a !== 'string' || !HASH.test(a)) return undefined;
   return { chain, base: { seq: BigInt(b), hash: Buffer.from(a, 'hex'), at } };
 }
+
+/** A set-aside file's line (TR-14): one writer's ID, and nothing else. */
+const isSetAsideLine = (fields: unknown): boolean =>
+  typeof fields === 'object' &&
+  fields !== null &&
+  Object.keys(fields).length === 1 &&
+  typeof (fields as { w?: unknown }).w === 'string' &&
+  WRITER_ID.test((fields as { w: string }).w);
+
+/** A held head as its callers are given it: its writer is the fork alarm's alone. */
+const bare = ({ seq, hash, at }: WitnessedHead): WitnessedHead => ({ seq, hash, at });
+
+/** A new writer ID: 48 random bits, so two processes never share one by chance. */
+const newWriter = (): string => randomBytes(6).toString('hex');
 
 /** A snapshot's line for an anchor a chain's compact heads went above. */
 const baseText = (chain: string, { seq, hash, at }: Compact): string =>
@@ -471,7 +533,7 @@ interface Refreshed {
 interface Queued {
   readonly chain: string;
   /** Its time re-dated by the store's clock once that is first known, where noted before (TR-12). */
-  readonly head: { readonly seq: bigint; readonly hash: Buffer; at: number };
+  readonly head: { readonly seq: bigint; readonly hash: Buffer; at: number; readonly by: string };
   readonly klass: WitnessClass;
   readonly confirmed: Promise<void>;
   readonly done: () => void;
@@ -515,7 +577,7 @@ export function createWitnessLog({
    */
   readonly dropsAtAnchor?: boolean;
 }): WitnessLog {
-  const folder = (kind: 'heads' | 'operator' | 'snapshots'): string => `e${String(epoch)}/${kind}/`;
+  const folder = (kind: 'heads' | 'operator' | 'snapshots' | 'set-aside'): string => `e${String(epoch)}/${kind}/`;
   const ownFolder = signer === 'operator' ? folder('operator') : folder('heads');
   const ownKind = signer === 'operator' ? OPERATOR_FILE : HEADS_FILE;
   // A tenth of the heads' share for the fingerprints of those let go (the header).
@@ -524,7 +586,7 @@ export function createWitnessLog({
   let anchors: WitnessAnchors | undefined;
 
   // Every head held, by chain, and how many in all.
-  const held = new Map<string, WitnessedHead[]>();
+  const held = new Map<string, Held[]>();
   let heldCount = 0;
   // What a chain let go for memory (a rebase after, or a walk past it, sets it aside), and when that was last said.
   const lost = new Map<string, LostMark>();
@@ -571,6 +633,12 @@ export function createWitnessLog({
   const alarm = (reason: string, more: Record<string, unknown>): void => {
     logger.error('audit.integrity_failed', { chain: 'store', check: 'witness_store', reason, ...more });
   };
+
+  // This process's writer ID (TR-14, the header); a new one where the operator set this one aside.
+  let writer = newWriter();
+  // The writers the operator set aside (the header), and the set-aside files read already.
+  const setAside = new Set<string>();
+  const setAsideRead = new Set<string>();
 
   // This copy's clock as the store's (TR-12): how far the store's Date was from the local clock on its latest answer,
   // whether one was asked yet, and when a clock far off was last said.
@@ -669,8 +737,12 @@ export function createWitnessLog({
     return anchors?.rebasedAfter(chainOfName(name), new Date(head.at)) !== true;
   };
 
-  /** The fork alarm: two heads witnessed at one place with different hashes, no read needed. */
-  const forked = (name: string, seq: bigint): void => {
+  /**
+   * The fork alarm: two heads witnessed at one place with different hashes, no read needed. It names the writer of the
+   * head just seen (`writer`) and of those it meets (`against`), as their files' names say (TR-14): which is forged is for
+   * the chain to tell, and the one named across many chains' forks is the copy to set aside (the header).
+   */
+  const forked = (name: string, seq: bigint, writer: string, against: readonly string[]): void => {
     const platform = name === 'platform';
     const log = platform ? logger : logger.child({ orgId: name.slice('organisation:'.length) });
     log.error('audit.integrity_failed', {
@@ -678,12 +750,14 @@ export function createWitnessLog({
       check: 'witness',
       reason: 'fork',
       seq: seq.toString(),
+      writer,
+      against,
     });
   };
 
   /** The chain to give way: the organisation's holding most; the platform's only where no organisation's is held. */
-  const largestHeld = (): [string, WitnessedHead[]] | undefined => {
-    let largest: [string, WitnessedHead[]] | undefined;
+  const largestHeld = (): [string, Held[]] | undefined => {
+    let largest: [string, Held[]] | undefined;
     for (const entry of held) {
       if (entry[0] !== 'platform' && (largest === undefined || entry[1].length > largest[1].length)) largest = entry;
     }
@@ -816,7 +890,7 @@ export function createWitnessLog({
   };
 
   /** A head into the chain's list, the highest first, once each: whether it was new. */
-  const keep = (name: string, head: WitnessedHead): boolean => {
+  const keep = (name: string, head: Held): boolean => {
     if (!stands(name, head)) return false;
     const list = held.get(name) ?? [];
     // Those at its place, found by halving (a busy chain holds many heads, highest first): the same, or a fork.
@@ -826,7 +900,12 @@ export function createWitnessLog({
     // Released at its place: the same head again (as good as held), or a fork.
     const releasedThere = released.has(name) ? releasedOf(name).filter(({ seq }) => seq === head.seq) : [];
     if (releasedThere.some((one) => sameCompact(one, head))) return false;
-    if (releasedThere.length > 0 || there.some((one) => stands(name, one))) forked(name, head.seq);
+    // A released head's writer isn't kept (a compact head is its place and hash alone).
+    const rivals = [
+      ...there.filter((one) => stands(name, one)).map(({ by }) => by),
+      ...releasedThere.map(() => 'released'),
+    ];
+    if (rivals.length > 0) forked(name, head.seq, head.by, rivals);
     list.splice(place, 0, head);
     held.set(name, list);
     heldCount += 1;
@@ -867,14 +946,14 @@ export function createWitnessLog({
   const compactOf = (name: string): Compact[] => [...(beyond(name) ? printsOf(name) : []), ...releasedOf(name)];
 
   /** The chain's list as given, counted. */
-  const setList = (name: string, list: WitnessedHead[]): void => {
+  const setList = (name: string, list: Held[]): void => {
     heldCount += list.length - (held.get(name)?.length ?? 0);
     if (list.length === 0) held.delete(name);
     else held.set(name, list);
   };
 
   /** The chain's heads a rebase set aside, let go (rare: a sanctioned restore): what stands. */
-  const dropRebased = (name: string): readonly WitnessedHead[] => {
+  const dropRebased = (name: string): readonly Held[] => {
     const kept = (held.get(name) ?? []).filter((head) => stands(name, head));
     setList(name, kept);
     return kept;
@@ -938,7 +1017,9 @@ export function createWitnessLog({
       taking = nextFile();
       inFlight = taking;
       const at = now().getTime();
-      const name = fileName(ownFolder, at);
+      const name = fileName(ownFolder, at, writer);
+      // Known as this process's own before it lands, so a read never takes it for a file written in its name (TR-14).
+      namesRead.add(name);
       const bytes = await signedFile(
         keys,
         ownKind,
@@ -947,7 +1028,6 @@ export function createWitnessLog({
         taking.map(({ chain, head }) => lineText(chain, datedBy(head, at))),
       );
       await putWithin(name, bytes);
-      namesRead.add(name);
       for (const queued of taking) {
         remember(queued.chain, queued.head);
         unconfirmed.get(queued.chain)?.delete(queued);
@@ -1018,10 +1098,11 @@ export function createWitnessLog({
     // Written by this process already (a replay's kept head): outside the database, nothing to wait for.
     if (writtenHere.has(writtenKey(name, { seq, hash }))) return;
     // Kept as given, its time set once its file is named where the store's time wasn't known yet.
-    const head: { readonly seq: bigint; readonly hash: Buffer; at: number } = {
+    const head: { readonly seq: bigint; readonly hash: Buffer; at: number; readonly by: string } = {
       seq,
       hash: Buffer.from(hash),
       at: nowMs(),
+      by: writer,
     };
     keep(name, head);
     let done = (): void => undefined;
@@ -1078,8 +1159,9 @@ export function createWitnessLog({
     }
     // A snapshot's released heads gathered by chain, each chain's packed once at the end.
     const releasedRead = new Map<string, Compact[]>();
+    const by = writerOfName(name);
     for await (const fields of bodyLines(got)) {
-      const line = lineFrom(fields, at);
+      const line = lineFrom(fields, at, by);
       if (line === undefined) continue;
       if ('head' in line) {
         if (keep(line.chain, line.head)) gained.add(line.chain);
@@ -1097,7 +1179,7 @@ export function createWitnessLog({
    * a snapshot alone.
    */
   const snapshotLine = (
-    line: Exclude<HeadLine, { readonly head: WitnessedHead }>,
+    line: Exclude<HeadLine, { readonly head: Held }>,
     releasedRead: Map<string, Compact[]>,
   ): void => {
     if ('lost' in line) lostRead(line.chain, line.lost);
@@ -1135,15 +1217,54 @@ export function createWitnessLog({
     });
   };
 
+  /**
+   * Whether a heads file or snapshot is passed over, its writer set aside by the operator (TR-14): said each time, by
+   * name, so no head goes unread unsaid. The operator's own files are never passed over (no copy holds its key).
+   */
+  const passedOver = (at: string, name: string): boolean => {
+    const by = writerOfName(name);
+    if (!setAside.has(by)) return false;
+    alarm('set_aside', { writer: by, folder: at, file: name });
+    return true;
+  };
+
+  /**
+   * Every set-aside file not read yet, each signed with the operator's key, which no copy of the API holds: its writers
+   * passed over from now on. This process's own among them (a copy set aside by mistake, or framed by one writing in its
+   * name) is the alarm, and it writes under a new ID from here, so its heads still count. Throws as a list or get does.
+   */
+  const readSetAside = async (): Promise<void> => {
+    const at = folder('set-aside');
+    for await (const file of namesOf(timed, at)) {
+      if (setAsideRead.has(file.name)) continue;
+      const got = await store.getAtMost(file.name, MOST_FILE_BYTES);
+      if (got === 'missing') throw new Error('a witness set-aside file listed and then not there');
+      if (typeof got !== 'string' && (await isSoundFile(keys, SET_ASIDE_FILE, got, file.name, epoch, isSetAsideLine))) {
+        for await (const fields of bodyLines(got)) setAside.add((fields as { w: string }).w);
+      } else {
+        alarm('spoiled', { folder: at, fileAt: new Date(file.at).toISOString() });
+      }
+      setAsideRead.add(file.name);
+    }
+    if (!setAside.has(writer)) return;
+    const was = writer;
+    writer = newWriter();
+    alarm('own_writer_set_aside', { writer: was, renamedTo: writer });
+  };
+
   /** The newest sound snapshot taken in, and its time; none with no snapshots' store, or none sound a day back. */
   const readSnapshot = async (gained: Set<string>): Promise<number | undefined> => {
     if (snapshots === undefined) return undefined;
     let spoiled = 0;
     for await (const file of namesOf(snapshots, folder('snapshots'))) {
       const { at } = file;
-      if (await takeFile(snapshots, file, SNAPSHOT_FILE, gained)) return at;
-      spoiled += 1;
-      alarm('spoiled', { folder: 'snapshots', fileAt: new Date(at).toISOString() });
+      // One set aside (said by passedOver) counts as a spoiled one: a start goes back past a day's at most.
+      if (passedOver('snapshots', file.name)) spoiled += 1;
+      else if (await takeFile(snapshots, file, SNAPSHOT_FILE, gained)) return at;
+      else {
+        spoiled += 1;
+        alarm('spoiled', { folder: 'snapshots', fileAt: new Date(at).toISOString() });
+      }
       if (spoiled >= MOST_SPOILED_SNAPSHOTS) return undefined;
     }
     return undefined;
@@ -1164,6 +1285,22 @@ export function createWitnessLog({
     });
   };
 
+  /** One heads file not read yet, taken in under its folder's key unless its writer is set aside; spoiled, the alarm. */
+  const readHeadsFile = async (
+    at: string,
+    kind: FileKind,
+    file: { readonly name: string; readonly at: number },
+    gained: Set<string>,
+  ): Promise<void> => {
+    // Not this process's (namesRead holds those from before their Put), yet named for its writer: written in its name
+    // by another holding the key (TR-14). Said, and read as any other: a detector, never a gate.
+    if (writerOfName(file.name) === writer) alarm('impersonated', { writer, folder: at, file: file.name });
+    if (kind === HEADS_FILE && passedOver(at, file.name)) return;
+    if (!(await takeFile(store, file, kind, gained))) {
+      alarm('spoiled', { folder: at, fileAt: new Date(file.at).toISOString() });
+    }
+  };
+
   /**
    * Every heads file of both folders named at or after `since`, not read yet, each under its own folder's key: the
    * newest name read, for the next pass to look back from once this one has ended whole.
@@ -1177,9 +1314,7 @@ export function createWitnessLog({
       for await (const file of namesOf(timed, at)) {
         if (file.at < since) break;
         if (namesRead.has(file.name)) continue;
-        if (!(await takeFile(store, file, kind, gained))) {
-          alarm('spoiled', { folder: at, fileAt: new Date(file.at).toISOString() });
-        }
+        await readHeadsFile(at, kind, file, gained);
         judgeLanding(at, file);
         namesRead.add(file.name);
         newest = Math.max(newest ?? file.at, file.at);
@@ -1194,6 +1329,8 @@ export function createWitnessLog({
     const gained = new Set<string>();
     try {
       await askClock();
+      // The writers set aside first, so no file of theirs is read in this pass.
+      await readSetAside();
       const began = now();
       let newest: number | undefined;
       if (state === 'read') {
@@ -1280,7 +1417,7 @@ export function createWitnessLog({
     const early = prunedSinceSnapshot >= PRUNED_FOR_A_SNAPSHOT && since >= SNAPSHOT_AT_MOST_MS;
     if (since < SNAPSHOT_EVERY_MS && !early) return;
     try {
-      const name = fileName(folder('snapshots'), at);
+      const name = fileName(folder('snapshots'), at, writer);
       await snapshots.put(name, await signedFile(keys, SNAPSHOT_FILE, name, epoch, snapshotLines(at)));
       lastSnapshotAt = at;
       changedSinceSnapshot = false;
@@ -1293,7 +1430,7 @@ export function createWitnessLog({
   /** heldTo (the interface): the heads held and the compact ones, the highest first, at most `most`. */
   const heldTo = (chain: Chain, most = Number.POSITIVE_INFINITY): readonly WitnessedHead[] => {
     const name = nameOf(chain);
-    const heads = standing(name, most);
+    const heads = standing(name, most).map(bare);
     // Most chains hold no compact head: their pending heads as they are, no merge.
     const compact = compactOf(name);
     if (compact.length === 0) return heads;
@@ -1311,7 +1448,7 @@ export function createWitnessLog({
       note(chain, head, 'soon');
     },
     pending(chain: Chain, most?: number): readonly WitnessedHead[] {
-      return standing(nameOf(chain), most);
+      return standing(nameOf(chain), most).map(bare);
     },
     witnessed(chain: Chain, most?: number): readonly WitnessedHead[] {
       return heldTo(chain, most).map((head) => ({ ...head, at: head.at - offset }));
@@ -1422,5 +1559,13 @@ export function createWitnessLog({
       anchors = given;
     },
     state: () => state,
+    writer: () => writer,
+    async setAside(aside: string): Promise<void> {
+      if (signer !== 'operator') throw new Error("only the operator's command sets a witness writer aside");
+      if (!WRITER_ID.test(aside)) throw new RangeError("a witness writer's ID is 12 lower-case hex characters");
+      await askClock();
+      const name = fileName(folder('set-aside'), now().getTime(), writer);
+      await putWithin(name, await signedFile(keys, SET_ASIDE_FILE, name, epoch, [JSON.stringify({ w: aside })]));
+    },
   });
 }

@@ -104,7 +104,7 @@ export function witnessOf(
     }
     return undefined;
   }
-  return createWitnessLog({
+  const log = createWitnessLog({
     store,
     snapshots: storeAt(config.witnessStore.snapshots),
     keys,
@@ -118,6 +118,10 @@ export function witnessOf(
     alertAfterMs: config.audit.anchorSeconds * 3 * 1000,
     mostBytes: witnessMostBytes(config.audit.anchorSeconds, getHeapStatistics().heap_size_limit),
   });
+  // Said once, so the platform's own columns on the line (its revision and replica) tell which copy holds the ID that
+  // opens its witness files' names (TR-14: the operator's step in witness-log.ts's header).
+  logger.info('audit.witness_writer', { writer: log.writer() });
+  return log;
 }
 
 /**

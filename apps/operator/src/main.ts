@@ -147,6 +147,9 @@ import {
   RESTORE_CHECK,
   TOKEN_HASH_HEX,
   UUID_V7,
+  WITNESS_SET_ASIDE,
+  WITNESS_SET_ASIDE_USAGE,
+  WITNESS_WRITER,
 } from './request.ts';
 import { checkRestoredCopy } from './restore-check.ts';
 import { planChainRecovery, planDigest, planFile } from './chain-recovery.ts';
@@ -270,6 +273,7 @@ type Request =
       readonly id: string;
     }
   | { readonly command: typeof COUNTING_CONTACTS; readonly orgId: string }
+  | { readonly command: typeof WITNESS_SET_ASIDE; readonly writer: string }
   | { readonly command: typeof RESTORE_CHECK }
   | {
       readonly command: typeof CHAIN_RECOVERY;
@@ -389,6 +393,7 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
   [FACTOR_RESET_NOTICE, factorResetNoticeAsked],
   [COUNTING_CONTACTS, countingContactsAsked],
+  [WITNESS_SET_ASIDE, witnessSetAsideAsked],
   [RESTORE_CHECK, restoreCheckAsked],
   [CHAIN_RECOVERY, chainRecoveryAsked],
   [CHAIN_REBASE, chainRebaseAsked],
@@ -650,6 +655,16 @@ function countingContactsAsked(words: readonly string[]): Request | Problems {
   return { command: COUNTING_CONTACTS, orgId };
 }
 
+/** A witness writer set aside (TR-14, playbook H): typed or from a file, the writer's ID alone. */
+function witnessSetAsideAsked(words: readonly string[]): Request | Problems {
+  const [, flag, writer, ...more] = words;
+  if (flag !== '--writer' || writer === undefined || more.length > 0) {
+    return problem(`the command is ${WITNESS_SET_ASIDE_USAGE}, and nothing else`);
+  }
+  if (!WITNESS_WRITER.test(writer)) return problem("the writer's ID must be 12 hex characters, in lower case");
+  return { command: WITNESS_SET_ASIDE, writer };
+}
+
 /**
  * Whether an error is the directory refusing an organisation it lists already:
  * its key, orgs_pkey, which Postgres names only when a row breaks it.
@@ -766,6 +781,7 @@ async function run(
       settled: () => Promise.resolve(),
     },
   );
+  if (request.command === WITNESS_SET_ASIDE) return setWriterAside(witness, request.writer, logger);
   const code = await runRequest(config, keys, request, logger);
   if (witness === undefined) return code;
   try {
@@ -779,6 +795,28 @@ async function run(
     logger.error('operator.not_witnessed', { command: request.command, err: error });
     return 1;
   }
+}
+
+const NO_SET_ASIDE_STORE =
+  'AGENTX_AUDIT_WITNESS_URL is not set: a writer is set aside in the witness store, so there is nowhere to set it aside';
+
+/**
+ * A witness writer set aside (TR-14): one line signed with the operator's own key to the witness store, which every
+ * copy of the API reads before its next pass. The exit code: 0 once the line is in the store.
+ */
+async function setWriterAside(witness: WitnessLog | undefined, writer: string, logger: Logger): Promise<number> {
+  if (witness === undefined) {
+    logger.error('operator.refused', { problems: [NO_SET_ASIDE_STORE] });
+    return 1;
+  }
+  try {
+    await witness.setAside(writer);
+  } catch (error) {
+    logger.error('operator.failed', { command: WITNESS_SET_ASIDE, err: error });
+    return 1;
+  }
+  logger.info('operator.witness_writer_set_aside', { writer });
+  return 0;
 }
 
 /**
@@ -846,7 +884,8 @@ const OPERATOR_WITNESS_BYTES = 1024 * 1024;
 async function runRequest(
   config: OperatorConfig,
   keys: KeyProvider,
-  request: Request,
+  // A writer set aside is the witness log's alone, done before (run: setWriterAside).
+  request: Exclude<Request, { readonly command: typeof WITNESS_SET_ASIDE }>,
   logger: Logger,
 ): Promise<number> {
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });

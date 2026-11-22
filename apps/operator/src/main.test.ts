@@ -4,13 +4,15 @@
 // nothing listens on, so a refusal that connected first would say the
 // database was unavailable instead. What it does once connected is
 // main.db.test.ts.
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { PURPOSES } from '@agentx/platform/keys';
+import { createWitnessLog } from '@agentx/platform/audit-chain';
+import { loadKeys, PURPOSES } from '@agentx/platform/keys';
+import { folderWriteOnceStore } from '@agentx/platform/storage';
 import type { Output } from '@agentx/platform/observability';
-import { LogCapture, writeTestKeys } from '@agentx/testing';
+import { LogCapture, testLogger, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { READ_DENIED_PROBLEM } from './evidence-read.ts';
@@ -42,6 +44,8 @@ import {
   REQUEST_USAGE,
   RESTORE_CHECK,
   restoreCheckRequest,
+  WITNESS_SET_ASIDE_USAGE,
+  witnessSetAsideRequest,
 } from './request.ts';
 
 /** Failures no real input can cause (a bug, a broken disk), switched on by a test and off after it. */
@@ -1223,5 +1227,93 @@ describe("AT13f a rebase after a repair, held to the repair's own record", () =>
     ],
   ])('refuses %s', (_what, read, said) => {
     expect(restoreRecordProblems(read, asked)).toEqual([said]);
+  });
+});
+
+describe('TR-14 a witness writer set aside, typed or from a file (playbook H)', () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-set-aside-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const WRITER = 'a1b2c3d4e5f6';
+  let made = 0;
+  const witnessDir = (): string => {
+    made += 1;
+    return path.join(folder, `witness-${String(made)}`);
+  };
+
+  it.each([
+    ['typed', ['witness-set-aside', '--writer', WRITER]],
+    ['from a file, as the launcher writes it', ['--request', requestFile(witnessSetAsideRequest(WRITER))]],
+  ])(
+    "reads it %s and signs one line to the witness store, which the API's copies take, without a database",
+    async (_how, argv) => {
+      const dir = witnessDir();
+      const { code, events, line } = await run(argv, { ...ENV, AGENTX_AUDIT_WITNESS_DIR: dir });
+      expect(code).toBe(0);
+      expect(events).not.toContain('operator.starting');
+      expect(line('operator.witness_writer_set_aside')).toMatchObject({ writer: WRITER });
+      expect(readdirSync(path.join(dir, 'e1', 'set-aside'))).toHaveLength(1);
+      // Under the operator's own key, as the API's copies check it: sound, so no alarm.
+      const errorsRead = async (): Promise<unknown[]> => {
+        const capture = new LogCapture();
+        const reader = createWitnessLog({
+          store: folderWriteOnceStore(dir),
+          keys: loadKeys({ directory: keys.directory, current: {} }, [
+            'audit-mac',
+            'field-encryption',
+            'operator-signing',
+            'audit-rebase',
+          ]),
+          logger: testLogger(capture),
+          now: () => new Date(),
+          epoch: 1,
+          alertAfterMs: 60_000,
+          mostBytes: 1024 * 1024,
+        });
+        expect(await reader.refreshWhole()).toBe(true);
+        return capture.lines().filter((one) => one.level === 'error');
+      };
+      expect(await errorsRead()).toEqual([]);
+      // The control: the same bytes under another name (its closing line signs its own) are read, and spoiled.
+      const [written = ''] = readdirSync(path.join(dir, 'e1', 'set-aside'));
+      copyFileSync(
+        path.join(dir, 'e1', 'set-aside', written),
+        path.join(dir, 'e1', 'set-aside', `${written.slice(0, -1)}${written.endsWith('0') ? '1' : '0'}`),
+      );
+      expect(await errorsRead()).toEqual([expect.objectContaining({ reason: 'spoiled', folder: 'e1/set-aside/' })]);
+    },
+  );
+
+  it.each([
+    ['no writer', ['witness-set-aside'], `the command is ${WITNESS_SET_ASIDE_USAGE}, and nothing else`],
+    [
+      'a word more',
+      ['witness-set-aside', '--writer', WRITER, 'x'],
+      `the command is ${WITNESS_SET_ASIDE_USAGE}, and nothing else`,
+    ],
+    [
+      'an ID not 12 lower-case hex',
+      ['witness-set-aside', '--writer', WRITER.toUpperCase()],
+      "the writer's ID must be 12 hex characters, in lower case",
+    ],
+  ])('refuses %s, naming why', async (_what, argv, why) => {
+    const { code, line } = await run(argv, { ...ENV, AGENTX_AUDIT_WITNESS_DIR: witnessDir() });
+    expect(code).toBe(1);
+    expect(line('operator.refused')?.problems).toEqual([why]);
+  });
+
+  it('refuses with no witness store, and says a store that fails as the command failing', async () => {
+    const none = await run(['witness-set-aside', '--writer', WRITER]);
+    expect(none.code).toBe(1);
+    expect(none.line('operator.refused')?.problems).toEqual([
+      expect.stringMatching(/^AGENTX_AUDIT_WITNESS_URL is not set: a writer is set aside in the witness store/),
+    ]);
+    const blocked = path.join(folder, 'not-a-folder');
+    writeFileSync(blocked, 'x');
+    const failing = await run(['witness-set-aside', '--writer', WRITER], { ...ENV, AGENTX_AUDIT_WITNESS_DIR: blocked });
+    expect(failing.code).toBe(1);
+    expect(failing.line('operator.failed')).toMatchObject({ command: 'witness-set-aside' });
   });
 });
