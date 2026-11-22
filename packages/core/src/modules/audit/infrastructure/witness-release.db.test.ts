@@ -91,7 +91,7 @@ const probeAndRelease = async (log: WitnessLog): Promise<void> => {
   log.release(CHAIN, below);
 };
 
-describe('TR-3 heads a probe found released, never let go', () => {
+describe('SEC-DB-20 TR-3 heads a probe found released, never let go', () => {
   it('rows put back beside a cut branch for the probe alone: the next walk, held to the heads released, is cut_back', async () => {
     const capture = new LogCapture();
     const log = createWitnessLog({

@@ -1234,7 +1234,7 @@ describe('one organisation anchored now, for the hand-off after a restart (gate 
   });
 });
 
-describe('TR-13 the platform chain growing fast between two anchors', () => {
+describe('SEC-LIM-13 TR-13 the platform chain growing fast between two anchors', () => {
   const SAID = BigInt(PLATFORM_GROWTH_SAID);
   /** The platform chain's lines of fast growth. */
   const fast = (capture: LogCapture) => capture.lines().filter((line) => line.event === 'audit.platform_chain_fast');

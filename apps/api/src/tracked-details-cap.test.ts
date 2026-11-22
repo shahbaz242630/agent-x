@@ -84,7 +84,7 @@ function longestNames(table: SignedStateTable): string {
   return String(details[TRACKED_BEFORE]);
 }
 
-describe('each tracked state event’s details within their limits, its names added (TR-3 residual 75)', () => {
+describe('SEC-DB-20 each tracked state event’s details within their limits, its names added (TR-3 residual 75)', () => {
   it.each(TRACKING.map((table) => [table.subject, table] as const))(
     '%s: its names at their longest fit one detail’s text',
     (_subject, table) => {

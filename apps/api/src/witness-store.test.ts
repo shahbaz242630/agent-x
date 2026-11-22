@@ -46,7 +46,7 @@ const configWith = (
 
 const services = (capture = new LogCapture()) => ({ keys, logger: testLogger(capture), clock: { now: () => AT } });
 
-describe('TR-1 the witness log as the config names it', () => {
+describe('SEC-DB-20 TR-1 the witness log as the config names it', () => {
   it('none without a heads’ store: said as the error line where deployed, nothing in development and test', () => {
     const quiet = new LogCapture();
     expect(witnessOf(configWith(null), services(quiet))).toBeUndefined();

@@ -69,7 +69,7 @@ function history() {
   return { events, state, t4 };
 }
 
-describe('the names a state event carries (withTracked, trackedBeforeIn)', () => {
+describe('SEC-DB-20 the names a state event carries (withTracked, trackedBeforeIn)', () => {
   it('a table that tracks nothing gets none, its details as they were', () => {
     expect(withTracked(UNTRACKED, 'new', { a: 1 })).toEqual({ details: { a: 1 }, tracked: undefined });
   });
