@@ -198,8 +198,11 @@ export function createStateNames({
   readonly looked?: (at: 'read' | 'judged') => Promise<void>;
   /** How long a naming may go on unended before it is an error (tests: shorter). */
   readonly unnamedTooLongMs?: number;
-  /** The heads copies witnessed (TR-1), the one held set every consumer reads (TR-9): none without a witness log. */
-  readonly witness?: Pick<WitnessLog, 'heldTo'> | undefined;
+  /**
+   * The heads copies witnessed (TR-1), the one held set every consumer reads (TR-9), read whole afresh before each
+   * organisation's walk (S210 R1-2): none without a witness log.
+   */
+  readonly witness?: Pick<WitnessLog, 'heldTo' | 'refreshWhole' | 'state'> | undefined;
   /** The chains' latest anchors: the walk holds to the organisation's too. */
   readonly anchors?: { latest(chain: Chain): AnchorPoint | undefined } | undefined;
 }): StateNames {
@@ -345,7 +348,12 @@ export function createStateNames({
       log.error('state_names.unnamed_too_long', { hours: Math.floor(ageMs / 3_600_000) });
   };
 
-  const nameIn = async (orgId: string, signal: AbortSignal | undefined): Promise<void> => {
+  /**
+   * An organisation named this run, or `stale`: the witness not read whole since this naming began (S210 R1-2), so the
+   * run ends there. The anchor check's walk and the hand-off hold only to a fresh read too: a head another copy wrote
+   * since this copy's last read, a stop among them, would otherwise be missing from heldTo, and the cut below it named.
+   */
+  const nameIn = async (orgId: string, signal: AbortSignal | undefined): Promise<'stale' | undefined> => {
     const log = logger.child({ orgId });
     const services: SignedStatesServices = { keys, ids, logger: log };
     try {
@@ -354,7 +362,11 @@ export function createStateNames({
         // Tampered with (its alarm raised): nothing named this run.
         return own.outcome !== 'verified' || namedFromStart(own.trail);
       });
-      if (done) return;
+      if (done) return undefined;
+      if (witness !== undefined && !((await witness.refreshWhole()) && witness.state() === 'read')) {
+        log.warn('state_names.witness_stale', {});
+        return 'stale';
+      }
       // Asked before the walk's first statement, as the anchor check's walk asks them: every head a copy witnessed, and
       // the latest anchor, each a place the chain must still pass through.
       const chain: Chain = { kind: 'organisation', orgId };
@@ -370,12 +382,12 @@ export function createStateNames({
           seq: walked.seq,
         });
         await holdOrganisation(database, orgId, services, walked.reason);
-        return;
+        return undefined;
       }
       let named = 0;
       let left = 0;
       for (const table of NAMED_TABLES) {
-        if (signal?.aborted === true) return;
+        if (signal?.aborted === true) return undefined;
         // The organisation's own state last, and only once no other was left: its names then reach its start.
         if (table === ORGANIZATIONS && left > 0) break;
         await beforeNaming(table);
@@ -388,6 +400,7 @@ export function createStateNames({
     } catch (error) {
       log.error('state_names.failed', { err: error });
     }
+    return undefined;
   };
 
   return {
@@ -401,7 +414,7 @@ export function createStateNames({
       }
       for (const orgId of orgs) {
         if (signal?.aborted === true) return;
-        await nameIn(orgId, signal);
+        if ((await nameIn(orgId, signal)) === 'stale') return;
       }
     },
   };

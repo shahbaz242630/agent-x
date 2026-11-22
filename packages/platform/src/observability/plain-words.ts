@@ -400,8 +400,7 @@ export const PLAIN_WORDS = {
   },
   'audit.witness_clock_skew': {
     happened: 'A copy of the API has a clock more than five minutes off the witness store’s.',
-    broke:
-      'Nothing if it gives an offset: the copy names files by the store’s time. If it names a file, heads may be late.',
+    broke: 'Nothing: the copy names its files by the store’s time, not its own clock.',
     next: 'Check the time sync of the host the copy runs on. On Container Apps the clock is the host’s.',
   },
   'audit.witness_snapshot_skipped': {
@@ -900,6 +899,11 @@ export const PLAIN_WORDS = {
     happened: "One organisation's older records could not all be given the links that protect their history.",
     broke: 'Those not reached are still read from the log alone; nothing else changed.',
     next: 'It is tried again in about an hour. If it keeps failing, check the error.',
+  },
+  'state_names.witness_stale': {
+    happened: 'Older records were not linked this run: the witness store could not be read whole just before.',
+    broke: 'Nothing: linking waits, so no record is linked without every recent chain head checked.',
+    next: 'It is tried again in about an hour. If it repeats, see the witness read failure lines.',
   },
   'state_names.run_failed': {
     happened: 'The list of organisations could not be read, so no older records were linked this run.',

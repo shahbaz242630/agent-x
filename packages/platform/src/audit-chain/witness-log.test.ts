@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import type { Chain } from './chain.ts';
-import { fileName, type FileKind, signedFile } from './signed-files.ts';
+import { fileName, type FileKind, signedFile, writerOfName } from './signed-files.ts';
 import {
   createWitnessLog,
   WITNESS_HEAD_BYTES,
@@ -736,7 +736,13 @@ describe('SEC-DB-20 the witness log: reading', () => {
       const { log, capture } = witnessOn(store);
       await log.refresh();
       expect(seqs(log.pending(CHAIN))).toEqual([4n]);
-      expect(skews(capture).map(({ skewMs }) => skewMs)).toEqual(said);
+      // Its writer's misdating, never this copy's own clock (S210 R1-1).
+      expect(
+        integrity(capture)
+          .filter(({ reason }) => reason === 'misdated_heads')
+          .map(({ skewMs, writer }) => [skewMs, writer]),
+      ).toEqual(said.map((skewMs) => [skewMs, writerOfName(name)]));
+      expect(skews(capture)).toEqual([]);
     }
   });
 
