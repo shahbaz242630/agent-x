@@ -547,6 +547,12 @@ export const PLAIN_WORDS = {
     broke: 'Nothing for now: the brake that keeps payments moving under a flood of sign-ins was off for 30 seconds.',
     next: 'Nothing if rare. If it repeats, the database is struggling: check its health.',
   },
+  'auth.platform_growth_anchor_stale': {
+    happened:
+      "The shared audit chain grew past the sign-in brake's limit, but its last anchor is old, so the brake stayed off.",
+    broke: 'Sign-ins and step-ups go on; some payments may wait until the anchor check runs again.',
+    next: "The anchor check has stalled and alerts on its own: follow that alert's runbook to get it running.",
+  },
   'auth.person_sessions_spent': {
     happened: 'One person signed in more than a hundred times in a day, so this sign-in was refused.',
     broke: 'Only that person waits; sessions they hold go on, and everyone else signs in as usual.',
