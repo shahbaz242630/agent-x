@@ -645,6 +645,11 @@ export function createWitnessLog({
   let offset = 0;
   let clockAsked = false;
   let offsetKnown = false;
+  // The least offset worked out since this clock was last left as it stands: each is never below the true one, so the
+  // least is the nearest (witnessed: a time read from a file put on this clock).
+  let leastOffset = 0;
+  // Each head noted here, by this clock as noted (witnessed gives it back as such, whatever the offset since).
+  const notedHere = new WeakMap<object, number>();
   let skewSaidAt: number | undefined;
   /** Every time this log names or dates: the local clock set by the store's (the header). */
   const nowMs = (): number => localNow().getTime() + offset;
@@ -670,6 +675,7 @@ export function createWitnessLog({
     // Date after the call left, at a true time below at + DATE_STEP_MS (whole seconds, rounded down), so the true
     // offset at `sent` is below at + DATE_STEP_MS - sent; this one is never less, and later by at most the trip and 1 s.
     offset = Math.abs(localNow().getTime() - at) <= RIGHT_ENOUGH_MS ? 0 : at + DATE_STEP_MS - sent;
+    leastOffset = offset === 0 || leastOffset === 0 ? offset : Math.min(leastOffset, offset);
     clockAsked = true;
     if (!offsetKnown) {
       offsetKnown = true;
@@ -1104,6 +1110,7 @@ export function createWitnessLog({
       at: nowMs(),
       by: writer,
     };
+    notedHere.set(head, localNow().getTime());
     keep(name, head);
     let done = (): void => undefined;
     const confirmed = new Promise<void>((resolve) => {
@@ -1451,7 +1458,10 @@ export function createWitnessLog({
       return standing(nameOf(chain), most).map(bare);
     },
     witnessed(chain: Chain, most?: number): readonly WitnessedHead[] {
-      return heldTo(chain, most).map((head) => ({ ...head, at: head.at - offset }));
+      // A head noted here, as noted by this clock. One read from a file, or compact, as its store-clock time less the
+      // least offset: that is never below the true one, so this errs early by at most that call's trip and the Date's
+      // second, well inside the digest's ACCEPT_MARGIN_MS (a minute) it is set against.
+      return heldTo(chain, most).map((head) => ({ ...head, at: notedHere.get(head) ?? head.at - leastOffset }));
     },
     async flush(): Promise<void> {
       await write(true);

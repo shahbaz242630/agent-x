@@ -448,6 +448,35 @@ describe('SEC-ANC-01 4D2e E3 the write-once store on Azure', () => {
     expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:20:00Z'));
   });
 
+  it('never takes its Date back when an older answer of overlapping calls is handled last (TR-12)', async () => {
+    const answers: ((date: string) => void)[] = [];
+    const store = azureWriteOnceStore({
+      settings: SETTINGS,
+      fetch: (url) =>
+        new URL(url).origin === 'http://localhost:42356'
+          ? Promise.resolve(Response.json({ access_token: ISSUED }))
+          : new Promise((resolve) => {
+              answers.push((date) => {
+                resolve(
+                  new Response('<EnumerationResults><Blobs /><NextMarker /></EnumerationResults>', {
+                    headers: { date },
+                  }),
+                );
+              });
+            }),
+    });
+    const older = store.list('e1/', 10);
+    const newer = store.list('e1/', 10);
+    await vi.waitFor(() => {
+      expect(answers).toHaveLength(2);
+    });
+    answers[1]?.('Fri, 20 Nov 2026 09:05:00 GMT');
+    await newer;
+    answers[0]?.('Fri, 20 Nov 2026 09:00:00 GMT');
+    await older;
+    expect(store.serverTime?.()).toBe(Date.parse('2026-11-20T09:05:00Z'));
+  });
+
   it('refuses a continuation of another form rather than send it on', async () => {
     await expect(
       answering('<EnumerationResults><NextMarker>a&amp;b</NextMarker></EnumerationResults>').list('e1/', 10),
