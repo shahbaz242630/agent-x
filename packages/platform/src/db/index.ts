@@ -94,6 +94,7 @@ export {
   type SignedRowKey,
   type SignedStateTable,
   signedRowIds,
+  signedRowsLackingSince,
   signedRowPointed,
   signedRowPointing,
   brakeSharedLookedUp,

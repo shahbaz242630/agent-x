@@ -19,6 +19,7 @@ import {
   readSignedRow,
   type SignedFieldValues,
   signedRowIds,
+  signedRowsLackingSince,
   type SignedStateTable,
   writeSignedRow,
 } from './signed-rows.ts';
@@ -249,6 +250,45 @@ describe("listing a table's row IDs", () => {
     expect(await newest(1, null)).toEqual([third, second]);
     expect(await newest(5, third)).toEqual([second, first]);
     expect(await newest(5, first)).toEqual([]);
+  });
+});
+
+describe('looking for a row pointing at an event since a place, its details lacking a key (TR-16)', () => {
+  /** An organisation of its own, so the rows and events looked at are only this test's. */
+  const LOOKED_ORG = '0199a0f0-0000-7000-8000-00000000000e';
+  const lacking = (afterSeq: bigint, org = LOOKED_ORG) =>
+    withTenant(app, LOOKED_ORG, (tx) => signedRowsLackingSince(tx, GRANTS, org, afterSeq, 'named'));
+
+  /** An event of the organisation's at `seq`, its details as given, put in past the chain's own checks. */
+  async function eventAt(seq: number, details: string): Promise<string> {
+    const id = newId();
+    await admin.query('alter table audit.events disable trigger user');
+    try {
+      await admin.query(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version)
+         values ($1, $2, $3, now(), 'system', 'test', 'grant.noted', 'grant', $3, 1, $4,
+           decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode('00', 'hex'), 1)`,
+        [LOOKED_ORG, seq, id, details],
+      );
+    } finally {
+      await admin.query('alter table audit.events enable trigger user');
+    }
+    return id;
+  }
+
+  it('finds one pointing past the place at an event lacking the key, and none at or before it, or carrying it', async () => {
+    await newGrant(LOOKED_ORG, await eventAt(1, '{}'));
+    await newGrant(LOOKED_ORG, await eventAt(2, '{"named":"yes"}'));
+    expect(await lacking(0n)).toBe(true);
+    expect(await lacking(1n)).toBe(false);
+    await newGrant(LOOKED_ORG, await eventAt(3, '{"other":"x"}'));
+    expect(await lacking(1n)).toBe(true);
+    expect(await lacking(3n)).toBe(false);
+  });
+
+  it('refuses an organisation that is not a UUID, before any SQL', async () => {
+    await expect(lacking(0n, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
   });
 });
 

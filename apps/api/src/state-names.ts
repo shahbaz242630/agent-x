@@ -7,6 +7,8 @@
 // doesn't reach its start is recorded again, unchanged, its event naming the newest of each tracked action the walk
 // kept of it (namesFromHistory), a page at a time; one changed since the walk is left for the next run; the
 // organisation's own state last, only once every other one is named. From then, a state from before that naming with no names is tampering (trailGap's `namedAt`).
+// So the organisation's naming waits for the next run if any named table holds a state with no names written since
+// the walk (the app's older code during a deploy, TR-16): named over it, that state would read as tampering.
 //
 // An object's older events of an action than its newest stay unnamed (legacy, never more than the chain checked
 // whole here held): only staging holds such objects, and the request-voids job settles any request they stopped.
@@ -14,8 +16,8 @@
 //
 // It is the API's, not the operator command's: the operator's role may not write these tables (0079), and the API's
 // writes are witnessed as any are. A chain that fails the whole walk raises the integrity alarm and puts the
-// organisation on its integrity hold, as the anchor check does (TR-10). A run never throws: each failure is logged, naming the organisation, and the run
-// goes on. Retire it, as the grant summaries' build will be, once every environment's objects are named.
+// organisation on its integrity hold, as the anchor check does (TR-10). A run never throws: each failure is logged,
+// naming the organisation, and the run goes on. Retire it, as the grant summaries' build will be, once every environment's objects are named.
 import { AGENTS } from '@agentx/core/modules/agents';
 import {
   type AuditTables,
@@ -28,6 +30,7 @@ import {
   namesFromHistory,
   type SignedStates,
   type SignedStatesServices,
+  TRACKED_BEFORE,
   type TrailEvent,
   withSignedStates,
 } from '@agentx/core/modules/audit';
@@ -38,7 +41,12 @@ import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { ChainProblem } from '@agentx/platform/audit-chain';
-import type { Database, DatabaseTransaction, SignedStateTable } from '@agentx/platform/db';
+import {
+  type Database,
+  type DatabaseTransaction,
+  type SignedStateTable,
+  signedRowsLackingSince,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -70,6 +78,9 @@ interface Walked {
   readonly reached: bigint;
   readonly kept: ReadonlyMap<string, TrailEvent[]>;
 }
+
+/** The organisation's naming undone: a state with no names was written since the walk (TR-16), so it waits a run. */
+class UnnamedSinceWalk extends Error {}
 
 const objectKey = (type: string, id: string) => `${type}:${id.toLowerCase()}`;
 
@@ -105,7 +116,7 @@ export function createStateNames({
   keys,
   ids,
   logger,
-  walked: afterWalk = () => Promise.resolve(),
+  walked: beforeNaming = () => Promise.resolve(),
 }: {
   /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -113,8 +124,8 @@ export function createStateNames({
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
-  /** Done between an organisation's walk and its naming (tests: a move made just then). */
-  readonly walked?: () => Promise<void>;
+  /** Done after an organisation's walk, before each table is named (tests: a move made just then). */
+  readonly walked?: (next: SignedStateTable) => Promise<void>;
 }): StateNames {
   const trail = createAuditTrail({ keys, ids });
 
@@ -138,24 +149,47 @@ export function createStateNames({
     }
   };
 
+  /**
+   * Whether any named table holds a state with no names written since the walk (TR-16). Asked once the organisation's
+   * own event is recorded, under its chain's head lock: every event before it has committed, so this read sees them.
+   */
+  const unnamedSinceWalk = async (tx: NamesTx, orgId: string, walked: Walked): Promise<boolean> => {
+    for (const table of NAMED_TABLES) {
+      if (await signedRowsLackingSince(tx, table, orgId, walked.reached, TRACKED_BEFORE)) return true;
+    }
+    return false;
+  };
+
   /** Each of the table's objects named, a page a transaction: how many were, and how many were left for the next run. */
   const namedIn = async (services: SignedStatesServices, orgId: string, table: SignedStateTable, walked: Walked) => {
     const counted = { named: 0, left: 0 };
     let after: string | null = null;
     do {
-      const page: { readonly ids: readonly string[]; readonly next: string | null } = await withSignedStates(
-        database,
-        orgId,
-        services,
-        async (tx, states) => {
+      let page: {
+        readonly ids: readonly string[];
+        readonly next: string | null;
+        readonly named: number;
+        readonly left: number;
+      };
+      try {
+        page = await withSignedStates(database, orgId, services, async (tx, states) => {
           const listed = await states.objectIds(tx, orgId, table, after, OBJECTS_A_PAGE);
+          const came = { named: 0, left: 0 };
           for (const id of listed.ids) {
-            const came = await namedOne(tx, states, table, { orgId, id }, walked);
-            if (came !== 'as_is') counted[came] += 1;
+            const one = await namedOne(tx, states, table, { orgId, id }, walked);
+            if (one !== 'as_is') came[one] += 1;
           }
-          return listed;
-        },
-      );
+          // Named over a state with no names written since the walk, the organisation would be held for it: undone.
+          if (table === ORGANIZATIONS && came.named > 0 && (await unnamedSinceWalk(tx, orgId, walked)))
+            throw new UnnamedSinceWalk();
+          return { ...listed, ...came };
+        });
+      } catch (error) {
+        if (!(error instanceof UnnamedSinceWalk)) throw error;
+        return { named: counted.named, left: counted.left + 1 };
+      }
+      counted.named += page.named;
+      counted.left += page.left;
       after = page.next;
     } while (after !== null);
     return counted;
@@ -183,13 +217,13 @@ export function createStateNames({
         await holdOrganisation(database, orgId, services, walked.reason);
         return;
       }
-      await afterWalk();
       let named = 0;
       let left = 0;
       for (const table of NAMED_TABLES) {
         if (signal?.aborted === true) return;
         // The organisation's own state last, and only once no other was left: its names then reach its start.
         if (table === ORGANIZATIONS && left > 0) break;
+        await beforeNaming(table);
         const counted = await namedIn(services, orgId, table, walked);
         named += counted.named;
         left += counted.left;

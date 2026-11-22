@@ -1393,7 +1393,7 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
    * names left off (each table's tracks dropped, as an image from before them wrote), the agent suspended choosing to
    * cancel (E1) and reactivated (E2) the same way. Then, with `named`, the job names them, its chain checked whole.
    */
-  async function legacyOrganisation(named: boolean, walked?: (w: World) => Promise<void>) {
+  async function legacyOrganisation(named: boolean, walked?: (w: World, next: SignedStateTable) => Promise<void>) {
     const { w, acting } = await ready();
     const LEGACY_ORG = untracked(ORGANIZATIONS);
     const LEGACY_AGENTS = untracked(AGENTS);
@@ -1423,7 +1423,7 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
     }
     capture = new LogCapture();
     const job = createStateNames({
-      ...(walked === undefined ? {} : { walked: () => walked(w) }),
+      ...(walked === undefined ? {} : { walked: (next: SignedStateTable) => walked(w, next) }),
       list: () => Promise.resolve([w.org]),
       database: app,
       keys,
@@ -1598,6 +1598,48 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
       expect.objectContaining({ left: 1 }),
       expect.objectContaining({ named: 2, left: 0 }),
     ]);
+  });
+
+  /**
+   * TR-16, the deploy overlap: the job names the agent, then the app's older code records it again with no names
+   * before the organisation's own naming. Its state saved as the owner saw it then, and the job's run.
+   */
+  async function olderCodeBeforeOwnNaming() {
+    let saved: Awaited<ReturnType<Awaited<ReturnType<typeof tamperAsOwner>>['saveRow']>> | undefined;
+    const legacy = await legacyOrganisation(true, async (at, next) => {
+      if (next !== ORGANIZATIONS || saved !== undefined) return;
+      await recordedByOlderCode(at);
+      await asOwner(at, async (owner) => {
+        saved = await owner.saveRow(at.agent);
+      });
+    });
+    if (saved === undefined) throw new Error('the older code should have written before the organisation was named');
+    return { ...legacy, saved };
+  }
+
+  it('SEC-DB-20 TR-16 state names: a state with no names written after its page, before the organisation is named, waits a run and holds nothing', async () => {
+    const { w, job } = await olderCodeBeforeOwnNaming();
+    // The agent named, the organisation's naming undone: left for the next run, nothing held.
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 1, left: 1 })]);
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+    await job.run();
+    expect(lines('state_names.named')).toEqual([
+      expect.objectContaining({ left: 1 }),
+      expect.objectContaining({ named: 2, left: 0 }),
+    ]);
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    // Named whole now: the legacy cancel can't be hidden.
+    await hideTheCancel(w);
+    expect(await cancelsHeld(w, 0n)).toEqual({ refused: expect.stringMatching(/can't be believed/) as string });
+  });
+
+  it('SEC-DB-20 TR-16’s tamper control: that state put back by the owner once the organisation is named holds it', async () => {
+    const { w, job, saved } = await olderCodeBeforeOwnNaming();
+    await job.run();
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+    await asOwner(w, (owner) => owner.withoutStatusGuard(() => owner.restoreRow(saved)));
+    expect(await namesHeld(w)).toEqual({ held: false, onHold: true });
   });
 
   it('state names: an object that can’t be believed is the organisation’s failure, logged, nothing claimed named', async () => {

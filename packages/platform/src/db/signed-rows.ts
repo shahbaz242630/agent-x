@@ -594,6 +594,31 @@ export async function signedRowIds<Schema>(
 }
 
 /**
+ * Whether any of the organisation's rows in the table points at a state event past `afterSeq` whose details carry
+ * no `detail`: state-names.ts's look, in its naming transaction, for a state with no names written since its walk
+ * (TR-16). The pointer is read, never believed: an answer of true only makes the naming wait for its next run.
+ */
+export async function signedRowsLackingSince<Schema>(
+  tx: Transaction<Schema>,
+  table: SignedStateTable,
+  orgId: string,
+  afterSeq: bigint,
+  detail: string,
+): Promise<boolean> {
+  checkTable(table);
+  if (!UUID.test(orgId)) throw new RangeError('A signed row is named by UUIDs');
+  await assertTenant(tx, orgId);
+  const { rows } = await sql<{ found: boolean }>`
+    select exists (
+      select from ${sql.table(table.table)} as target
+      join audit.events as e on e.org_id = target.org_id and e.id = target.state_event_id
+      where target.org_id = ${orgId} and e.seq > ${afterSeq} and (e.details::jsonb -> ${detail}) is null
+    ) as found
+  `.execute(tx);
+  return rows[0]?.found === true;
+}
+
+/**
  * Writes the authority fields `set` names and gives back the row as it now
  * is, with each value written read as text by the same SQL. From `new`: a row
  * at version 1 pointing nowhere, the one the transaction has just inserted,
