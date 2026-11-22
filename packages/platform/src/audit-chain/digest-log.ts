@@ -164,13 +164,20 @@ export interface HeadWatch {
 /** The places a read asks the hashes of, in its own statement, in the order `heldTo` gives them (TR-1). */
 export const placesOf = (heads: readonly HeadSeen[]): readonly string[] => heads.map(({ seq }) => seq.toString());
 
+/** How much of its hash a compact head (witness-log.ts: a fingerprint, or a head released) keeps. */
+export const COMPACT_HASH_BYTES = 16;
+
+/**
+ * Whether the hash read at a place is the one a head held to has there (TR-9): a whole head by its whole hash, a compact
+ * one by its first bytes; never by fewer than a compact head keeps, so an empty hash holds nothing.
+ */
+export const hashHolds = (there: unknown, hash: Buffer): boolean =>
+  there instanceof Buffer && hash.length >= COMPACT_HASH_BYTES && there.subarray(0, hash.length).equals(hash);
+
 /** The first head without its hash at its place, `hashes` read in the order given (placesOf). */
 const hashMissing = (heads: readonly HeadSeen[], hashes: unknown): HeadSeen | undefined => {
   const read: readonly unknown[] = Array.isArray(hashes) ? hashes : [];
-  return heads.find(({ hash }, at) => {
-    const there = read[at];
-    return !(there instanceof Buffer) || !there.equals(hash);
-  });
+  return heads.find(({ hash }, at) => !hashHolds(read[at], hash));
 };
 
 /**
@@ -214,7 +221,9 @@ export function headCutBelow(
   if (first === undefined) return undefined;
   const highest = heldTo.reduce((one, other) => (other.seq > one.seq ? other : one), first);
   if (head === undefined || head.seq < highest.seq) return highest;
-  return hashMissing(heldTo, seenHashes) ?? heldTo.find(({ seq, hash }) => seq === head.seq && !head.hash.equals(hash));
+  return (
+    hashMissing(heldTo, seenHashes) ?? heldTo.find(({ seq, hash }) => seq === head.seq && !hashHolds(head.hash, hash))
+  );
 }
 
 /** Whether the chain's head, read as headCutBelow reads it, holds to every head held to. */

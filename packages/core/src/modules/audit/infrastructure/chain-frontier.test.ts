@@ -227,6 +227,24 @@ describe('SEC-DB-20 TR-1 F.1 the walk within a transaction and the path frontier
     expect(judgeWitnessed([stop], startAt(anchor), cut, 'cut')).toEqual({ kind: 'cut', seq: 7n });
   });
 
+  it('TR-9: a compact head (released on a probe) is judged by its first 16 bytes: on the path held, another event a cut', async () => {
+    const honest = await new Sealed().grow(9);
+    const anchor = honest.point(4n);
+    const compact = (head: { readonly seq: bigint; readonly hash: Buffer }) => ({
+      seq: head.seq,
+      hash: head.hash.subarray(0, 16),
+    });
+    const stop = compact(honest.witnessed(7n));
+    expect(judgeWitnessed([stop], startAt(anchor), walked(await honest.walk(anchor)), 'cut')).toEqual({ kind: 'held' });
+    // Cut to 5 and grown again: the compact stop's place holds another event.
+    const cut = walked(await (await honest.cutTo(5n)).grow(4, 'stale').then((stale) => stale.walk(anchor)));
+    expect(judgeWitnessed([stop], startAt(anchor), cut, 'cut')).toEqual({ kind: 'cut', seq: 7n });
+    // Too short to be a compact head: never held.
+    expect(
+      judgeWitnessed([{ seq: 7n, hash: Buffer.alloc(0) }], startAt(anchor), walked(await honest.walk(anchor)), 'cut'),
+    ).toEqual({ kind: 'cut', seq: 7n });
+  });
+
   it('a head above the head reached is a cut in Tx A, and one to judge in the gate', async () => {
     const chain = await new Sealed().grow(5);
     const above = { seq: 8n, hash: Buffer.alloc(32, 8) };
