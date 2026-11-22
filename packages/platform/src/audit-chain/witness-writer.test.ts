@@ -227,6 +227,30 @@ describe('SEC-DB-20 TR-14 a file written in a process’s own name', () => {
     ]);
     expect(seqs(copy.log.pending(CHAIN))).toEqual([6n]);
   });
+
+  it('S210 final F1: a copy a minute ahead of the store still lists one named exactly the clocks’ spread before it landed', async () => {
+    const time = { at: AT.getTime() };
+    // The store a minute behind this copy: near enough that its clock is left as it stands (RIGHT_ENOUGH_MS).
+    const store = createFakeWriteOnceStore({ now: () => time.at - MINUTE });
+    const leader = copyOn(store, { time });
+    await leader.log.refresh();
+    // Lands half a minute after that pass began (by the store), named exactly five minutes before: not misdated.
+    const landed = time.at - MINUTE + 30_000;
+    const name = fileName('e1/heads/', landed - 5 * MINUTE, leader.log.writer());
+    const line = JSON.stringify({
+      c: `organisation:${ORG}`,
+      s: '6',
+      h: Buffer.alloc(32, 6).toString('hex'),
+      t: new Date(landed - 5 * MINUTE).toISOString(),
+    });
+    store.files.set(name, await signedFile(keys, HEADS, name, 1, [line]));
+    store.created.set(name, landed);
+    time.at += MINUTE;
+    await leader.log.refresh();
+    expect(leader.alarms('impersonated')).toEqual([expect.objectContaining({ writer: leader.log.writer() })]);
+    expect(leader.alarms('misdated_heads')).toEqual([]);
+    expect(seqs(leader.log.pending(CHAIN))).toEqual([6n]);
+  });
 });
 
 /** A file of `kind` planted in a store, named for `writer` at `at`: its name. */

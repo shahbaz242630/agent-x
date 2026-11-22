@@ -35,8 +35,9 @@
 // can't land past it. A head this process wrote already (a replay noting its kept head again) is not queued again.
 //
 // Reading: a coalesced `refresh` (a caller waits for the next that starts after its call) lists each heads folder
-// newest-first to what it read already, less five minutes for the clocks and late writes; a start reads the newest sound
-// snapshot first (passing over at most a day's spoiled ones), then every heads file since, less the same; with no sound
+// newest-first to what it read already, less the lag (LAG_MS: five minutes for the clocks and late writes, and a minute
+// for the reader's own clock, so wider than a misdated name), and a start reads the newest sound snapshot first (passing
+// over at most a day's spoiled ones), then every heads file since, less the lag and a minute more; with no sound
 // snapshot, a day of heads files back (a head older than that above its chain's anchor means the anchor check has been
 // stalled a day, its own alarm).
 //
@@ -292,14 +293,18 @@ const WAIT_MS = 5_000;
 /** How far past this process's clock a name may be dated, as the anchors' log allows. */
 const MOST_AHEAD_MS = 5 * 60_000;
 
-/** How far before the newest file read a later read looks again: a file named earlier may land later. */
-const LAG_MS = MOST_AHEAD_MS;
-
 /** How finely Azure's Date tells the store's time: whole seconds, rounded down. */
 const DATE_STEP_MS = 1000;
 
 /** How near the store's Date a clock is left as it stands (TR-12): an NTP-synced one always, so it dates as before. */
 const RIGHT_ENOUGH_MS = 60_000;
+
+/**
+ * How far before the newest file read a later read looks again: a file named earlier may land later. Wider than the
+ * misdated threshold by this copy's own clock's leeway (S210 final F1): a reader up to RIGHT_ENOUGH_MS ahead of the store
+ * looking back only MOST_AHEAD_MS never listed a file named exactly that far before it landed, nor was it misdated.
+ */
+const LAG_MS = MOST_AHEAD_MS + RIGHT_ENOUGH_MS + DATE_STEP_MS;
 
 /** The most names a list call asks of the heads' folders: Azure's most, one call where a hundred names took one each. */
 const LIST_PAGE = 5000;
@@ -345,10 +350,16 @@ const MOST_SET_ASIDE_LISTED = 10 * LIST_PAGE;
 const MOST_SET_ASIDE_BYTES = 4096;
 
 /**
- * How recently the leader's last whole read must have begun for it to write a snapshot (TR-7 D2): well inside LAG_MS,
- * so a start reading heads files from the snapshot's time less the lag reads every one named since that read.
+ * How recently the leader's last whole read must have begun for it to write a snapshot (TR-7 D2): a start reads heads
+ * files from the snapshot's time less SNAPSHOT_LAG_MS, so it reads every one that read could have missed.
  */
 const SNAPSHOT_FRESH_MS = 60_000;
+
+/**
+ * How far before a snapshot's time a start reads heads files: the lag from the whole read it was written after, which
+ * began up to SNAPSHOT_FRESH_MS before it (S210 final F1: the lag alone left that minute's back-dated names unread).
+ */
+const SNAPSHOT_LAG_MS = LAG_MS + SNAPSHOT_FRESH_MS;
 
 /** How often the leader writes a snapshot. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
@@ -1584,8 +1595,8 @@ export function createWitnessLog({
   };
 
   /**
-   * Where a start reads heads files back from (TR-7 D3): a snapshot's time less the lag; with none, a day back (and to
-   * the oldest set-aside one passed over, itself within a day). Once a set-aside writer's snapshots were passed over,
+   * Where a start reads heads files back from (TR-7 D3): a snapshot's time less SNAPSHOT_LAG_MS; with none, a day back
+   * (and to the oldest set-aside one passed over, itself within a day). Once a set-aside writer's snapshots were passed over,
    * never past a day back: an honest older snapshot found under them is still taken whole, its state complete, but the
    * heads files named between it and a day back are not read, which is the alarm (SEV-1: a stop among them is not held
    * here until the chains are rebased, playbook H step 5), as is a walk stopped at a day's set-aside snapshots.
@@ -1596,9 +1607,10 @@ export function createWitnessLog({
   ): number => {
     const readBack = began - SET_ASIDE_READ_BACK_MS;
     const passedAside = snapshot.asideFrom !== undefined || snapshot.capped;
-    let from = Math.min(began - NO_SNAPSHOT_READ_BACK_MS, (snapshot.asideFrom ?? Infinity) - LAG_MS);
-    if (snapshot.at !== undefined) from = passedAside ? Math.max(snapshot.at - LAG_MS, readBack) : snapshot.at - LAG_MS;
-    if (snapshot.capped || (passedAside && snapshot.at !== undefined && snapshot.at - LAG_MS < readBack)) {
+    let from = Math.min(began - NO_SNAPSHOT_READ_BACK_MS, (snapshot.asideFrom ?? Infinity) - SNAPSHOT_LAG_MS);
+    const fromSnapshot = snapshot.at === undefined ? undefined : snapshot.at - SNAPSHOT_LAG_MS;
+    if (fromSnapshot !== undefined) from = passedAside ? Math.max(fromSnapshot, readBack) : fromSnapshot;
+    if (snapshot.capped || (passedAside && fromSnapshot !== undefined && fromSnapshot < readBack)) {
       const fields = {
         folder: 'snapshots',
         snapshotAt: snapshot.at === undefined ? undefined : new Date(snapshot.at).toISOString(),
@@ -1806,8 +1818,9 @@ export function createWitnessLog({
 
   /**
    * The whole held, as a snapshot, where this copy leads, hourly and only while its reads are whole (TR-7 D2): the last
-   * whole pass begun within SNAPSHOT_FRESH_MS. A start reads heads files only from a snapshot's time less the lag, so one
-   * written while reads failed would leave out every head named meanwhile, a stop among them, for good.
+   * whole pass begun within SNAPSHOT_FRESH_MS. A start reads heads files only from a snapshot's time less
+   * SNAPSHOT_LAG_MS, so one written while reads failed would leave out every head named meanwhile, a stop among them,
+   * for good.
    */
   const snapshotOnce = async (): Promise<void> => {
     if (snapshots === undefined || writes?.() !== true || state !== 'read' || !changedSinceSnapshot) return;
