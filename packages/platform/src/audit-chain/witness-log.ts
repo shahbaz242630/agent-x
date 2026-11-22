@@ -335,6 +335,9 @@ const MOST_SET_ASIDE_READS = 100;
  */
 const MOST_START_SET_ASIDE_READS = 1000;
 
+/** The most set-aside names one read lists (TR-7 review): ten pages; past them the read stops short, a flood unheld. */
+const MOST_SET_ASIDE_LISTED = 10 * LIST_PAGE;
+
 /** The most a set-aside file may hold: one line and its closing line, with room to spare. */
 const MOST_SET_ASIDE_BYTES = 4096;
 
@@ -743,6 +746,8 @@ export function createWitnessLog({
   let setAsideFrom: number | undefined;
   // How far back a set-aside read looks while no pass has fetched every new one (TR-7 D1): none, a start's reach.
   let setAsideFloor: number | undefined;
+  // How many set-aside files this start fetched in all its reads (TR-7 review: setAsideShare).
+  let startFetched = 0;
   let floodSaidAt: number | undefined;
 
   // This copy's clock as the store's (TR-12): how far the store's Date was from the local clock on its latest answer,
@@ -1406,27 +1411,41 @@ export function createWitnessLog({
     return spoiled;
   };
 
-  /** The set-aside names not read yet back to `since`, newest first, and how many were misdated (readSetAside). */
+  /**
+   * The set-aside names not read yet back to `since`, as few as a pass may fetch (TR-7 review): the oldest `most`, oldest
+   * first, of `waiting` in all (listed newest first, so only the last `most` yielded are kept); how many were misdated;
+   * and whether the list stopped at MOST_SET_ASIDE_LISTED names (`cut`), a flood never held in memory whole.
+   */
   const setAsideNames = async (
     at: string,
     since: number | undefined,
+    most: number,
   ): Promise<{
-    readonly waiting: readonly { readonly name: string; readonly at: number }[];
+    readonly oldest: readonly { readonly name: string; readonly at: number }[];
+    readonly waiting: number;
     readonly misdated: number;
+    readonly cut: boolean;
   }> => {
-    const waiting: { readonly name: string; readonly at: number }[] = [];
+    let kept: { readonly name: string; readonly at: number }[] = [];
+    let waiting = 0;
     let misdated = 0;
+    let listed = 0;
     for await (const file of namesOf(timed, at, since)) {
       if (since !== undefined && file.at < since) break;
+      listed += 1;
+      if (since !== undefined && listed > MOST_SET_ASIDE_LISTED) return { oldest: [], waiting, misdated, cut: true };
       if (setAsideRead.has(file.name)) continue;
       if (file.created !== undefined && Math.abs(file.at - file.created) > MOST_AHEAD_MS) {
         misdated += 1;
         setAsideRead.add(file.name);
-      } else {
-        waiting.push(file);
+        continue;
       }
+      waiting += 1;
+      kept.push(file);
+      // Trimmed now and then, not each name: the last `most` are the oldest so far.
+      if (kept.length > 2 * most + 1) kept = kept.slice(kept.length - most);
     }
-    return { waiting, misdated };
+    return { oldest: kept.slice(Math.max(0, kept.length - most)).toReversed(), waiting, misdated, cut: false };
   };
 
   /**
@@ -1439,23 +1458,29 @@ export function createWitnessLog({
    */
   const readSetAside = async (began: number, since: number | undefined): Promise<boolean> => {
     const at = folder('set-aside');
-    const { waiting, misdated } = await setAsideNames(at, since);
-    // A start's reach so far (setAsideDownTo).
-    if (since !== undefined && state === 'unread') setAsideFloor = Math.min(setAsideFloor ?? since, since);
-    // A start fetches up to MOST_START_SET_ASIDE_READS (TR-7 review), later passes MOST_SET_ASIDE_READS; the operator's
-    // whole-folder check every one. A start stopped short takes no snapshot (refreshOnce). Whether it fetched every one.
-    let most = since === undefined ? waiting.length : MOST_SET_ASIDE_READS;
-    if (since !== undefined && state === 'unread') most = MOST_START_SET_ASIDE_READS;
-    // Listed newest first.
-    const spoiled = await fetchSetAsides(waiting.toReversed().slice(0, most));
+    const most = setAsideShare(since);
+    const { oldest, waiting, misdated, cut } = await setAsideNames(at, since, most);
+    const spoiled = await fetchSetAsides(oldest);
+    if (state === 'unread') startFetched += oldest.length;
     if (spoiled > 0) alarm('spoiled', { folder: at, files: spoiled });
     if (misdated > 0) alarm('set_aside_misdated', { folder: at, files: misdated });
-    // With no `since` (the operator's whole folder), every one was fetched.
-    const whole = waiting.length <= most || since === undefined;
+    const whole = !cut && waiting <= most;
+    // A start's reach so far (setAsideDownTo), only once every one back to it was fetched: a pass that failed or
+    // stopped short leaves it, so the next reads back there again (setAsideShort sets where from).
+    if (whole && since !== undefined && state === 'unread') setAsideFloor = Math.min(setAsideFloor ?? since, since);
     if (whole) setAsideWhole(began);
-    else setAsideShort(began, at, since);
+    else if (since !== undefined) setAsideShort(began, at, since, most);
     if (setAside.has(writer)) ownSetAside();
     return whole;
+  };
+
+  /**
+   * How many set-aside files a read may fetch (TR-7 review): a start MOST_START_SET_ASIDE_READS in all its reads, a later
+   * pass MOST_SET_ASIDE_READS; the operator's whole-folder check (no `since`) every one.
+   */
+  const setAsideShare = (since: number | undefined): number => {
+    if (since === undefined) return Number.POSITIVE_INFINITY;
+    return state === 'unread' ? Math.max(0, MOST_START_SET_ASIDE_READS - startFetched) : MOST_SET_ASIDE_READS;
   };
 
   /**
@@ -1486,17 +1511,17 @@ export function createWitnessLog({
   };
 
   /** A set-aside pass stopped short: the next looks back as far as this one did, and the flood is said. */
-  const setAsideShort = (began: number, at: string, since: number): void => {
+  const setAsideShort = (began: number, at: string, since: number, most: number): void => {
     setAsideFrom = undefined;
     setAsideFloor = since;
-    floodSaid(began, at);
+    floodSaid(began, at, most);
   };
 
   /** A set-aside pass stopped short by a flood: said, at most once a SAY_EVERY_MS. */
-  const floodSaid = (began: number, at: string): void => {
+  const floodSaid = (began: number, at: string, most: number): void => {
     if (floodSaidAt !== undefined && began - floodSaidAt < SAY_EVERY_MS) return;
     floodSaidAt = began;
-    alarm('set_aside_flood', { folder: at, mostRead: MOST_SET_ASIDE_READS });
+    alarm('set_aside_flood', { folder: at, mostRead: most, mostListed: MOST_SET_ASIDE_LISTED });
   };
 
   /**
@@ -1562,11 +1587,14 @@ export function createWitnessLog({
     let from = Math.min(began - NO_SNAPSHOT_READ_BACK_MS, (snapshot.asideFrom ?? Infinity) - LAG_MS);
     if (snapshot.at !== undefined) from = passedAside ? Math.max(snapshot.at - LAG_MS, readBack) : snapshot.at - LAG_MS;
     if (snapshot.capped || (passedAside && snapshot.at !== undefined && snapshot.at - LAG_MS < readBack)) {
-      alarm('read_back_capped', {
+      const fields = {
         folder: 'snapshots',
         snapshotAt: snapshot.at === undefined ? undefined : new Date(snapshot.at).toISOString(),
         readBackFrom: new Date(from).toISOString(),
-      });
+      };
+      alarm('read_back_capped', fields);
+      // The operator's step, in plain words beside the alarm: every time, a rebase.
+      logger.error('audit.witness_rebase_needed', fields);
     }
     return from;
   };
@@ -1678,6 +1706,7 @@ export function createWitnessLog({
       await askClock();
       const began = now();
       // The writers set aside first, so no file of theirs is read in this pass.
+      if (state === 'unread') startFetched = 0;
       const setAsidesWhole = await readSetAside(began.getTime(), setAsideSince(began.getTime()));
       let newest: number | undefined;
       if (state === 'read') {

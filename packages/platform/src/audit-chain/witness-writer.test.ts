@@ -372,6 +372,53 @@ describe('TR-7 review: a start reading set-asides further back for an old snapsh
   });
 });
 
+describe('TR-7 re-review: a start’s set-aside reads, failed or flooded', () => {
+  it('a fetch that fails mid-way leaves the reach where it was: the retry still finds the set-aside, the snapshot passed over', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const LEADER = '0123456789ab';
+    const old = AT.getTime() - 48 * HOUR;
+    await plant(snapshots, 'snapshots', SNAPSHOT, [headLine(4n, 4, old)], old, LEADER);
+    const real = await setAsideFile(store, LEADER, old + MINUTE);
+    store.created.set(real, old + MINUTE);
+    let failOnce = true;
+    store.instead.getAtMost = (name, most) => {
+      if (name === real && failOnce) {
+        failOnce = false;
+        return Promise.reject(new Error('the store answered 503'));
+      }
+      return store.real.getAtMost(name, most);
+    };
+    const starting = copyOn(store, { snapshots });
+    expect(await starting.log.refreshWhole()).toBe(false);
+    expect(await starting.log.refreshWhole()).toBe(true);
+    // Its writer known set aside, the old snapshot is past the walk's reach: not taken, said.
+    expect(starting.log.pending(CHAIN)).toEqual([]);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+  });
+
+  it('a hundred thousand junk names in the start’s look back: the list stops at its bound, nothing held whole, the alarms', async () => {
+    const store = createFakeWriteOnceStore();
+    for (let one = 0; one < 100_000; one += 1) {
+      const at = AT.getTime() - one * 500;
+      const name = fileName('e1/set-aside/', at);
+      store.files.set(name, Buffer.from('junk'));
+      store.created.set(name, at);
+    }
+    const starting = copyOn(store);
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(starting.log.state()).toBe('read');
+    // Ten pages of set-aside names and the heads' few: never the whole flood listed or fetched.
+    expect(store.calls.lists).toBeLessThanOrEqual(16);
+    expect(store.calls.smallGets).toBe(0);
+    expect(starting.alarms('set_aside_flood')).toEqual([
+      expect.objectContaining({ mostRead: 1000, mostListed: 50_000 }),
+    ]);
+    expect(starting.alarms('read_back_capped')).toHaveLength(1);
+    expect(starting.capture.lines().filter(({ event }) => event === 'audit.witness_rebase_needed')).toHaveLength(1);
+  });
+});
+
 describe('TR-14 set-aside snapshots at a start', () => {
   it("goes back past a day's of a set-aside leader's snapshots, a quarter hour apart, to an older one, its state whole", async () => {
     const store = createFakeWriteOnceStore();
