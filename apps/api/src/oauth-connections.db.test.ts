@@ -591,7 +591,7 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
   });
 });
 
-describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-02, SEC-OAUTH-03, SEC-OAUTH-11, SEC-OAUTH-12 the authorization request (Postgres ${server.version})`, () => {
   const asked = {
     response_type: 'code',
     redirect_uri: REDIRECT,
@@ -932,7 +932,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
   });
 });
 
-describe(`SEC-OAUTH-02, -04 the code exchanged once (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-02, SEC-OAUTH-04 the code exchanged once (Postgres ${server.version})`, () => {
   it('issues a pair whose access token acts as the agent, at the MCP endpoint, with the scopes ticked', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -1037,7 +1037,7 @@ describe(`SEC-OAUTH-02, -04 the code exchanged once (Postgres ${server.version})
   });
 });
 
-describe(`SEC-OAUTH-05, -08 a refresh token rotated, used once (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-05, SEC-OAUTH-08 a refresh token rotated, used once (Postgres ${server.version})`, () => {
   it('rotates a pair, narrowing the scopes when asked, never widening them', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -1824,7 +1824,7 @@ async function brakeFree(name: string): Promise<boolean> {
   }
 }
 
-describe(`SEC-OAUTH-06, -07 an agent's connections listed (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-06, SEC-OAUTH-07 an agent's connections listed (Postgres ${server.version})`, () => {
   it('lists them newest first, each as its signed state says, ended ones until 30 days after their expiry', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -1913,7 +1913,7 @@ describe(`SEC-OAUTH-06, -07 an agent's connections listed (Postgres ${server.ver
   });
 });
 
-describe(`SEC-OAUTH-07, -10 a connection revoked by a member (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-07, SEC-OAUTH-10 a connection revoked by a member (Postgres ${server.version})`, () => {
   it('stops at once, with step-up: its tokens refused, and a second revocation refused', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');

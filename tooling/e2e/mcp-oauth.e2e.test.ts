@@ -292,7 +292,7 @@ afterAll(async () => {
   await database.destroy();
 });
 
-describe('SEC-OAUTH-01, -02, -05, -07, -10, -12, -13 a real MCP client connected by OAuth', () => {
+describe('SEC-OAUTH-01, SEC-OAUTH-02, SEC-OAUTH-05, SEC-OAUTH-07, SEC-OAUTH-10, SEC-OAUTH-12, SEC-OAUTH-13 a real MCP client connected by OAuth', () => {
   it('registers, is authorised by a person, lists the tools, refreshes, and is revoked', async () => {
     const provider = new MemoryProvider();
 

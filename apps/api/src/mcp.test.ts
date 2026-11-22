@@ -1192,7 +1192,7 @@ describe('an MCP tool stands only with its REST twin as it was registered (SEC-M
   });
 });
 
-describe('the MCP tools apart from any transport: definitions and results (6E2, SEC-MCP-01, -03)', () => {
+describe('the MCP tools apart from any transport: definitions and results (6E2, SEC-MCP-01, SEC-MCP-03)', () => {
   /** The twins alone, on a bare app with the contract: what any transport's tools would be built from. */
   async function twinnedTools() {
     const app = Fastify();
