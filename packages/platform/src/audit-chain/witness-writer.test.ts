@@ -25,6 +25,7 @@ const CHAIN: Chain = { kind: 'organisation', orgId: ORG };
 const OTHER: Chain = { kind: 'organisation', orgId: OTHER_ORG };
 const AT = new Date('2026-11-21T10:00:00.000Z');
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 const REASON = 'INC-2026-11-21';
 
 type Store = ReturnType<typeof createFakeWriteOnceStore>;
@@ -316,41 +317,68 @@ describe('TR-14 attribution through snapshots', () => {
 });
 
 describe('TR-14 set-aside snapshots at a start', () => {
-  it("goes back past more than a day's of a set-aside leader's snapshots to an older one, its state whole", async () => {
+  it("goes back past a day's of a set-aside leader's snapshots, a quarter hour apart, to an older one, its state whole", async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
     const LEADER = '0123456789ab';
-    await plant(
-      snapshots,
-      'snapshots',
-      SNAPSHOT,
-      [headLine(4n, 4, AT.getTime() - 40 * 60 * MINUTE)],
-      AT.getTime() - 40 * 60 * MINUTE,
-    );
-    for (let hour = 30; hour > 0; hour -= 1) {
-      await plant(snapshots, 'snapshots', SNAPSHOT, [], AT.getTime() - hour * 60 * MINUTE, LEADER);
+    const older = AT.getTime() - 23 * 60 * MINUTE - 50 * MINUTE;
+    await plant(snapshots, 'snapshots', SNAPSHOT, [headLine(4n, 4, older)], older);
+    for (let quarter = 95; quarter > 0; quarter -= 1) {
+      await plant(snapshots, 'snapshots', SNAPSHOT, [], AT.getTime() - quarter * 15 * MINUTE, LEADER);
     }
     await copyOn(store, { signer: 'operator' }).log.setAside(LEADER, REASON);
     const starting = copyOn(store, { snapshots });
     await starting.log.refresh();
     expect(seqs(starting.log.pending(CHAIN))).toEqual([4n]);
     expect(starting.alarms('set_aside')).toEqual([
-      expect.objectContaining({ writers: [LEADER], folder: 'snapshots', files: 30 }),
+      expect.objectContaining({ writers: [LEADER], folder: 'snapshots', files: 95 }),
     ]);
     expect(starting.alarms('spoiled')).toEqual([]);
+    expect(starting.capture.lines().filter(({ event }) => event === 'audit.witness_read_back_capped')).toEqual([]);
   });
 
-  it("with no other snapshot, reads heads files back from the oldest set-aside one's time, past a day", async () => {
+  it('TR-7 D3: with none but a set-aside one past a day, reads heads files back a day alone, and says older went unread', async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
     const LEADER = '0123456789ab';
     const threeDays = AT.getTime() - 72 * 60 * MINUTE;
     await plant(snapshots, 'snapshots', SNAPSHOT, [], threeDays, LEADER);
     await plant(store, 'heads', HEADS, [headLine(3n, 3, threeDays + MINUTE)], threeDays + MINUTE);
+    await plant(store, 'heads', HEADS, [headLine(5n, 5, AT.getTime() - HOUR)], AT.getTime() - HOUR);
     await copyOn(store, { signer: 'operator' }).log.setAside(LEADER, REASON);
     const starting = copyOn(store, { snapshots });
     await starting.log.refresh();
-    expect(seqs(starting.log.pending(CHAIN))).toEqual([3n]);
+    expect(seqs(starting.log.pending(CHAIN))).toEqual([5n]);
+    expect(starting.capture.lines().filter(({ event }) => event === 'audit.witness_read_back_capped')).toEqual([
+      expect.objectContaining({ level: 'error', setAsideSnapshots: 0 }),
+    ]);
+  });
+
+  it('TR-7 D3: a thousand set-aside snapshots and a week of heads files: a start reads a day back, in bounded calls', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const LEADER = '0123456789ab';
+    // Every ten minutes for a week: never fetched, as their writer is set aside.
+    for (let one = 1; one <= 1000; one += 1) {
+      snapshots.files.set(fileName('e1/snapshots/', AT.getTime() - one * 10 * MINUTE, LEADER), Buffer.from('junk'));
+    }
+    for (let hour = 1; hour <= 7 * 24; hour += 1) {
+      const at = AT.getTime() - hour * HOUR;
+      await plant(store, 'heads', HEADS, [headLine(BigInt(1000 - hour), 1, at)], at);
+    }
+    await copyOn(store, { signer: 'operator' }).log.setAside(LEADER, REASON);
+    const before = { heads: { ...store.calls }, snapshots: { ...snapshots.calls } };
+    const starting = copyOn(store, { snapshots });
+    expect(await starting.log.refreshWhole()).toBe(true);
+    expect(starting.log.state()).toBe('read');
+    // A day of heads files and the set-aside, none of the snapshots.
+    expect(store.calls.smallGets - before.heads.smallGets).toBeLessThanOrEqual(26);
+    expect(snapshots.calls.smallGets - before.snapshots.smallGets).toBe(0);
+    expect(store.calls.lists - before.heads.lists + snapshots.calls.lists - before.snapshots.lists).toBeLessThan(40);
+    expect(Math.min(...seqs(starting.log.pending(CHAIN)).map(Number))).toBeGreaterThanOrEqual(1000 - 24);
+    expect(starting.capture.lines().filter(({ event }) => event === 'audit.witness_read_back_capped')).toEqual([
+      expect.objectContaining({ setAsideSnapshots: 96 }),
+    ]);
   });
 });
 

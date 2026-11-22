@@ -113,8 +113,10 @@
 //      over the files it named until then from its next read (a web copy's within a minute), and says each.
 //   4. Restart that replica or deactivate its revision (`set_aside_late` lines mean it still writes), then wait five
 //      minutes (a file named up to the clocks' spread ahead, read before the set-aside, then dates before the rebase).
-//      If that copy led the jobs, wait for the new leader's first snapshot (within the hour) before adding copies:
-//      until then a start passes over the old leader's and reads heads files back from them.
+//      If that copy led the jobs, wait for the new leader's first snapshot before adding copies: it writes one at its
+//      first flush after a whole read once it holds any head, never while its reads fail (TR-7 D2), so not always
+//      within the hour; check for a new name under snapshots/. Until then a start passes over the old leader's and
+//      reads heads files back a day at most (TR-7 D3, `audit.witness_read_back_capped`): what is older, step 5 covers.
 //   5. Rebase each chain held (chain-rebase). A writer with new IDs each file (no `audit.witness_writer` line for
 //      them) can't be set aside by ID: restart every copy and rotate the `audit-anchor` key before rebasing.
 import { randomBytes } from 'node:crypto';
@@ -313,8 +315,14 @@ const START_SET_ASIDE_BACK_MS = NO_SNAPSHOT_READ_BACK_MS + LAG_MS;
 /** How many spoiled snapshots a start goes back past: a day's at one an hour. */
 const MOST_SPOILED_SNAPSHOTS = 24;
 
-/** How many set-aside snapshots a start goes back past (TR-14), apart from the spoiled: a long-lived leader's quarter. */
-const MOST_SET_ASIDE_SNAPSHOTS = 24 * 90;
+/**
+ * How far back a start goes past a set-aside writer's snapshots (TR-7 D3): a day, as with none sound. Older state is not
+ * read again: said (`audit.witness_read_back_capped`), and the operator rebases the chains held (playbook H, step 5).
+ */
+const SET_ASIDE_READ_BACK_MS = NO_SNAPSHOT_READ_BACK_MS;
+
+/** How many set-aside snapshots a start goes back past (TR-14), apart from the spoiled: a day's, at one a quarter hour. */
+const MOST_SET_ASIDE_SNAPSHOTS = 24 * 4;
 
 /** The most set-aside files a refresh fetches (TR-14): a copy flooding the folder slows no refresh past them. */
 const MOST_SET_ASIDE_READS = 100;
@@ -1401,6 +1409,8 @@ export function createWitnessLog({
       }
       waiting.push(file);
     }
+    // A start's reach so far (setAsideDownTo), and where its next pass looks back to if this one stops short.
+    if (since !== undefined && state === 'unread') setAsideFloor = Math.min(setAsideFloor ?? since, since);
     // Listed newest first.
     for (const file of waiting.toReversed().slice(0, MOST_SET_ASIDE_READS)) {
       await readSetAsideFile(at, file);
@@ -1425,10 +1435,8 @@ export function createWitnessLog({
    * look back before it, a day further back, so a writer set aside long ago is still known by its old snapshots.
    */
   const setAsideDownTo = async (at: number, began: number): Promise<void> => {
-    if (at - LAG_MS >= setAsideSince(began)) return;
-    const lower = at - LAG_MS - NO_SNAPSHOT_READ_BACK_MS;
-    setAsideFloor = lower;
-    await readSetAside(began, lower);
+    if (at - LAG_MS >= (setAsideFloor ?? setAsideSince(began))) return;
+    await readSetAside(began, at - LAG_MS - NO_SNAPSHOT_READ_BACK_MS);
   };
 
   /**
@@ -1486,7 +1494,8 @@ export function createWitnessLog({
    * The newest sound snapshot taken in, and its time (`at`); none with no snapshots' store, or none sound past a day's
    * spoiled ones. Those of a writer set aside are passed over apart (TR-14: a long-lived leader's would otherwise use up
    * the spoiled ones' count, and a start lose what older snapshots held), said once, with the oldest's time (`asideFrom`):
-   * a start that finds no other reads heads files back from there.
+   * a start that finds no other reads heads files back from there. Never past a day back once one was passed over
+   * (SET_ASIDE_READ_BACK_MS): then none, said.
    */
   const readSnapshot = async (
     gained: Set<string>,
@@ -1496,14 +1505,21 @@ export function createWitnessLog({
     let spoiled = 0;
     const aside = { count: 0, from: undefined as number | undefined, writers: new Set<string>() };
     let found: number | undefined;
+    let capped = false;
     for await (const file of namesOf(snapshots, folder('snapshots'))) {
       await setAsideDownTo(file.at, began);
       const kind = asideOf(file);
+      // Past a set-aside writer's snapshots, no further back than a day (TR-7 D3: a long-lived leader's would otherwise
+      // have a start read months of heads files before it reads at all).
+      const old = file.at < began - SET_ASIDE_READ_BACK_MS;
+      if ((kind === 'aside' && (old || aside.count >= MOST_SET_ASIDE_SNAPSHOTS)) || (old && aside.count > 0)) {
+        capped = true;
+        break;
+      }
       if (kind === 'aside') {
         aside.count += 1;
         aside.from = file.at;
         aside.writers.add(writerOfName(file.name));
-        if (aside.count >= MOST_SET_ASIDE_SNAPSHOTS) break;
         continue;
       }
       if (kind === 'late')
@@ -1517,6 +1533,12 @@ export function createWitnessLog({
       if (spoiled >= MOST_SPOILED_SNAPSHOTS) break;
     }
     if (aside.count > 0) alarm('set_aside', { writers: [...aside.writers], folder: 'snapshots', files: aside.count });
+    if (capped) {
+      logger.error('audit.witness_read_back_capped', {
+        setAsideSnapshots: aside.count,
+        readBackFrom: new Date(began - SET_ASIDE_READ_BACK_MS).toISOString(),
+      });
+    }
     return { at: found, asideFrom: aside.from };
   };
 

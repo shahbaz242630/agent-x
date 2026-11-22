@@ -409,6 +409,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing: a restart reads further back instead. A snapshot now could miss a recent stop.',
     next: 'Nothing if reads recover. Else see the witness read failure lines.',
   },
+  'audit.witness_read_back_capped': {
+    happened: 'A starting copy passed over a set-aside writer’s witness snapshots and read only a day back.',
+    broke: 'Older witness state was not read again, so a stop older than a day may not be held here.',
+    next: 'Rebase every chain the incident touched: playbook section H, step 5.',
+  },
   'audit.witness_beyond_memory': {
     happened: 'This copy had more audit chain heads than its memory allows, and let the oldest go.',
     broke: 'The chain named is anchored no more and its payments wait: a head let go cannot be checked.',
