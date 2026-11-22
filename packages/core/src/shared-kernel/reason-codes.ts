@@ -15,7 +15,7 @@ export const REASON_CODES = {
   ACTIVITY_EXPORTS_BUSY:
     'Agent X is making another large download of an activity log right now, so this one was not made or logged. Try again in a minute.',
   ACTIVITY_EXPORTS_SPENT:
-    'You have downloaded the activity log as many times as you may in an hour (5), so this one was not made. Try again later.',
+    'You have downloaded the activity log as many times as you may for now (5 an hour; your own activity, 20 a day), so this one was not made. Try again later.',
   ACTIVITY_EXPORT_EXPIRED:
     "The background download was kept for 7 days and has been deleted, so it can't be downloaded. Ask for it again.",
   ACTIVITY_EXPORT_NOT_READY:

@@ -152,6 +152,7 @@
 // fills what the log may hold. A chain that let heads go for memory anyway anchors again once a walk held to every head
 // still held and to the fingerprints of those let go (each its place and its hash's first 16 bytes, checked as a
 // head's) runs from below the lowest let go to at or past the highest (the log's walkedPast), with no rebase.
+import { MOST_WALKED_WITHIN } from '@agentx/core/modules/audit';
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type Anchor,
@@ -181,6 +182,32 @@ import { createRotation, type RotatedChecks, type RotationCheck } from './anchor
 import { createTurns, shuffledAfresh, startAnywhere } from './anchor-turns.ts';
 import { shardOfOrganisation, shardWalk } from './anchor-walk.ts';
 import { PastDeadline, scheduleRuns, Stopped, withinDeadline } from './background.ts';
+
+/**
+ * How far the platform chain may grow between two anchors before it is said (TR-13): half of what a hand-off's walk
+ * reads past its anchor. Any signed-in person adds platform events (a step-up, a sign-out, a download of their own log),
+ * and past the whole of it every organisation's hand-off is held `too_far` until the next anchor: safe, but a cheap
+ * way to stop every payment, so it is said well before.
+ */
+export const PLATFORM_GROWTH_SAID = MOST_WALKED_WITHIN / 2;
+
+/**
+ * The platform chain's growth from its last anchor to the one just made, said where past PLATFORM_GROWTH_SAID: an error
+ * (`audit.platform_chain_fast`), which the apps' error alerts carry in plain words.
+ */
+function sayPlatformGrowth(log: Logger, last: Anchor, seq: bigint, now: Date): void {
+  const grew = seq - last.seq;
+  if (grew <= BigInt(PLATFORM_GROWTH_SAID)) return;
+  const minutes = Math.max(1, Math.round((now.getTime() - last.at.getTime()) / 60_000));
+  log.error('audit.platform_chain_fast', {
+    grew: Number(grew),
+    minutes,
+    fromSeq: last.seq,
+    toSeq: seq,
+    said: PLATFORM_GROWTH_SAID,
+    most: MOST_WALKED_WITHIN,
+  });
+}
 
 /**
  * A check's report, and for a walk that holds, the signed objects it read (the trail's WalkedStep, AT13), when it began,
@@ -914,6 +941,7 @@ export function createAnchorCheck({
     // What the walk to it read of each signed object, and the stretch it read whole, kept with it (AT13): facts as true
     // as the anchor, as a decision will hold the database to them. The platform chain's too (AT13c).
     recordWalk(chain, report, last, anchor.at);
+    if (chain.kind === 'platform' && last !== undefined) sayPlatformGrowth(log, last, report.seq, anchor.at);
     log.info('audit.anchored', {
       chain: chain.kind,
       seq: report.seq,
