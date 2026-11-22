@@ -3,8 +3,8 @@
 // day's cap, a flow decided once, its code used once, and both swept once past
 // their use; a device's flow claimed once and polled no sooner than its
 // interval; a client's metadata document kept a day.
-import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createTestDatabase, holdNamedLock, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
+import { createDatabase, type Database, lockName } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -264,6 +264,79 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     } finally {
       await admin.query("delete from oauth.clients where name = 'Filler'");
     }
+  });
+
+  describe('SEC-OAUTH-13 R2-3: each count taken under its lock, the network’s before the server’s', () => {
+    const lockDay = new Date('2026-12-20T09:00:00Z');
+    /** `count` clients registered today from `network`, as the owner would find them; their ID prefix keeps them apart. */
+    const filled = (prefix: string, network: string, count: number, session = database.as('admin')) =>
+      session.query(
+        `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at, network)
+         select 'axcl_' || $1 || lpad(to_hex(n), 31, '0'), 'Filler', array['https://a.example/cb'], 'web',
+           array['authorization_code'], $2, $3
+         from generate_series(1, $4::int) as n`,
+        [prefix, lockDay, network, count],
+      );
+    /** Whether another session can take the named lock now, letting it go at once. */
+    const free = async (name: string) => {
+      const [row] = await database
+        .as('admin')
+        .query<{ free: boolean }>(
+          'select pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0)) as free',
+          [name],
+        );
+      if (row?.free === true) {
+        await database
+          .as('admin')
+          .query('select pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1, 0))', [name]);
+      }
+      return row?.free;
+    };
+
+    it('counts the network only once it holds the network’s lock: one committing its last place meanwhile is seen', async () => {
+      const network = fresh();
+      await filled('a', network, MOST_REGISTRATIONS_A_NETWORK_A_DAY - 1);
+      const holder = await database.connect('admin');
+      await holder.query('begin');
+      try {
+        await holdNamedLock(holder, lockName('oauth_client_network', network));
+        const registering = registerClient(app, keys, registration(), lockDay, network);
+        await waitUntilQueued(database.as('admin'), 1);
+        // The network's last place taken while the registration waits: it must count it.
+        await filled('b', network, 1, holder);
+        await holder.query('commit');
+        expect(await registering).toEqual({ outcome: 'capped', cap: 'network' });
+      } finally {
+        await holder.query('rollback');
+        await holder.end();
+        await database.as('admin').query("delete from oauth.clients where name = 'Filler'");
+      }
+    });
+
+    it('counts the server only once it holds the registrations’ lock, holding the network’s while it waits', async () => {
+      const busy = fresh();
+      // A busy network's 50, among 1,999 today: the server's last place still free.
+      await filled('c', busy, BUSY_NETWORK_REGISTRATIONS);
+      await filled('d', fresh(), MOST_REGISTRATIONS_A_DAY - 1 - BUSY_NETWORK_REGISTRATIONS);
+      const holder = await database.connect('admin');
+      await holder.query('begin');
+      try {
+        await holdNamedLock(holder, lockName('oauth_clients'));
+        const registering = registerClient(app, keys, registration(), lockDay, busy);
+        await waitUntilQueued(database.as('admin'), 1);
+        // Waiting on the server's lock, it holds its network's: taken first, never the other way round.
+        expect(await free(lockName('oauth_client_network', busy))).toBe(false);
+        // The server's last place taken meanwhile: it must count it.
+        await filled('e', fresh(), 1, holder);
+        await holder.query('commit');
+        expect(await registering).toEqual({ outcome: 'capped', cap: 'server' });
+        expect(await free(lockName('oauth_client_network', busy))).toBe(true);
+      } finally {
+        await holder.query('rollback');
+        await holder.end();
+        await database.as('admin').query("delete from oauth.clients where name = 'Filler'");
+      }
+    });
   });
 
   it(`6F1 G4: refuses a network past ${String(MOST_REGISTRATIONS_A_NETWORK_A_DAY)} in 24 hours; another network not`, async () => {
