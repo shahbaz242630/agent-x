@@ -220,6 +220,21 @@ async function jobsCopy(
 async function handOffOnJ(
   w: World,
   j: JobsCopy,
+  options: {
+    readonly witness?: WitnessLog;
+    readonly mostWalked?: number;
+    /** Done as the run lists its organisations: after its first read of the pause, before any Tx A. */
+    readonly listed?: () => Promise<void>;
+  } = {},
+): Promise<number> {
+  const handOff = handOffMadeOnJ(w, j, options);
+  return handOff.run();
+}
+
+/** J's hand-off made once, to run as often as a test asks (one process's, its memory kept): each run's partner calls. */
+function handOffMadeOnJ(
+  w: World,
+  j: JobsCopy,
   {
     witness = j.witness,
     mostWalked,
@@ -227,43 +242,48 @@ async function handOffOnJ(
   }: {
     readonly witness?: WitnessLog;
     readonly mostWalked?: number;
-    /** Done as the run lists its organisations: after its first read of the pause, before any Tx A. */
     readonly listed?: () => Promise<void>;
   } = {},
-): Promise<number> {
-  let submitted = 0;
+): { run(): Promise<number> } {
+  const calls = { submitted: 0 };
   const rail = {
     ...w.rail,
     submitApprovedIntent: (intent: Parameters<typeof w.rail.submitApprovedIntent>[0]) => {
-      submitted += 1;
+      calls.submitted += 1;
       return w.rail.submitApprovedIntent(intent);
     },
   };
-  checkStatesWith(j.digest);
-  witnessWith(j.witness);
-  try {
-    await createHandoff({
-      anchoring: { anchors: j.anchors, anchorFirst: () => Promise.resolve(), digest: j.digest },
-      witnessing: { witness, frontier: j.frontier, ...(mostWalked === undefined ? {} : { mostWalked }) },
-      list: async () => {
-        await listed();
-        return [w.org];
-      },
-      database: app,
-      outbox: createOutbox({ ids, clock, keys }),
-      rail,
-      keys,
-      ids,
-      clock,
-      logger: testLogger(capture),
-      health: createRailHealth({ clock, logger: testLogger(capture) }),
-      databaseGate: handoffDatabaseGate(6),
-    }).run();
-  } finally {
-    checkStatesWith(undefined);
-    witnessWith(undefined);
-  }
-  return submitted;
+  const made = createHandoff({
+    anchoring: { anchors: j.anchors, anchorFirst: () => Promise.resolve(), digest: j.digest },
+    witnessing: { witness, frontier: j.frontier, ...(mostWalked === undefined ? {} : { mostWalked }) },
+    list: async () => {
+      await listed();
+      return [w.org];
+    },
+    database: app,
+    outbox: createOutbox({ ids, clock, keys }),
+    rail,
+    keys,
+    ids,
+    clock,
+    logger: testLogger(capture),
+    health: createRailHealth({ clock, logger: testLogger(capture) }),
+    databaseGate: handoffDatabaseGate(6),
+  });
+  return {
+    async run() {
+      calls.submitted = 0;
+      checkStatesWith(j.digest);
+      witnessWith(j.witness);
+      try {
+        await made.run();
+      } finally {
+        checkStatesWith(undefined);
+        witnessWith(undefined);
+      }
+      return calls.submitted;
+    },
+  };
 }
 
 /** The owner's own statements inside the organisation, the connection ended after. */
@@ -970,6 +990,135 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
       await owner.end();
     }
   }
+
+  /**
+   * A cancel in a history hidden for one Tx A alone: A paid (F raised); B approved; then W suspends the agent choosing
+   * to cancel (E1) and reactivates it (E2), both above F. The owner moves E1 aside, holding the chain's head row: J's Tx
+   * A for B reads the agent as active (E2, the walk's newest too) and no cancel since B's decision; with `restore`, the
+   * owner puts E1 back before letting go, so the walk reads it: a cancel B's history read asked for and didn't get.
+   */
+  async function cancelHiddenFromHistory(restore: boolean) {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const j = await jobsCopy(w, store);
+    await ask(acting, w, { amount: ALLOWED() });
+    await j.witness.refresh();
+    expect(await handOffOnJ(w, j)).toBe(1);
+    const stopped = await ask(acting, w, { amount: ALLOWED() });
+    witnessWith(witnessOver(store));
+    try {
+      for (const [event, action] of [
+        ['suspend', 'agent.suspended'],
+        ['reactivate', 'agent.reactivated'],
+      ] as const) {
+        await signed(w, (tx, states) =>
+          states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, event, {
+            actor: OPERATOR,
+            action,
+            details: event === 'suspend' ? { pendingRequests: 'cancel' } : {},
+          }),
+        );
+      }
+    } finally {
+      witnessWith(undefined);
+    }
+    await j.witness.refresh();
+    const owner = await tamperAsOwner(database, AGENTS, w.org);
+    try {
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query(
+        "update audit.events set subject_id = '0199a0f0-0000-7000-8000-00000000cafe' where org_id = $1 and subject_id = $2 and action = 'agent.suspended'",
+        [w.org, w.agent],
+      );
+      const holder = await database.connect('owner');
+      try {
+        await holder.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+        await holder.query('begin');
+        await holder.query('select seq from audit.heads where org_id = $1 for update', [w.org]);
+        capture = new LogCapture();
+        const running = handOffOnJ(w, j);
+        await waitUntilQueued(database.as('owner'), 1);
+        if (restore) {
+          await holder.query(
+            "update audit.events set subject_id = $2 where org_id = $1 and subject_id = '0199a0f0-0000-7000-8000-00000000cafe'",
+            [w.org, w.agent],
+          );
+        }
+        await holder.query('commit');
+        return { w, stopped, submitted: await running };
+      } finally {
+        await holder.end();
+      }
+    } finally {
+      await owner.query('alter table audit.events enable trigger user');
+      await owner.end();
+    }
+  }
+
+  it('a stop hidden for every Tx A in a row: each waits, and the fifth in a row is the error (someone at it)', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const leads = { now: true };
+    const j = await jobsCopy(w, store, new Map(), { writes: () => leads.now });
+    await ask(acting, w, { amount: ALLOWED() });
+    await j.witness.refresh();
+    expect(await handOffOnJ(w, j)).toBe(1);
+    const stopped = await ask(acting, w, { amount: ALLOWED() });
+    const owner = await tamperAsOwner(database, AGENTS, w.org);
+    try {
+      // The agent's row as it was, active, before the suspension.
+      const saved = await owner.saveRow(w.agent);
+      await signed(w, (tx, states) =>
+        states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+          actor: OPERATOR,
+          action: 'agent.suspended',
+          details: { pendingRequests: 'pause' },
+        }),
+      );
+      // This copy no longer keeping facts (its lease gone mid-run each time): each run's reads stand on the rows alone.
+      leads.now = false;
+      capture = new LogCapture();
+      // One process's hand-off, run again and again: its count of reads moved in a row kept between runs.
+      const handOff = handOffMadeOnJ(w, j);
+      await owner.query('alter table audit.events disable trigger user');
+      for (let run = 0; run < 5; run += 1) {
+        await owner.query(
+          "update audit.events set subject_id = '0199a0f0-0000-7000-8000-00000000f00d' where org_id = $1 and subject_id = $2 and action = 'agent.suspended'",
+          [w.org, w.agent],
+        );
+        await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+        const holder = await database.connect('owner');
+        try {
+          await holder.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+          await holder.query('begin');
+          await holder.query('select seq from audit.heads where org_id = $1 for update', [w.org]);
+          const running = handOff.run();
+          await waitUntilQueued(database.as('owner'), 1);
+          await holder.query(
+            "update audit.events set subject_id = $2 where org_id = $1 and subject_id = '0199a0f0-0000-7000-8000-00000000f00d'",
+            [w.org, w.agent],
+          );
+          await holder.query('commit');
+          expect(await running).toBe(0);
+        } finally {
+          await holder.end();
+        }
+      }
+    } finally {
+      await owner.query('alter table audit.events enable trigger user');
+      await owner.end();
+    }
+    expect(await statusOf(w, stopped.id)).toBe('APPROVED');
+    expect(lines('handoff.read_moved')).toHaveLength(5);
+    expect(lines('handoff.read_moved_repeatedly')).toEqual([expect.objectContaining({ level: 'error', times: 5 })]);
+  });
+
+  it('80: a cancel hidden from Tx A’s history read and put back before its walk: never paid', async () => {
+    const { w, stopped, submitted } = await cancelHiddenFromHistory(true);
+    expect(submitted).toBe(0);
+    expect(await outcome(w, stopped.id, submitted)).toMatchObject({ transaction: undefined });
+    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'read_moved' }));
+  });
 
   it('80: a stop above F hidden while Tx A reads and put back before its walk: never paid', async () => {
     const { w, stopped, submitted } = await stopAboveFHiddenForOneTxA(true);

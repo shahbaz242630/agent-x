@@ -891,6 +891,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing was sent. The payment waits and is checked again on the next run, in about 10 seconds.',
     next: 'Nothing if rare. If it repeats, someone may be changing the database: follow the incident runbook.',
   },
+  'handoff.read_moved_repeatedly': {
+    happened: 'An organisation’s payment checks kept finding its records changed between reads, many times in a row.',
+    broke: 'Its approved payments wait, unsent, while it goes on.',
+    next: 'Treat it as someone changing the database: follow the incident runbook and look at that organisation.',
+  },
   'handoff.queue_stale': {
     happened: 'Approved payments have waited over 15 minutes without being handed to the bank, for no known reason.',
     broke: 'Those payments are not sent; their money stays held.',

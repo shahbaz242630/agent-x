@@ -163,7 +163,7 @@ import {
 import { HISTORY_CHECK_SUBJECT, HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
 import { witnessClassOf } from './witness-class.ts';
-import { MOST_WALKED_WITHIN, type ReadAhead, walkWithin, type WithinWalk } from './chain-frontier.ts';
+import { type EventSeen, MOST_WALKED_WITHIN, type ReadAhead, walkWithin, type WithinWalk } from './chain-frontier.ts';
 import { chainWitness, noteCommitted, witnessedWrite, wroteTo } from './witnessing.ts';
 
 /** A transaction on the audit tables, opened by withTenant for the organisation. */
@@ -1123,14 +1123,112 @@ const headsTaken = new WeakMap<object, Set<string>>();
  */
 const readPlaces = new WeakMap<object, Map<string, bigint>>();
 
-/** A read's place kept for its transaction: the newest it has found of the object. */
-function placeRead(tx: object, type: string, id: string, latest: LatestSignedState): void {
+/** A read's place kept for its transaction: the lowest it has found of the object. */
+export function placeRead(tx: object, type: string, id: string, latest: LatestSignedState): void {
   if (latest.kind === 'broken') return;
   const place = latest.kind === 'none' ? 0n : latest.seq;
   const byKey = readPlaces.get(tx) ?? new Map<string, bigint>();
   readPlaces.set(tx, byKey);
   const key = subjectKey(type, id);
-  if ((byKey.get(key) ?? -1n) < place) byKey.set(key, place);
+  // The lowest kept: a later read of the object that found more never covers one that found less (an event hidden for
+  // the first read alone).
+  const before = byKey.get(key);
+  if (before === undefined || place < before) byKey.set(key, place);
+}
+
+/** A history read in a transaction (TR-3): what it asked for, and the places of the events it got. */
+export interface HistoryRead {
+  readonly types?: ReadonlySet<string>;
+  readonly ids?: ReadonlySet<string>;
+  readonly actions?: ReadonlySet<string>;
+  readonly afterSeq?: bigint;
+  /** An event read by its ID alone. */
+  readonly eventId?: string;
+  /** How far the read reached where it took only part (`newest`/`oldest` up to its limit, or one event about an object). */
+  readonly from?: bigint;
+  readonly upTo?: bigint;
+  readonly got: ReadonlySet<bigint>;
+}
+
+/** Each transaction's history reads, for the walk later in it to hold them to (historyMissed). */
+const historyReads = new WeakMap<object, HistoryRead[]>();
+
+export function historyRead(tx: object, read: HistoryRead): void {
+  const reads = historyReads.get(tx) ?? [];
+  historyReads.set(tx, reads);
+  reads.push(read);
+}
+
+/** A list read kept: its filter, how far it reached where it took part only, and what it got. */
+export function listRead(tx: object, find: HistoryToRead, read: RecordedEventsCheck): void {
+  if (read.kind !== 'recorded') return;
+  const got = new Set(read.events.map(({ seq }) => seq));
+  const named = find.subjectId === undefined ? find.subjectIds : [find.subjectId];
+  const places = [...got];
+  const full = places.length >= find.limit;
+  const lowest = places.reduce<bigint | undefined>(
+    (one, seq) => (one === undefined || seq < one ? seq : one),
+    undefined,
+  );
+  const highest = places.reduce<bigint | undefined>(
+    (one, seq) => (one === undefined || seq > one ? seq : one),
+    undefined,
+  );
+  historyRead(tx, {
+    types: new Set(find.subjectTypes),
+    ...(named === undefined ? {} : { ids: new Set(named.map((id) => id.toLowerCase())) }),
+    ...(find.actions === undefined ? {} : { actions: new Set(find.actions) }),
+    ...(find.afterSeq === undefined ? {} : { afterSeq: find.afterSeq }),
+    // Part of what matches only: the newest up to the limit reach down to the lowest got; the oldest, up to the highest.
+    ...(full && find.newest === true && lowest !== undefined ? { from: lowest } : {}),
+    ...(full && find.oldest === true && highest !== undefined ? { upTo: highest } : {}),
+    got,
+  });
+}
+
+/** One event read kept for the walk later in the transaction (historyMissed): by its ID, or as its object's first. */
+function eventRead(tx: object, find: EventToFind, found: bigint | undefined): void {
+  const got = new Set(found === undefined ? [] : [found]);
+  if ('eventId' in find) {
+    historyRead(tx, { eventId: find.eventId.toLowerCase(), got });
+    return;
+  }
+  historyRead(tx, {
+    types: new Set([find.onlyAbout.type]),
+    ids: new Set([find.onlyAbout.id.toLowerCase()]),
+    ...(found === undefined ? {} : { upTo: found }),
+    got,
+  });
+}
+
+/** Whether a history read asked for this event and didn't get it, within how far it reached. */
+function missedBy(read: HistoryRead, seen: EventSeen): boolean {
+  if (read.got.has(seen.seq)) return false;
+  if (read.eventId !== undefined) return read.eventId === seen.id;
+  if (read.types?.has(seen.subjectType) !== true) return false;
+  if (read.ids !== undefined && !read.ids.has(seen.subjectId.toLowerCase())) return false;
+  if (read.actions !== undefined && !read.actions.has(seen.action)) return false;
+  if (read.afterSeq !== undefined && seen.seq <= read.afterSeq) return false;
+  if (read.from !== undefined && seen.seq < read.from) return false;
+  return read.upTo === undefined || seen.seq <= read.upTo;
+}
+
+/**
+ * The first event a walk later in the transaction read that one of its history reads asked for and didn't get (TR-3):
+ * a history read made on a chain that moved under it (an event hidden while it read, put back before the walk). None
+ * where every history read stands.
+ */
+export function historyMissed(tx: object, seen: readonly EventSeen[] | undefined): EventSeen | undefined {
+  const reads = historyReads.get(tx);
+  if (reads === undefined || seen === undefined) return undefined;
+  return seen.find((event) => reads.some((read) => missedBy(read, event)));
+}
+
+/** A walked event as a history's filter names it: org events' content order (eventContent). */
+function eventSeenIn(entry: StoredEntry): EventSeen | undefined {
+  const [, , , , action, , type, id] = entry.content;
+  if (typeof action !== 'string' || typeof type !== 'string' || typeof id !== 'string') return undefined;
+  return { seq: entry.seq, id: entry.id, subjectType: type, subjectId: id, action };
 }
 
 /**
@@ -2120,7 +2218,7 @@ export function createAuditTrail({
       return {
         kept: keptIn(kept.rows[0] as Parameters<typeof keptIn>[0], anchor),
         // Each signed object's newest place on it, for the digest (TR-3), as an anchor check's walk keeps them.
-        walk: await walkWithin(keys, chain, edgesOf(edgeRows), read, from, most, signedSubjectOf),
+        walk: await walkWithin(keys, chain, edgesOf(edgeRows), read, from, most, signedSubjectOf, eventSeenIn),
       };
     },
 
@@ -2288,6 +2386,7 @@ export function createAuditTrail({
       const cut = cutBack(tx, chain, watch, row);
       const past = row?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);
+      eventRead(tx, find, typeof row?.seq === 'bigint' ? row.seq : undefined);
       if (row === undefined || row.seq === null) return cut ?? { kind: 'none' };
       const head = row.has_head === true ? headIsWhole(keys, chain, row) : undefined;
       const read = wholeEvent(keys, chain, row, head);
@@ -2305,7 +2404,9 @@ export function createAuditTrail({
         heldTo: watch?.heldTo,
       });
       const cut = cutBack(tx, chain, watch, rows[0]);
-      return unlessCut(historyIn(chain, rows, rows[0], find.limit), cut);
+      const read = unlessCut(historyIn(chain, rows, rows[0], find.limit), cut);
+      listRead(tx, find, read);
+      return read;
     },
 
     async recordedHistories(
@@ -2323,8 +2424,8 @@ export function createAuditTrail({
       const watch = watchOf(chain);
       const rows = await historiesWithHead(tx, chain, picks, watch?.heldTo);
       const cut = cutBack(tx, chain, watch, rows[0]);
-      return finds.map((find, index) =>
-        unlessCut(
+      return finds.map((find, index) => {
+        const read = unlessCut(
           historyIn(
             chain,
             rows.filter((row) => row.find === index),
@@ -2332,8 +2433,10 @@ export function createAuditTrail({
             find.limit,
           ),
           cut,
-        ),
-      );
+        );
+        listRead(tx, find, read);
+        return read;
+      });
     },
 
     async logPage(

@@ -102,6 +102,7 @@ import {
   type ChainFrontier,
   createAuditTrail,
   headWrittenIn,
+  historyMissed,
   MOST_WALKED_WITHIN,
   readBelowWalk,
   type SignedStates,
@@ -185,6 +186,9 @@ export const HEARTBEAT_STALE_MS = 5 * 60_000;
  * 10 s, so older is a store that isn't answering, and a stop another copy wrote may be unread here.
  */
 const WITNESS_FRESH_MS = 30_000;
+
+/** How many Tx As in a row for one organisation may find their reads moved before it is the error, and again each so many. */
+const READ_MOVED_SAID_EVERY = 5;
 
 /** How often a run sweeps for transactions left waiting: often enough for UNKNOWN_AFTER_MS, few database calls. */
 const SWEEP_EVERY_MS = 60_000;
@@ -480,6 +484,7 @@ export function createHandoff({
           most: witnessing.mostWalked ?? MOST_WALKED_WITHIN,
         }));
   const mostWalked = witnessing?.mostWalked ?? MOST_WALKED_WITHIN;
+  const movedCounts = createReadMovedCounts();
   // Its first beat is its start, so /health gives a new process HEARTBEAT_STALE_MS to make its first run; after that
   // only a run that reads its organisations beats, so one failing every time reads as stopped.
   let beat = clock.now().getTime();
@@ -642,11 +647,14 @@ export function createHandoff({
     // TR-3: every read above was made before the head's lock, each statement on its own snapshot. One the walk finds a
     // newer signed state of was read on a chain that moved under it (an event hidden while it read, put back before the
     // walk): nothing commits on it, and the next run reads again, held now to what this walk kept in the digest.
-    const moved = readBelowWalk(tx, kept.walk.signed);
+    // So with every history read (a cancel since a decision, a pause, a carry): an event the walk read that one asked
+    // for and didn't get was hidden while it read.
+    const moved = readBelowWalk(tx, kept.walk.signed)?.[1] ?? historyMissed(tx, kept.walk.seen)?.seq;
     if (moved !== undefined) {
-      log.warn('handoff.read_moved', { seq: String(moved[1]) });
+      movedCounts.moved(orgId, moved, log);
       return 'read_moved';
     }
+    movedCounts.held(orgId);
     return { start, walk: kept.walk };
   };
 
@@ -1297,6 +1305,26 @@ export function createHandoff({
       beatNow();
     },
     beating: () => clock.now().getTime() - beat <= HEARTBEAT_STALE_MS,
+  };
+}
+
+/**
+ * Each organisation's Tx As in a row whose reads a walk found moved under them (TR-3), reset by one whose reads held:
+ * each said, and every READ_MOVED_SAID_EVERY in a row the error: once now and then is a race, many in a row is someone
+ * hiding events while Tx A reads.
+ */
+export function createReadMovedCounts(every = READ_MOVED_SAID_EVERY) {
+  const inARow = new Map<string, number>();
+  return {
+    moved(orgId: string, seq: bigint, log: Logger): void {
+      const times = (inARow.get(orgId) ?? 0) + 1;
+      inARow.set(orgId, times);
+      log.warn('handoff.read_moved', { seq: String(seq) });
+      if (times % every === 0) log.error('handoff.read_moved_repeatedly', { times });
+    },
+    held(orgId: string): void {
+      inARow.delete(orgId);
+    },
   };
 }
 

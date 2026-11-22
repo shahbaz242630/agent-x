@@ -72,9 +72,20 @@ export type WithinWalk =
       readonly path: ReadonlyMap<bigint, Buffer>;
       /** Each signed object's newest place on the walk, as the anchor check's walks keep them (AT13, TR-3). */
       readonly signed: SignedSeen;
+      /** Every event it read, where it was asked to name them (`describe`): what Tx A's histories are held to (TR-3). */
+      readonly seen?: readonly EventSeen[];
     }
   | { readonly kind: 'broken'; readonly problem: ChainProblem }
   | { readonly kind: 'too_far' };
+
+/** An event a walk read, as a history's filter would name it: its place, ID, object and action. */
+export interface EventSeen {
+  readonly seq: bigint;
+  readonly id: string;
+  readonly subjectType: string;
+  readonly subjectId: string;
+  readonly action: string;
+}
 
 /** The walk's answer once it reached the head. */
 export type WalkedWithin = Extract<WithinWalk, { readonly kind: 'walked' }>;
@@ -270,9 +281,11 @@ export async function walkWithin(
   from: CheckedPoint,
   most: number = MOST_WALKED_WITHIN,
   subjectOf: (entry: StoredEntry) => readonly [string, string] | undefined = () => undefined,
+  describe?: (entry: StoredEntry) => EventSeen | undefined,
 ): Promise<WithinWalk> {
   const path = new Map<bigint, Buffer>();
   const signed = new Map<string, bigint>();
+  const seen: EventSeen[] = [];
   let next = 0;
   const step = await verifyFromAnchor(
     keys,
@@ -291,6 +304,8 @@ export async function walkWithin(
             const subject = subjectOf(read.entry);
             // In number order: the last seen is the newest.
             if (subject !== undefined) signed.set(subjectKey(...subject), read.seq);
+            const named = describe?.(read.entry);
+            if (named !== undefined) seen.push(named);
           }
           batch.push(read.entry);
         }
@@ -303,5 +318,5 @@ export async function walkWithin(
   if (!step.ok) return { kind: 'broken', problem: step.problem };
   if (step.seq !== step.to) return { kind: 'too_far' };
   const head = { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion };
-  return { kind: 'walked', head, path, signed };
+  return { kind: 'walked', head, path, signed, ...(describe === undefined ? {} : { seen }) };
 }
