@@ -36,7 +36,7 @@ export const MOST_SESSIONS_A_DAY = 100;
 export const MOST_STEP_UPS_A_DAY = 200;
 
 /** The advisory lock a person's sign-ins and step-ups count their day's caps under (ADR-006 §6). */
-export const PERSON_CHAIN_LOCK = 'identity-person-chain';
+const PERSON_CHAIN_LOCK = 'identity-person-chain';
 
 /** The person's platform events of `action` signed in the database's last 24 hours, as a subquery. */
 const signedToday = (action: string, userId: string) =>
