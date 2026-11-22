@@ -17,8 +17,9 @@ import {
 } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
+import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { cancelRequest, ORDER_SLOTS, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import { cancelRequest, decisionsOf, ORDER_SLOTS, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import {
   type AnchorStore,
@@ -55,7 +56,9 @@ import { keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
-import { pausedOf } from './suspensions.ts';
+import { authorityOf } from './request-voids.ts';
+import { createStateNames } from './state-names.ts';
+import { cancelledSinceOf, pausedOf, stopsHeldOf } from './suspensions.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -1231,13 +1234,13 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
    */
   async function olderEventHidden<T>(
     table: SignedStateTable,
-    idOf: (w: World) => Promise<string>,
+    idOf: (w: World, acting: Awaited<ReturnType<typeof ready>>['acting']) => Promise<string>,
     made: readonly (readonly [string, AuditDetails])[],
     hide: boolean,
     read: (tx: AuditTransaction, states: SignedStates, orgId: string, id: string, state?: VerifiedState) => Promise<T>,
   ) {
-    const { w } = await ready();
-    const id = await idOf(w);
+    const { w, acting } = await ready();
+    const id = await idOf(w, acting);
     for (const [action, details] of [...made, ['test.noted', {}] as const]) {
       await signed(w, async (tx, states) => {
         const state = await states.verifiedState(tx, table, { orgId: w.org, id }, 'change');
@@ -1336,6 +1339,216 @@ describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held 
   it('carriesRest’s positive control: nothing hidden, the newest acceptance read, held or not', async () => {
     const { held, unheld, onHold } = await olderEventHidden(MANDATES, theMandate, acceptedTwice, false, carryRead);
     expect([held, unheld, onHold]).toEqual([{ value: false }, { value: false }, false]);
+  });
+
+  const aRequest = async (w: World, acting: Awaited<ReturnType<typeof ready>>['acting']) =>
+    (await ask(acting, w, { amount: ALLOWED() })).id;
+  const keptRead = (tx: AuditTransaction, states: SignedStates, orgId: string, id: string, state?: VerifiedState) =>
+    // None answered for a history that can't be believed (decisionsOf): `unread`, never "not kept".
+    decisionsOf(tx, states, orgId, [id], state && new Map([[id, state]])).then(
+      (read) => read.get(id)?.capacityKept ?? 'unread',
+    );
+  const endedKept = [
+    ['spend_request.cancelled', { capacityKept: true, keptAmountMinor: '1', testMark: HIDE }],
+  ] as const;
+
+  it('decisionsRead: an ending that kept its capacity hidden, none kept from the log alone; held, tampered', async () => {
+    const { held, unheld, onHold } = await olderEventHidden(SPEND_REQUESTS, aRequest, endedKept, true, keptRead);
+    expect(unheld).toEqual({ value: false });
+    expect(held).toEqual({ value: 'unread' });
+    expect(onHold).toBe(true);
+  });
+
+  /** A table as an image from before the names had it: tracking nothing. */
+  const untracked = <Table extends SignedStateTable>(table: Table): Table =>
+    Object.fromEntries(Object.entries(table).filter(([column]) => column !== 'tracks')) as Table;
+
+  /**
+   * An organisation recorded before the names (state-names.ts): its own state and its agent's recorded again with the
+   * names left off (each table's tracks dropped, as an image from before them wrote), the agent suspended choosing to
+   * cancel (E1) and reactivated (E2) the same way. Then, with `named`, the job names them, its chain checked whole.
+   */
+  async function legacyOrganisation(named: boolean) {
+    const { w, acting } = await ready();
+    const LEGACY_ORG = untracked(ORGANIZATIONS);
+    const LEGACY_AGENTS = untracked(AGENTS);
+    await signed(w, async (tx, states) => {
+      const own = await states.verifiedState(tx, LEGACY_ORG, { orgId: w.org, id: w.org }, 'change');
+      if (own.outcome !== 'verified') throw new Error('the organisation should verify');
+      await states.record(
+        tx,
+        LEGACY_ORG,
+        { orgId: w.org, id: w.org },
+        own,
+        {},
+        { actor: OPERATOR, action: 'test.noted', details: {} },
+      );
+    });
+    for (const [event, action] of [
+      ['suspend', 'agent.suspended'],
+      ['reactivate', 'agent.reactivated'],
+    ] as const) {
+      await signed(w, (tx, states) =>
+        states.changeStatus(tx, LEGACY_AGENTS, { orgId: w.org, id: w.agent }, event, {
+          actor: OPERATOR,
+          action,
+          details: event === 'suspend' ? { pendingRequests: 'cancel' } : {},
+        }),
+      );
+    }
+    capture = new LogCapture();
+    const job = createStateNames({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    });
+    if (named) await job.run();
+    return { w, acting, job };
+  }
+
+  /** The agent's cancel since `decidedSeq` read held to its state and the organisation's: the cancels found, or the refusal. */
+  const cancelsHeld = (w: World, decidedSeq: bigint) =>
+    signed(w, async (tx, states) => {
+      const held = await stopsHeldOf(tx, states, w.org, {
+        organization: w.org,
+        agent: w.agent,
+        mandate: null,
+        source: null,
+        supplier: null,
+      });
+      return cancelledSinceOf(
+        tx,
+        states,
+        w.org,
+        decidedSeq,
+        { organization: w.org, agent: w.agent, mandate: null, source: null, supplier: null },
+        undefined,
+        held,
+      );
+    }).then(
+      (cancelled) => ({ value: [...cancelled] }),
+      (error: unknown) => ({ refused: error instanceof Error ? error.message : String(error) }),
+    );
+
+  const hideTheCancel = (w: World) =>
+    asOwner(w, async (owner) => {
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query(
+        "update audit.events set subject_id = gen_random_uuid() where org_id = $1 and subject_id = $2 and action = 'agent.suspended'",
+        [w.org, w.agent],
+      );
+      await owner.query('alter table audit.events enable trigger user');
+    });
+
+  it('state names: a legacy organisation named once its chain checks out whole; then its older cancel can’t be hidden', async () => {
+    const { w, job } = await legacyOrganisation(true);
+    // Its agent and its own state: each named once, from its whole history.
+    expect(lines('state_names.named')).toEqual([expect.objectContaining({ named: 2 })]);
+    // Named again (the same job, its log the same): nothing more, the organisation reaching its start, no second line.
+    await job.run();
+    expect(lines('state_names.named')).toHaveLength(1);
+    await hideTheCancel(w);
+    expect(await cancelsHeld(w, 0n)).toEqual({ refused: expect.stringMatching(/can't be believed/) as string });
+  });
+
+  it('state names’ positive control: not named, the legacy cancel hidden is read as none (read as before)', async () => {
+    const { w } = await legacyOrganisation(false);
+    await hideTheCancel(w);
+    expect(await cancelsHeld(w, 0n)).toEqual({ value: [] });
+  });
+
+  it('state names: a chain that doesn’t check out whole names nothing, and says so', async () => {
+    const { w, job } = await legacyOrganisation(false);
+    await hideTheCancel(w);
+    await job.run();
+    expect(lines('state_names.chain_unverified')).toEqual([expect.objectContaining({ level: 'warn' })]);
+    expect(lines('state_names.named')).toEqual([]);
+  });
+
+  /** Whether the organisation's and its agent's states carry names where they must (authorityOf's check), and the hold. */
+  const namesHeld = async (w: World) => {
+    const held = await signed(w, async (tx, states) => {
+      const on = await stopsHeldOf(tx, states, w.org, {
+        organization: w.org,
+        agent: w.agent,
+        mandate: null,
+        source: null,
+        supplier: null,
+      });
+      return on !== undefined && states.historyHeld(w.org, [], { on, actions: [], after: undefined });
+    });
+    const hold = await signed(w, (tx, states) => states.integrityHold(tx, w.org, 'none'));
+    return { held, onHold: hold.outcome === 'held' };
+  };
+
+  /** A pending request's authority read as the voids job and Tx A read it: its refusal, or none. */
+  const authorityRefusal = (w: World, requestId: string) =>
+    signed(w, (tx, states) => authorityOf(tx, states, { orgId: w.org, id: requestId }, clock.now())).then(
+      () => undefined,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+
+  it('state names: once named, a state recorded with no names is tampering (the cut-over held)', async () => {
+    const { w, acting } = await legacyOrganisation(true);
+    const pending = await ask(acting, w, { amount: ALLOWED() });
+    expect(await authorityRefusal(w, pending.id)).toBeUndefined();
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+    const LEGACY_AGENTS = untracked(AGENTS);
+    await signed(w, async (tx, states) => {
+      const agent = await states.verifiedState(tx, LEGACY_AGENTS, { orgId: w.org, id: w.agent }, 'change');
+      if (agent.outcome !== 'verified') throw new Error('the agent should verify');
+      await states.record(
+        tx,
+        LEGACY_AGENTS,
+        { orgId: w.org, id: w.agent },
+        agent,
+        {},
+        { actor: OPERATOR, action: 'test.noted', details: {} },
+      );
+    });
+    expect(await authorityRefusal(w, pending.id)).toMatch(/carries no names where it must/);
+    expect(await namesHeld(w)).toEqual({ held: false, onHold: true });
+  });
+
+  it('state names: an object that can’t be believed is the organisation’s failure, logged, nothing claimed named', async () => {
+    const { w, job } = await legacyOrganisation(false);
+    await asOwner(w, async (owner) => {
+      await owner.withoutStatusGuard(() =>
+        owner.query("update agents.agents set status = 'SUSPENDED' where org_id = $1 and id = $2", [w.org, w.agent]),
+      );
+    });
+    await job.run();
+    expect(lines('state_names.failed')).toEqual([expect.objectContaining({ level: 'error', orgId: w.org })]);
+    expect(lines('state_names.named')).toEqual([]);
+  });
+
+  it('state names: a list that can’t be read is the run’s failure; an aborted run starts nothing', async () => {
+    capture = new LogCapture();
+    const failing = createStateNames({
+      list: () => Promise.reject(new Error('directory down')),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    });
+    await failing.run();
+    expect(lines('state_names.run_failed')).toEqual([expect.objectContaining({ level: 'error' })]);
+    const { w, job } = await legacyOrganisation(false);
+    await job.run(AbortSignal.abort());
+    expect(lines('state_names.named')).toEqual([]);
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+  });
+
+  it('the cut-over’s positive control: not named, a legacy state with no names is read as before', async () => {
+    const { w } = await legacyOrganisation(false);
+    expect(await namesHeld(w)).toEqual({ held: true, onHold: false });
+  });
+
+  it('decisionsRead’s positive control: nothing hidden, the capacity kept, held or not', async () => {
+    const { held, unheld, onHold } = await olderEventHidden(SPEND_REQUESTS, aRequest, endedKept, false, keptRead);
+    expect([held, unheld, onHold]).toEqual([{ value: true }, { value: true }, false]);
   });
 });
 

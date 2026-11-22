@@ -54,6 +54,7 @@ import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, FACTOR_REMOVALS_WHOLE_PASS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { createGrantSummaryBuilding, GRANT_SUMMARIES_EVERY_MS } from './grant-summaries.ts';
+import { createStateNames, STATE_NAMES_EVERY_MS } from './state-names.ts';
 import {
   createHandoff,
   HANDOFF_EVERY_MS,
@@ -719,6 +720,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     ),
     // The grant summaries of memberships added before 0085 built from each organisation's history (OR1).
     job('grant_summaries', createGrantSummaryBuilding(organisationJob), GRANT_SUMMARIES_EVERY_MS, LONG_MS),
+    // Each tracked object recorded before the names given them, once its chain checks out whole (TR-3 residual 75).
+    job('state_names', createStateNames(organisationJob), STATE_NAMES_EVERY_MS, LONG_MS),
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
     job(
       'holdings_check',
