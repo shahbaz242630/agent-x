@@ -1134,6 +1134,35 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     },
   );
 
+  it('SEC-HA-04 TR-18 sends a step-up back whose flow was not started for its challenge (its nonce not the challenge’s) to its page, failed', async () => {
+    const standIn = new StandIn();
+    const back = { returnTo: `/approvals/abc?stepped=${CHALLENGE}`, challengeId: CHALLENGE };
+    standIn.failWith = new StepUpFailed(
+      'challenge_missing',
+      'the flow was not started for this challenge',
+      USER_ID,
+      back,
+    );
+    const { app, noted, capture } = await server(standIn);
+
+    const response = await app.inject(
+      callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
+    );
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe(`/approvals/abc?stepUpFailed=${CHALLENGE}`);
+    expect(setCookies(response.headers['set-cookie'])).toEqual([
+      `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+    ]);
+    expect(capture.lines().some((line) => line.event === 'auth.stepped_up')).toBe(false);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'auth.step_up_failed', failure: 'challenge_missing', userId: USER_ID }),
+    );
+    expect(noted).toEqual([
+      { kind: 'sign_in_failed', reason: 'step_up_challenge_missing', ip: '127.0.0.1', userId: USER_ID },
+    ]);
+  });
+
   it('answers a step-up failure that names no page to go back to as STEP_UP_FAILED, leaving the cookies', async () => {
     const standIn = new StandIn();
     standIn.failWith = new StepUpFailed('challenge_missing', 'test', USER_ID);
