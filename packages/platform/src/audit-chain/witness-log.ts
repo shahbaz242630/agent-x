@@ -114,7 +114,9 @@
 //      `misdated_heads` or `impersonated` alarm names (`file`): then restart the revision it names and set nothing
 //      aside. Where fork alarms by any other heads file name it too, set it aside anyway: a copy broken into can write
 //      one back-dated file in its own ID, which never makes it exempt. A file under snapshots/, or `noted`, counts
-//      neither way (it says who kept the head, not when its file landed).
+//      neither way (it says who kept the head, not when its file landed). Once snapshots name each head's writer
+//      (SNAPSHOT_WRITERS on, the next release), an ID named only through snapshots/ files is not framed by that alone:
+//      look at the fork alarms by its on-time heads files.
 //   2. Find its copy: ContainerAppConsoleLogs where Log has 'audit.witness_writer' and that ID; RevisionName and
 //      ContainerGroupName are the platform's, never the copy's word. An ID no such line names was made up: go to 5.
 //   3. Set it aside: deploy/azure/operator.ts witness-set-aside --writer <ID> --reason <incident>. Every copy passes
@@ -322,8 +324,20 @@ const LIST_SLACK_MS = 60 * 60_000;
 /** How far back a start with no sound snapshot reads heads files: a day, far past any anchor's turn. */
 const NO_SNAPSHOT_READ_BACK_MS = 24 * 60 * 60_000;
 
-/** How far back a start reads set-aside files (TR-7 D1): every heads file it reads with no snapshot, and the lag. */
-const START_SET_ASIDE_BACK_MS = NO_SNAPSHOT_READ_BACK_MS + LAG_MS;
+/**
+ * How recently the leader's last whole read must have begun for it to write a snapshot (TR-7 D2): a start reads heads
+ * files from the snapshot's time less SNAPSHOT_LAG_MS, so it reads every one that read could have missed.
+ */
+const SNAPSHOT_FRESH_MS = 60_000;
+
+/**
+ * How far before a snapshot's time a start reads heads files: the lag from the whole read it was written after, which
+ * began up to SNAPSHOT_FRESH_MS before it (S210 final F1: the lag alone left that minute's back-dated names unread).
+ */
+const SNAPSHOT_LAG_MS = LAG_MS + SNAPSHOT_FRESH_MS;
+
+/** How far back a start reads set-aside files (TR-7 D1): every heads file it reads, and as far before them as it does. */
+const START_SET_ASIDE_BACK_MS = NO_SNAPSHOT_READ_BACK_MS + SNAPSHOT_LAG_MS;
 
 /** How many spoiled snapshots a start goes back past: a day's at one an hour. */
 const MOST_SPOILED_SNAPSHOTS = 24;
@@ -352,18 +366,6 @@ const MOST_SET_ASIDE_LISTED = 10 * LIST_PAGE;
 
 /** The most a set-aside file may hold: one line and its closing line, with room to spare. */
 const MOST_SET_ASIDE_BYTES = 4096;
-
-/**
- * How recently the leader's last whole read must have begun for it to write a snapshot (TR-7 D2): a start reads heads
- * files from the snapshot's time less SNAPSHOT_LAG_MS, so it reads every one that read could have missed.
- */
-const SNAPSHOT_FRESH_MS = 60_000;
-
-/**
- * How far before a snapshot's time a start reads heads files: the lag from the whole read it was written after, which
- * began up to SNAPSHOT_FRESH_MS before it (S210 final F1: the lag alone left that minute's back-dated names unread).
- */
-const SNAPSHOT_LAG_MS = LAG_MS + SNAPSHOT_FRESH_MS;
 
 /** How often the leader writes a snapshot. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
@@ -400,10 +402,12 @@ const MOST_FILE_BYTES = 64 * 1024 * 1024;
 
 /**
  * What one head held takes on the heap: its object (a bigint place, a time, its writer's ID and file's name, both shared
- * by its file's heads), its 32-byte hash's Buffer and the list's entry. Measured on Node 24 at 251 bytes (200,000 heads
- * held as a read keeps them, after a full collection; 243 before the file's name, 235 before TR-14's writer).
+ * by its file's heads), its 32-byte hash's Buffer and the list's entry. Measured on Node 24 at 362 bytes where each head
+ * came in a file of its own (200,000 heads, names as write-once.ts pageIn copies them out of 5,000-blob List Blobs
+ * pages, after a full collection): the name's own string is the most of the rise, and shared where a file holds many.
+ * 251 with one name for all, 243 before the file's name, 235 before TR-14's writer.
  */
-export const WITNESS_HEAD_BYTES = 260;
+export const WITNESS_HEAD_BYTES = 370;
 
 /**
  * What one compact head (a fingerprint, or a head released) takes: a 32-byte packed record (its place, its hash's first
@@ -1535,8 +1539,8 @@ export function createWitnessLog({
    * Whether every set-aside back to it was fetched (TR-7 review: else the file is not to be taken).
    */
   const setAsideDownTo = async (at: number, began: number): Promise<boolean> =>
-    at - LAG_MS >= (setAsideFloor ?? setAsideSince(began)) ||
-    (await readSetAside(began, at - LAG_MS - NO_SNAPSHOT_READ_BACK_MS));
+    at - SNAPSHOT_LAG_MS >= (setAsideFloor ?? setAsideSince(began)) ||
+    (await readSetAside(began, at - SNAPSHOT_LAG_MS - NO_SNAPSHOT_READ_BACK_MS));
 
   /**
    * A set-aside pass that fetched every new file: the next one's look back moved on, older names forgotten once read
