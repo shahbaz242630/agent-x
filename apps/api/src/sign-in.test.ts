@@ -438,18 +438,18 @@ describe('S47 a login service that cannot be reached, such as one still waking f
     expect(capture.lines().map((line) => line.event)).not.toContain('auth.sign_ins_capped');
   });
 
-  describe('SEC-HA-14 TR-17 sign-ins started, held to their own limit per address', () => {
+  describe('SEC-HA-14 TR-17 sign-ins started, held to their own limit per network, as their open flows are counted', () => {
     const start = (remoteAddress: string) => ({ url: '/v1/auth/sign-in', remoteAddress });
 
     it.each([
       // Each IPv4 address on its own: the next one along is another.
       ['an IPv4 address', () => '203.0.113.7', '203.0.113.7', '203.0.113.8'],
-      // One /64 counts as one address, whatever its last 64 bits; the next /64 in the same /48 is another.
+      // One /48 counts as one network, as its open flows are counted: starts from many /64s in it are one count.
       [
-        'an IPv6 /64',
-        (n: number) => `2001:db8:1:2::${n.toString(16)}`,
-        '2001:db8:1:2:ffff:ffff:ffff:ffff',
-        '2001:db8:1:3::1',
+        'an IPv6 /48',
+        (n: number) => `2001:db8:1:${n.toString(16)}::1`,
+        '2001:db8:1:ffff:ffff:ffff:ffff:ffff',
+        '2001:db8:2::1',
       ],
     ])(
       'refuses %s past them RATE_LIMITED, 429 with Retry-After, beginning nothing; another address goes on',

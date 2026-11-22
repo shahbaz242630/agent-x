@@ -35,7 +35,8 @@
 //   the same way; a flow that gave way finds nothing at its callback, so that
 //   browser is refused SIGN_IN_FAILED and starts again. So that one caller
 //   can't push the others out at the address's whole rate, sign-ins started
-//   are held to SIGN_IN_STARTS a minute per address, per /64 for IPv6 (TR-17):
+//   are held to SIGN_IN_STARTS a minute per network, as the open flows are
+//   counted (an IPv4 address, an IPv6 /48: clientSite) (TR-17):
 //   past it RATE_LIMITED, 429 with Retry-After, and no flow begun.
 // - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
 //   a step-up for a challenge of the signed-in person's own session: a flow
@@ -234,9 +235,9 @@ const SIGN_OUT_BODY_LIMIT = 1;
 const PUBLIC = { access: ['public'] } as const;
 
 /**
- * The most sign-ins one address (an IPv6 /64) starts in a minute, across every `web` copy (TR-17): far under the
- * address's limit for all routes, so one caller can't make a network's oldest unfinished sign-ins give way (S208) at
- * that whole rate, yet room for an office behind one address.
+ * The most sign-ins one network starts in a minute, across every `web` copy (TR-17): an IPv4 address or an IPv6 /48,
+ * as its open flows are counted (`clientSite`), so a caller with many /64s in one /48 can't make that network's oldest
+ * unfinished sign-ins give way (S208) at the address's whole rate; yet room for an office behind one address.
  */
 export const SIGN_IN_STARTS = { most: 20, windowMs: 60_000 } as const;
 
@@ -329,6 +330,7 @@ export function registerSignIn(
     app,
     { most: shareOfCopies(SIGN_IN_STARTS.most, copies), windowMs: SIGN_IN_STARTS.windowMs },
     trust,
+    clientSite,
   );
 
   routes.get(
