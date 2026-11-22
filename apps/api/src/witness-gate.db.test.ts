@@ -56,6 +56,7 @@ import {
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { CONSENT_EXPIRY_CHOSEN, consentExpiryOf } from './consent-expiry-choice.ts';
+import { createAnchorCheck } from './anchor-check.ts';
 import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables } from './handoff-world.helper.test.ts';
 import { carriesRest } from './mandate-carry-rest.ts';
@@ -1869,14 +1870,38 @@ describe('SEC-DB-20 TR-9 a head the probe released, its cut branch put back afte
     j.witness.release(each, below);
   };
 
-  /** J's probe of the organisation's chain, as the anchor check runs it between runs: found whole, its heads released. */
+  /**
+   * J's probe of the organisation's chain through the anchor check's own path between runs (probeWitnessed, its
+   * letGoBelowHighest releasing into J's witness log): found whole, nothing held.
+   */
   async function orgProbed(w: World, j: JobsCopy) {
-    const orgChain = { kind: 'organisation', orgId: w.org } as const;
-    const heldTo = j.witness.pending(orgChain);
-    const from = j.anchors.latest(orgChain) ?? CHAIN_START;
-    const answer = (await createAuditTrail({ keys, ids }).probeHeads(app, [{ orgId: w.org, from, heldTo }])).get(w.org);
-    expect(['failed', 'missed']).not.toContain(answer?.kind);
-    releasedBelowHighest(j, orgChain, heldTo);
+    const trail = createAuditTrail({ keys, ids });
+    const holds: string[] = [];
+    const check = createAnchorCheck({
+      chains: [],
+      organizations: {
+        list: () => Promise.resolve([w.org]),
+        recorded: () => Promise.resolve([w.org]),
+        probe: (chains, signal, pages) => trail.probeHeads(app, chains, signal, pages),
+        verify: (orgId, anchor, heldTo) => trail.checkFromAnchor(app, orgId, anchor ?? CHAIN_START, undefined, heldTo),
+        hold: (orgId) => {
+          holds.push(orgId);
+          return Promise.resolve();
+        },
+      },
+      keys,
+      clock,
+      logger: testLogger(capture),
+      staleAfterMs: 900_000,
+      deadlineMs: 120_000,
+      anchors: j.anchors,
+      witness: j.witness,
+    });
+    const before = j.witness.pending({ kind: 'organisation', orgId: w.org }).length;
+    await check.probeWitnessed([w.org]);
+    expect(holds).toEqual([]);
+    // Every head but the highest above the anchor released by the check itself.
+    expect(j.witness.pending({ kind: 'organisation', orgId: w.org })).toHaveLength(Math.min(before, 1));
   }
 
   /** J's probe of the platform chain, as the anchor check runs it: found whole, its heads released. */

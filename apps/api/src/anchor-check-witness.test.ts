@@ -287,6 +287,39 @@ describe('SEC-DB-20 TR-1 the anchor check held to the witness log', () => {
     expect(run.anchors.latest({ kind: 'organisation', orgId: ORG })?.seq).toBe(1n);
   });
 
+  it('TR-9: a head read in during the walk and released by a probe alongside it holds the anchor back; one asked, then released, does not', async () => {
+    const compact = (head: { readonly seq: bigint; readonly hash: Buffer }) => ({
+      seq: head.seq,
+      hash: head.hash.subarray(0, 16),
+    });
+    let landed = false;
+    const run = withWitness({
+      verified: (orgId) => {
+        // Landed mid-walk and released at once by the probe (its own in-flight key): compact, never in `pending`.
+        if (orgId === ORG && !landed) run.releasedHeads.set(ORG, [compact(witnessed(1n))]);
+        landed = true;
+        return ok(1n);
+      },
+    });
+    await run.check.run();
+    expect(run.anchors.latest({ kind: 'organisation', orgId: ORG })).toBeUndefined();
+    expect(run.anchors.latest({ kind: 'organisation', orgId: OTHER_ORG })?.seq).toBe(1n);
+
+    // Control: asked of the walk whole, released while it ran: the same head by its first bytes, anchored.
+    const asked = withWitness({
+      verified: (orgId) => {
+        if (orgId === ORG) {
+          asked.pending.set(ORG, []);
+          asked.releasedHeads.set(ORG, [compact(witnessed(1n))]);
+        }
+        return ok(1n);
+      },
+    });
+    asked.pending.set(ORG, [witnessed(1n)]);
+    await asked.check.run();
+    expect(asked.anchors.latest({ kind: 'organisation', orgId: ORG })?.seq).toBe(1n);
+  });
+
   it('a chain that let a head go for memory is anchored no more, said each time; others anchor', async () => {
     const run = withWitness();
     run.lost.add(ORG);
@@ -316,8 +349,8 @@ describe('SEC-DB-20 TR-1 the anchor check held to the witness log', () => {
     run.lost.add(ORG);
     run.marks.set(ORG, { low: 3n, high: 6n });
     run.prints.set(ORG, [
-      { seq: 3n, hash: Buffer.alloc(8, 3) },
-      { seq: 6n, hash: Buffer.alloc(8, 6) },
+      { seq: 3n, hash: Buffer.alloc(16, 3) },
+      { seq: 6n, hash: Buffer.alloc(16, 6) },
     ]);
     run.pending.set(ORG, [witnessed(8n)]);
     await run.check.run();

@@ -853,7 +853,7 @@ export function createAnchorCheck({
    * The witnessed heads a walk confirmed, for an anchor where it reached (TR-1): those it was asked above where it
    * began, at or below where it reached; none to confirm without a witness log. Undefined, and no anchor, where this
    * run's read of the log was stale, the chain let a head go for memory (said), or a head held at or below where it
-   * reached was never asked of the walk (read in during it: the next run's walk is asked it).
+   * reached was never asked of the walk (read in during it, compact heads too: the next run's walk is asked it).
    */
   const witnessConfirmed = (
     chain: Chain,
@@ -865,8 +865,10 @@ export function createAnchorCheck({
     if (!readSince(report.began) || unconfirmed.has(keyOf(chain))) return undefined;
     const asked = report.heldTo ?? [];
     const from = report.walkedFrom ?? last?.seq ?? 0n;
-    const askedOf = (head: Witnessed) => asked.some(({ seq, hash }) => seq === head.seq && hash.equals(head.hash));
-    if (witness.pending(chain).some((head) => head.seq <= report.seq && !askedOf(head))) return undefined;
+    // By place and hash's first bytes (TR-9): a head released since it was asked is the same head, compact; one read in
+    // during the walk and released by a probe alongside it is in the held set still, never asked, so no anchor.
+    const askedOf = (head: Witnessed) => asked.some(({ seq, hash }) => seq === head.seq && hashHolds(hash, head.hash));
+    if (witness.heldTo(chain).some((head) => head.seq <= report.seq && !askedOf(head))) return undefined;
     // The compact heads it was held to (TR-3), told: released ones it passed, linked from the anchor, let go; heads let go
     // for memory set aside once it passed every fingerprint, from below the lowest to at or past the highest; else the
     // chain waits for a walk that does (or a rebase), said. A place holding another event was this walk's `cut_back`.
