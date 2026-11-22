@@ -31,6 +31,7 @@ import {
   type AuditTables,
   type SignedStates,
   type SignedStatesServices,
+  type VerifiedState,
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import { MANDATES, mandateOf } from '@agentx/core/modules/mandates';
@@ -41,6 +42,7 @@ import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { heldTo } from './history-held.ts';
 import { carryOut, carryPlan } from './mandate-carry.ts';
 import type { DecisionTables } from './spend-request-decisions.ts';
 
@@ -70,6 +72,7 @@ export async function carriesRest(
   states: SignedStates,
   orgId: string,
   mandate: { readonly id: string; readonly currentVersionId: string | null },
+  state?: VerifiedState,
 ): Promise<boolean> {
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [MANDATES.subject],
@@ -78,7 +81,12 @@ export async function carriesRest(
     limit: 1,
     newest: true,
   });
-  if (history.outcome !== 'read') throw new Error(`A mandate's acceptances can't be believed: ${mandate.id}`);
+  // Held to the acceptance the mandate's state names (TR-3 residual 75): an older one can't stand in for its newest.
+  if (
+    history.outcome !== 'read' ||
+    !heldTo(states, orgId, history.events, state && [MANDATES, mandate.id, state], [ACCEPTED], 1)
+  )
+    throw new Error(`A mandate's acceptances can't be believed: ${mandate.id}`);
   // A version in force came with an acceptance: none read is a history that can't be believed, as one unread.
   // The newest acceptance made the version in force (its signed state is that event's): its own words decide.
   return history.events.at(-1)?.event.details.carryRest === true;

@@ -5,12 +5,18 @@
 // its positive control: an honest J pays.
 import { AGENTS } from '@agentx/core/modules/agents';
 import {
+  type AuditDetails,
+  type AuditTransaction,
   type ChainFrontier,
   checkStatesWith,
   createAuditTrail,
   createChainFrontier,
+  type SignedStates,
+  type VerifiedState,
   witnessWith,
 } from '@agentx/core/modules/audit';
+import { SOURCES } from '@agentx/core/modules/funding-sources';
+import { MANDATES } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { cancelRequest, ORDER_SLOTS, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
@@ -25,7 +31,7 @@ import {
   signAnchor,
   type WitnessLog,
 } from '@agentx/platform/audit-chain';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, type SignedStateTable } from '@agentx/platform/db';
 import {
   createFakeWriteOnceStore,
   createTestDatabase,
@@ -40,13 +46,16 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { CONSENT_EXPIRY_CHOSEN, consentExpiryOf } from './consent-expiry-choice.ts';
 import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables } from './handoff-world.helper.test.ts';
+import { carriesRest } from './mandate-carry-rest.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
+import { pausedOf } from './suspensions.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -1055,6 +1064,73 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
     }
   }
 
+  /**
+   * An older stop hidden below F for good (the digest keeps each object's newest place alone, residual 75): B asked;
+   * W suspends the agent choosing to cancel (E1) and reactivates it (E2), B left approved, as one past the brake's
+   * batch is; A asked and paid, its walk raising F past both (B kept out of that run's list by its row's status, put
+   * back after). Then, `hide` given, the owner moves E1 to another subject, its hash kept: B's history read finds no
+   * cancel since its decision, the agent's newest event is still E2, and the walk from F never reaches E1.
+   */
+  async function olderStopHiddenBelowF(hide: boolean) {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const j = await jobsCopy(w, store);
+    const stopped = await ask(acting, w, { amount: ALLOWED() });
+    for (const [event, action] of [
+      ['suspend', 'agent.suspended'],
+      ['reactivate', 'agent.reactivated'],
+    ] as const) {
+      await signed(w, (tx, states) =>
+        states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, event, {
+          actor: OPERATOR,
+          action,
+          details: event === 'suspend' ? { pendingRequests: 'cancel' } : {},
+        }),
+      );
+    }
+    const paid = await ask(acting, w, { amount: ALLOWED() });
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      const saved = await owner.saveRow(stopped.id);
+      await owner.withoutStatusGuard(() =>
+        owner.query("update spend_requests.requests set status = 'CANCELLED' where org_id = $1 and id = $2", [
+          w.org,
+          stopped.id,
+        ]),
+      );
+      await j.witness.refresh();
+      expect(await handOffOnJ(w, j)).toBe(1);
+      expect(await statusOf(w, paid.id)).toBe('HANDED_OFF');
+      await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+      if (hide) {
+        await owner.query('alter table audit.events disable trigger user');
+        await owner.query(
+          "update audit.events set subject_id = '0199a0f0-0000-7000-8000-00000000c0de' where org_id = $1 and subject_id = $2 and action = 'agent.suspended'",
+          [w.org, w.agent],
+        );
+        await owner.query('alter table audit.events enable trigger user');
+      }
+    } finally {
+      await owner.end();
+    }
+    expect(await statusOf(w, stopped.id)).toBe('APPROVED');
+    capture = new LogCapture();
+    return { w, stopped, submitted: await handOffOnJ(w, j) };
+  }
+
+  it('75: an older cancel hidden below F for good, the agent reactivated since: never paid, the alarm', async () => {
+    const { w, stopped, submitted } = await olderStopHiddenBelowF(true);
+    expect(submitted).toBe(0);
+    expect(await outcome(w, stopped.id, submitted)).toMatchObject({ transaction: undefined });
+    expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
+  });
+
+  it('75’s positive control: not hidden, the cancel is read and the request never paid, nothing alarmed', async () => {
+    const { submitted } = await olderStopHiddenBelowF(false);
+    expect(submitted).toBe(0);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
   it('a stop hidden for every Tx A in a row: each waits, and the fifth in a row is the error (someone at it)', async () => {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
@@ -1117,7 +1193,8 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
     const { w, stopped, submitted } = await cancelHiddenFromHistory(true);
     expect(submitted).toBe(0);
     expect(await outcome(w, stopped.id, submitted)).toMatchObject({ transaction: undefined });
-    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'read_moved' }));
+    // Caught before the walk since residual 75: the agent's state (E2) names E1, and the read didn't get it.
+    expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
   });
 
   it('80: a stop above F hidden while Tx A reads and put back before its walk: never paid', async () => {
@@ -1139,6 +1216,126 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
     expect(submitted).toBe(0);
     expect(await statusOf(w, stopped.id)).toBe('CANCELLED');
     expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+});
+
+describe('SEC-DB-20 TR-3 residual 75: each history read a request rests on held to what its object’s state names', () => {
+  const HIDE = 'hide-me';
+
+  /**
+   * On one object of `table`: each of `made` recorded in turn as a signed state event (the one whose details carry
+   * HIDE marked), then one more (so the marked one is no longer the newest); with `hide`, the owner moves the marked
+   * event to another subject, its hash kept. Then `read` twice in the organisation's transaction: held to the object's
+   * verified state, and from the log alone (the read as it was before). Each answer, or its refusal; and whether the
+   * organisation is held after.
+   */
+  async function olderEventHidden<T>(
+    table: SignedStateTable,
+    idOf: (w: World) => Promise<string>,
+    made: readonly (readonly [string, AuditDetails])[],
+    hide: boolean,
+    read: (tx: AuditTransaction, states: SignedStates, orgId: string, id: string, state?: VerifiedState) => Promise<T>,
+  ) {
+    const { w } = await ready();
+    const id = await idOf(w);
+    for (const [action, details] of [...made, ['test.noted', {}] as const]) {
+      await signed(w, async (tx, states) => {
+        const state = await states.verifiedState(tx, table, { orgId: w.org, id }, 'change');
+        if (state.outcome !== 'verified') throw new Error('the object should verify');
+        await states.record(tx, table, { orgId: w.org, id }, state, {}, { actor: OPERATOR, action, details });
+      });
+    }
+    if (hide) {
+      await asOwner(w, async (owner) => {
+        await owner.query('alter table audit.events disable trigger user');
+        await owner.query(
+          'update audit.events set subject_id = gen_random_uuid() where org_id = $1 and subject_id = $2 and strpos(details, $3) > 0',
+          [w.org, id, HIDE],
+        );
+        await owner.query('alter table audit.events enable trigger user');
+      });
+    }
+    const answer = (held: boolean) =>
+      signed(w, async (tx, states) => {
+        const state = await states.verifiedState(tx, table, { orgId: w.org, id }, 'share');
+        if (state.outcome !== 'verified') throw new Error('the object should verify');
+        return read(tx, states, w.org, id, held ? state : undefined);
+      }).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ refused: error instanceof Error ? error.message : String(error) }),
+      );
+    const unheld = await answer(false);
+    const held = await answer(true);
+    const hold = await signed(w, (tx, states) => states.integrityHold(tx, w.org, 'none'));
+    return { held, unheld, onHold: hold.outcome === 'held' };
+  }
+
+  const theAgent = (w: World) => Promise.resolve(w.agent);
+  const theSource = (w: World) => Promise.resolve(w.source);
+  const theMandate = async (w: World) => {
+    let id = '';
+    await asOwner(w, async (owner) => {
+      const [row] = await owner.query<{ id: string }>('select id from mandates.mandates where org_id = $1', [w.org]);
+      id = row?.id ?? '';
+    });
+    return id;
+  };
+
+  const pausedRead = (tx: AuditTransaction, states: SignedStates, orgId: string, id: string, state?: VerifiedState) =>
+    pausedOf(tx, states, orgId, [['agent', id, 'SUSPENDED', state]]).then((paused) => paused.has('agent'));
+  const suspendedTwice = [
+    ['agent.suspended', { pendingRequests: 'pause' }],
+    ['agent.suspended', { pendingRequests: 'cancel', testMark: HIDE }],
+  ] as const;
+
+  it('pausedOf: a cancel over a pause hidden, the pause read as in force from the log alone; held, refused, the alarm', async () => {
+    const { held, unheld, onHold } = await olderEventHidden(AGENTS, theAgent, suspendedTwice, true, pausedRead);
+    expect(unheld).toEqual({ value: true });
+    expect('refused' in held && held.refused).toMatch(/can't be believed/);
+    expect(onHold).toBe(true);
+  });
+
+  it('pausedOf’s positive control: nothing hidden, the cancel in force, held or not, and no hold', async () => {
+    const { held, unheld, onHold } = await olderEventHidden(AGENTS, theAgent, suspendedTwice, false, pausedRead);
+    expect([held, unheld, onHold]).toEqual([{ value: false }, { value: false }, false]);
+  });
+
+  const expiryRead = (tx: AuditTransaction, states: SignedStates, orgId: string, id: string, state?: VerifiedState) =>
+    consentExpiryOf(tx, states, orgId, id, state);
+  const chosenTwice = [
+    [CONSENT_EXPIRY_CHOSEN, { pendingRequests: 'pause' }],
+    [CONSENT_EXPIRY_CHOSEN, { pendingRequests: 'cancel', testMark: HIDE }],
+  ] as const;
+
+  it('consentExpiryOf: the newest choice (cancel) hidden, an older hold read from the log alone; held, refused', async () => {
+    const { held, unheld, onHold } = await olderEventHidden(SOURCES, theSource, chosenTwice, true, expiryRead);
+    expect(unheld).toEqual({ value: 'pause' });
+    expect('refused' in held && held.refused).toMatch(/can't be believed/);
+    expect(onHold).toBe(true);
+  });
+
+  it('consentExpiryOf’s positive control: nothing hidden, the cancel read, held or not', async () => {
+    const { held, unheld, onHold } = await olderEventHidden(SOURCES, theSource, chosenTwice, false, expiryRead);
+    expect([held, unheld, onHold]).toEqual([{ value: 'cancel' }, { value: 'cancel' }, false]);
+  });
+
+  const carryRead = (tx: AuditTransaction, states: SignedStates, orgId: string, id: string, state?: VerifiedState) =>
+    carriesRest(tx, states, orgId, { id, currentVersionId: null }, state);
+  const acceptedTwice = [
+    ['mandate.accepted', { carryRest: true }],
+    ['mandate.accepted', { carryRest: false, testMark: HIDE }],
+  ] as const;
+
+  it('carriesRest: the newest acceptance hidden, an older one carrying the rest read from the log alone; held, refused', async () => {
+    const { held, unheld, onHold } = await olderEventHidden(MANDATES, theMandate, acceptedTwice, true, carryRead);
+    expect(unheld).toEqual({ value: true });
+    expect('refused' in held && held.refused).toMatch(/can't be believed/);
+    expect(onHold).toBe(true);
+  });
+
+  it('carriesRest’s positive control: nothing hidden, the newest acceptance read, held or not', async () => {
+    const { held, unheld, onHold } = await olderEventHidden(MANDATES, theMandate, acceptedTwice, false, carryRead);
+    expect([held, unheld, onHold]).toEqual([{ value: false }, { value: false }, false]);
   });
 });
 

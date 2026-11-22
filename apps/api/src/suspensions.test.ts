@@ -6,10 +6,21 @@
 // its version moves stops at the first that isn't a linked details change
 // chosen to pause.
 import type { AuditDetails, AuditTransaction, HistoryCheck, SignedStates } from '@agentx/core/modules/audit';
-import { PAUSED_IN } from '@agentx/core/modules/spend-requests';
+import { type Pausable, PAUSED_IN } from '@agentx/core/modules/spend-requests';
 import { describe, expect, it } from 'vitest';
 
-import { cancelsAtOnce, choiceIn, isCarried, movedPast, PAUSE_EVENTS, pausedFromOf } from './suspensions.ts';
+import { CONSENT_EXPIRY_CHOSEN } from './consent-expiry-choice.ts';
+import {
+  CANCEL_BRAKES,
+  cancelsAtOnce,
+  choiceIn,
+  isCarried,
+  movedPast,
+  PAUSABLE_TABLES,
+  PAUSE_EVENTS,
+  pausedFromOf,
+  VERSION_MOVES,
+} from './suspensions.ts';
 
 describe('choiceIn', () => {
   it('reads a pause recorded as a pause, and anything else as a cancel: none, older events, a value past the app', () => {
@@ -93,5 +104,25 @@ describe('pausedFromOf', () => {
 
   it('throws for a history that can’t be believed', async () => {
     await expect(carried([], { outcome: 'tampered', sign: 'chain' })).rejects.toThrow('version history can');
+  });
+});
+
+describe('the actions a request’s authority reads from its histories, each tracked by its table (TR-3 residual 75)', () => {
+  it('every stop, pause, version move, expiry choice and acceptance read is one its table’s state events name', () => {
+    const read: Record<Pausable, string[]> = {
+      organization: [],
+      agent: [],
+      mandate: ['mandate.accepted'],
+      source: [CONSENT_EXPIRY_CHOSEN],
+      supplier: [...VERSION_MOVES],
+    };
+    for (const which of Object.keys(read) as Pausable[]) {
+      const { cancels, cancelsIfChosen, cancelsPastEnd } = CANCEL_BRAKES[which];
+      const paused = Object.values(PAUSE_EVENTS[which]).flatMap(({ actions }) => actions);
+      for (const action of [...read[which], ...cancels, ...cancelsIfChosen, ...cancelsPastEnd, ...paused]) {
+        expect(PAUSABLE_TABLES[which].tracks, `${which}: ${action}`).toContain(action);
+      }
+      expect(PAUSABLE_TABLES[which].subject).toBe(CANCEL_BRAKES[which].type);
+    }
   });
 });
