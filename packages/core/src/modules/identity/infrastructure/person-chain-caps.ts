@@ -17,8 +17,9 @@
 //
 // A session's opening is the app's clock (sessions.ts), a platform event's the
 // database's (`recorded_at`, under the head's lock): each is counted by its own.
-// Both read by index: 0084's of the platform events by action and person, 0010's
-// of the sessions by person.
+// Both read by index: 0116's of the platform events by action, person and time, so
+// the day's window is a range of entries however long the person's history (the
+// platform chain is never pruned), and 0010's of the sessions by person.
 import { holdTransactionLock } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
@@ -36,10 +37,13 @@ export const MOST_SESSIONS_A_DAY = 100;
 export const MOST_STEP_UPS_A_DAY = 200;
 
 /** The advisory lock a person's sign-ins and step-ups count their day's caps under (ADR-006 §6). */
-const PERSON_CHAIN_LOCK = 'identity-person-chain';
+export const PERSON_CHAIN_LOCK = 'identity-person-chain';
 
-/** The person's platform events of `action` signed in the database's last 24 hours, as a subquery. */
-const signedToday = (action: string, userId: string) =>
+/**
+ * The person's platform events of `action` signed in the database's last 24 hours, as a subquery: by 0116's index, its
+ * person written exactly as the index keys it (person-chain-caps.db.test.ts reads the plan).
+ */
+export const personSignedToday = (action: string, userId: string) =>
   sql<number>`(select pg_catalog.count(*)::int from platform_controls.audit_events
     where action = ${action} and (details::jsonb ->> 'person') = ${userId.toLowerCase()}
       and recorded_at > pg_catalog.now() - interval '1 day')`;
@@ -57,7 +61,7 @@ export async function sessionsSpent(
   await holdTransactionLock(tx, PERSON_CHAIN_LOCK, userId);
   const { opened } = await tx
     .selectFrom('identity.sessions')
-    .select(sql<number>`pg_catalog.count(*)::int + ${signedToday(SESSION_ENDED, userId)}`.as('opened'))
+    .select(sql<number>`pg_catalog.count(*)::int + ${personSignedToday(SESSION_ENDED, userId)}`.as('opened'))
     .where('user_id', '=', userId)
     .where('created_at', '>', new Date(now.getTime() - DAY_MS))
     .executeTakeFirstOrThrow();
@@ -72,7 +76,7 @@ export async function sessionsSpent(
 export async function stepUpsSpent(tx: Transaction<IdentityTables>, userId: string, most: number): Promise<boolean> {
   await holdTransactionLock(tx, PERSON_CHAIN_LOCK, userId);
   const { rotated } = await tx
-    .selectNoFrom(signedToday(SESSION_ROTATED, userId).as('rotated'))
+    .selectNoFrom(personSignedToday(SESSION_ROTATED, userId).as('rotated'))
     .executeTakeFirstOrThrow();
   return rotated >= most;
 }

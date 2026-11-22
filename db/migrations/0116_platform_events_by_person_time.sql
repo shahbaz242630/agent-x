@@ -1,0 +1,24 @@
+-- agentx: no transaction (concurrent index)
+-- S210 TR-7 (B3): a person's day's sessions and step-ups are counted from their platform
+-- events of the last 24 hours (person-chain-caps.ts: `identity.session_ended`,
+-- `identity.session_rotated`), at each sign-in and step-up, under the person's lock. Through
+-- 0084's by-person index that count visits every event of the action the person ever had,
+-- as the platform chain is never pruned: a busy approver's step-ups grow by tens of thousands
+-- a year. This index keys the action, the person, as 0084's keyed it
+-- (`(details::jsonb ->> 'person')`, written out exactly), and when it was recorded, so the
+-- day's window is a range of its entries however long the person's history.
+--
+-- It takes the place of 0084's `audit_events_by_person`, dropped after it is built: its
+-- first two keys are that index's, so every read by action and person alone (the login
+-- restriction, the swap check, the sessions' ends) reads it just as well, and one index is
+-- kept up as events are recorded, not two. A plain index missing is speed to the schema
+-- guard, never drift (schema-guard.ts), so the image before this migration reads on.
+-- The platform chain is a global table, of no organisation (0003): no org_id to lead with,
+-- and no table, column or grant changes.
+--
+-- Built and dropped concurrently, outside a transaction (the first line; migrate.ts), as
+-- 0081's: events go on being recorded throughout. A build that fails leaves the index not
+-- valid, which the guard reads as speed, not drift, and the next run drops it and builds it
+-- again; the old index goes only once the new one stands.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_events_by_person_time ON platform_controls.audit_events (action, (details::jsonb ->> 'person'), recorded_at);
+DROP INDEX CONCURRENTLY IF EXISTS platform_controls.audit_events_by_person;
