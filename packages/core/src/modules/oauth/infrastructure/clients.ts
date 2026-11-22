@@ -2,7 +2,7 @@
 // global table, as a client registers before anyone is known. A registration
 // grants nothing: a connection is made only by a person's consent. So it is
 // held only against filling the table: a day's cap for the whole server and
-// one for each network (6F1 G4), counted under one lock (and each address's
+// one for each network (6F1 G4), each under its own lock (and each address's
 // own limit, in the API), the network cleared once its day is past (AG8), and a
 // client that never connects is swept a day after it registered; one that
 // did, 90 days after it last connected (0094, 6E3b), when no connection of
@@ -24,18 +24,11 @@ import { newClientId } from './codes.ts';
 import type { OauthTables } from './tables.ts';
 
 /**
- * The clients that may register in any 24 hours, from every address together, past which only a quiet network's
- * (S210 TR-7): the table's backstop, never a lockout. A crowd of networks filling it would otherwise refuse every
- * organisation's next app for the day (no fixed user ceiling: load may slow the system, never break it).
+ * The clients that may register in any 24 hours, from every address together, past which only a busy network's are
+ * refused (S210 TR-7, R2-1): the table's backstop, never a lockout. A crowd of networks filling it would otherwise
+ * refuse every organisation's next app for the day (no fixed user ceiling: load may slow the system, never break it).
  */
 export const MOST_REGISTRATIONS_A_DAY = 2000;
-
-/**
- * How few registrations in 24 hours make a network quiet: let in even past MOST_REGISTRATIONS_A_DAY (S210 TR-7), as a
- * quiet network's sign-in is past the sign-ins' backstop (login-flows.ts, S206 V8). The table then grows only with
- * each new network's few.
- */
-export const QUIET_NETWORK_REGISTRATIONS = 3;
 
 /**
  * The most clients that may register in any 24 hours from one network (6F1 G4): an IPv4 /24 or an IPv6 /48, so a few
@@ -45,6 +38,14 @@ export const QUIET_NETWORK_REGISTRATIONS = 3;
  */
 export const MOST_REGISTRATIONS_A_NETWORK_A_DAY = 150;
 
+/**
+ * How many registrations in 24 hours make a network busy: past MOST_REGISTRATIONS_A_DAY only a busy network is refused
+ * (S210 TR-7, R2-1), any other still held to its own MOST_REGISTRATIONS_A_NETWORK_A_DAY. A third of that share: a
+ * shared network (a hosted agent platform, an office's one address) adding a few dozen organisations' apps a day stays
+ * under it, while filling the server's cap takes at least 14 networks at their full 150, each far past it.
+ */
+export const BUSY_NETWORK_REGISTRATIONS = MOST_REGISTRATIONS_A_NETWORK_A_DAY / 3;
+
 /** A registered client, as kept. */
 export interface Client extends ClientRegistration {
   readonly clientId: string;
@@ -53,17 +54,38 @@ export interface Client extends ClientRegistration {
 
 /**
  * Registered, with its ID and when; or a day's cap reached, nothing kept: this network's, or the whole server's with
- * this network not quiet.
+ * this network busy.
  */
 export type Registered =
   | { readonly outcome: 'registered'; readonly client: Client }
   | { readonly outcome: 'capped'; readonly cap: 'server' | 'network' };
 
 /**
+ * The clients registered since `since`, from `network` or from any, counted no further than `most` (R2-3): a network's
+ * read by 0117's index on the network and time, the server's by the time alone, so neither reads past its cap however
+ * many registered.
+ */
+export function registrationsSince(
+  db: Kysely<OauthTables> | Transaction<OauthTables>,
+  since: Date,
+  most: number,
+  network?: string,
+) {
+  return db
+    .selectFrom((inner) => {
+      const day = inner.selectFrom('oauth.clients').select('client_id').where('created_at', '>', since);
+      return (network === undefined ? day : day.where('network', '=', network)).limit(most).as('day');
+    })
+    .select(sql<number>`pg_catalog.count(*)::int`.as('registered'));
+}
+
+/**
  * Registers the client from `network` (6F1 G4: its client address's /24, or /48 for IPv6), in a transaction of its own
- * whose statements are limited to 10 seconds: the day's counts, the server's and the network's, taken under the
- * registrations' one lock, so two at once can't both take the last place. Past the server's cap a network holding fewer
- * than QUIET_NETWORK_REGISTRATIONS that day still registers (S210 TR-7).
+ * whose statements are limited to 10 seconds. The network's day is counted first, under its own lock, so two at once
+ * can't both take its last place; only a busy network (BUSY_NETWORK_REGISTRATIONS) then counts the server's day, under
+ * the registrations' one lock (R2-3: a quiet network's registration never waits on anyone else's, nor counts them).
+ * A quiet one registering meanwhile, under no server lock, may take the server a few past its cap: it is a backstop,
+ * and the busy networks it holds are held all the same.
  */
 export async function registerClient(
   db: Kysely<OauthTables>,
@@ -74,19 +96,20 @@ export async function registerClient(
 ): Promise<Registered> {
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    await holdTransactionLock(tx, 'oauth_clients');
-    const { registered, fromNetwork } = await tx
-      .selectFrom('oauth.clients')
-      .select([
-        sql<number>`pg_catalog.count(*)::int`.as('registered'),
-        sql<number>`(pg_catalog.count(*) filter (where network = ${network}))::int`.as('fromNetwork'),
-      ])
-      .where('created_at', '>', new Date(now.getTime() - DAY_MS))
-      .executeTakeFirstOrThrow();
-    if (registered >= MOST_REGISTRATIONS_A_DAY && fromNetwork >= QUIET_NETWORK_REGISTRATIONS) {
-      return { outcome: 'capped', cap: 'server' };
-    }
+    const since = new Date(now.getTime() - DAY_MS);
+    await holdTransactionLock(tx, 'oauth_client_network', network);
+    const { registered: fromNetwork } = await registrationsSince(
+      tx,
+      since,
+      MOST_REGISTRATIONS_A_NETWORK_A_DAY,
+      network,
+    ).executeTakeFirstOrThrow();
     if (fromNetwork >= MOST_REGISTRATIONS_A_NETWORK_A_DAY) return { outcome: 'capped', cap: 'network' };
+    if (fromNetwork >= BUSY_NETWORK_REGISTRATIONS) {
+      await holdTransactionLock(tx, 'oauth_clients');
+      const { registered } = await registrationsSince(tx, since, MOST_REGISTRATIONS_A_DAY).executeTakeFirstOrThrow();
+      if (registered >= MOST_REGISTRATIONS_A_DAY) return { outcome: 'capped', cap: 'server' };
+    }
     const client: Client = { ...registration, clientId: newClientId(), createdAt: now };
     const seal = registeredSealed(keys, client);
     await tx

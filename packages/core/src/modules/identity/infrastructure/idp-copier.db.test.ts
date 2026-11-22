@@ -845,6 +845,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     'user.human.mfa.otp.removed',
     'user.human.password.changed',
     'user.human.email.changed',
+    'user.human.phone.changed',
     'user.locked',
   ])('ends every Agent X session of the person on %s, once, whatever organisations they belong to', async (type) => {
     const who = await person();
@@ -928,6 +929,81 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     ).run();
 
     expect(await sessionsOf(who.userId)).toBe(1);
+  });
+
+  it('SEC-OPS-02 S210 R2-2: a password reset asked for ends no session, emails no admin, and tells the person alone; a password changed still ends them', async () => {
+    const who = await person();
+    const admin = await person();
+    const org = await organization(who.userId);
+    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
+      addMembership(tx, states, {
+        orgId: org,
+        id: ids.next(),
+        userId: admin.userId,
+        role: 'admin',
+        joinedAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+    const other = await organization(who.userId);
+    await signIn(who.userId);
+    const asked = event('user.human.password.code.added', who.subject);
+
+    await copierWith(feedOf(() => [asked]).feed).run();
+
+    // Recorded on each organisation's chain and the platform's, as every copy is,
+    const copies = await platformCopies(`user:${who.subject}:${asked.sequence}`);
+    expect(copies).toHaveLength(2);
+    expect((await orgRecords(org)).map((row) => row.action)).toEqual([SIGN_IN_CHANGED]);
+    // but the session lives on, and no end is signed: it ended them every run before (R2-2).
+    expect(await sessionsOf(who.userId)).toBe(1);
+    expect(copies.filter((copy) => 'signInsEnded' in copy)).toEqual([]);
+    expect((await endsKept(app, who.userId)).signed).toEqual([]);
+    // Told to the person alone, once whatever organisations they are in: no notice to the admins.
+    const notices = [...(await noticesOf(org)), ...(await noticesOf(other))];
+    expect(notices).toEqual([{ recipient_user_id: who.userId, kind: 'password_changed', about_id: who.userId }]);
+    expect(copies.filter((copy) => copy.told === 'yes')).toHaveLength(1);
+
+    // The reset used, the password changed: that still ends every session, and is told to the admins too.
+    clock.advanceBy(60_000);
+    const changed = event('user.human.password.changed', who.subject);
+    await copierWith(feedOf(() => [changed]).feed).run();
+    expect(await sessionsOf(who.userId)).toBe(0);
+    expect((await noticesOf(org)).filter((notice) => notice.recipient_user_id === null)).toEqual([
+      { recipient_user_id: null, kind: 'password_changed', about_id: who.userId },
+    ]);
+  });
+
+  it('SEC-OPS-02 S210 R2-2: a flood of resets asked for is copied once a page and told once an hour, never holding back a factor removed', async () => {
+    const who = await person();
+    const org = await organization(who.userId);
+    const base = clock.now().getTime() - 30 * 60_000;
+    // A page's worth of resets asked for, one a second, and a factor removed at the end of them.
+    const flood = Array.from({ length: 60 }, (_, index) =>
+      event('user.human.password.code.added', who.subject, { createdAt: new Date(base + index * 1000) }),
+    );
+    const removed = event('user.human.mfa.otp.removed', who.subject, { createdAt: new Date(base + 61_000) });
+
+    await copierWith(feedOf(() => [...flood, removed]).feed).run();
+
+    // The flood is one copy, its latest, counting the 59 before it; the factor removed is copied in the same run.
+    const copied = await Promise.all(flood.map((one) => platformCopies(`user:${who.subject}:${one.sequence}`)));
+    expect(copied.flat()).toEqual([expect.objectContaining({ type: 'user.human.password.code.added', alsoAsked: 59 })]);
+    expect(copied.at(-1)).toHaveLength(1);
+    expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toHaveLength(1);
+    expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ events: 61, records: 2, alsoAsked: 59 })]);
+    // Told once: the reset's notice, and the factor removed's to the person.
+    const toldOfReset = async () =>
+      (await noticesOf(org)).filter((notice) => notice.kind === 'password_changed').length;
+    expect(await toldOfReset()).toBe(1);
+
+    // Another asked within the hour is copied, but tells no one; one an hour after the told one tells them again.
+    clock.advanceBy(10 * 60_000);
+    await copierWith(feedOf(() => [event('user.human.password.code.added', who.subject)]).feed).run();
+    expect(await toldOfReset()).toBe(1);
+    clock.advanceBy(60 * 60_000);
+    await copierWith(feedOf(() => [event('user.human.password.code.added', who.subject)]).feed).run();
+    expect(await toldOfReset()).toBe(2);
   });
 
   it('SA2: restricts a person for 7 days from a factor removed by someone else before they first signed in, by their login', async () => {

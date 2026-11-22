@@ -20,6 +20,7 @@ export const SIGN_IN_NOTICE_KINDS = [
   'second_factor_added',
   'password_changed',
   'sign_in_email_changed',
+  'sign_in_phone_changed',
   'sign_in_blocked',
   'sign_in_restored',
 ] as const;

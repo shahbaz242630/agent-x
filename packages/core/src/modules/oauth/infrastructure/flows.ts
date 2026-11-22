@@ -42,19 +42,12 @@ type Database = Kysely<OauthTables>;
 type Handle = Database | Transaction<OauthTables>;
 
 /**
- * The flows not yet ended at once, every browser together, past which only a quiet network's open (lead's review,
- * 6E3a; S210 TR-7): anyone can open one with an anonymous GET, and an image on a busy page beats any per-address
- * limit, so the table is held here whatever comes, but never as a lockout, as the sign-ins' backstop (login-flows.ts,
- * S206 V8). Far above any real day: a flow lives 15 minutes.
+ * The flows not yet ended at once, every browser together, past which only a busy source's or network's are refused
+ * (lead's review, 6E3a; S210 TR-7, R2-1): anyone can open one with an anonymous GET, and an image on a busy page beats
+ * any per-address limit, so the table is held here whatever comes, but never as a lockout, as the sign-ins' backstop
+ * (login-flows.ts, S206 V8). Far above any real day: a flow lives 15 minutes.
  */
 export const MOST_OPEN_FLOWS = 20_000;
-
-/**
- * How few flows not ended make a network quiet: let in even while MOST_OPEN_FLOWS are open (S210 TR-7), so a crowd of
- * networks filling the table can't stop everyone else connecting an app; the table then grows only with each new
- * network's few.
- */
-export const QUIET_NETWORK_FLOWS = 3;
 
 /** The most flows one browser (its flow cookie) holds open and undecided at once: a person connects a few apps. */
 export const MOST_OPEN_FLOWS_A_BROWSER = 5;
@@ -73,6 +66,16 @@ export const MOST_OPEN_FLOWS_A_SOURCE = 20;
  */
 export const MOST_OPEN_FLOWS_A_NETWORK = 100;
 
+/**
+ * How many flows not ended make a source busy, and how many a network (S210 TR-7, R2-1): while MOST_OPEN_FLOWS are open
+ * only a busy one is refused, any other still held to its own caps. Half of each one's own cap: a person connects a few
+ * apps (MOST_OPEN_FLOWS_A_BROWSER), and a shared network (a hosted agent platform, an office's one address) a few dozen
+ * people's at once, while filling the server's cap takes a thousand sources at their full 20, or 200 networks at their
+ * full 100, each past half.
+ */
+export const BUSY_SOURCE_FLOWS = MOST_OPEN_FLOWS_A_SOURCE / 2;
+const BUSY_NETWORK_FLOWS = MOST_OPEN_FLOWS_A_NETWORK / 2;
+
 /** Where a flow comes from (6F1 G4, AG8): its source as the rate limit keys it, and that source's network. */
 export interface FlowSource {
   readonly source: string;
@@ -83,17 +86,17 @@ export interface FlowSource {
 export type FlowOpened = 'opened' | 'full' | 'network_full' | 'source_full' | 'browser_full';
 
 /**
- * Whether the flows of either kind not ended at `now` are at a cap: every source's together (MOST_OPEN_FLOWS, the ends
- * index) with this network not quiet (QUIET_NETWORK_FLOWS, S210 TR-7), this network's (MOST_OPEN_FLOWS_A_NETWORK, the
- * network index), or this source's own (MOST_OPEN_FLOWS_A_SOURCE, the source index), each count stopping at its cap.
- * A quiet network is counted on its own few alone: a source holds no more than its network, so no other cap is near.
+ * Whether the flows of either kind not ended at `now` are at a cap: this network's (MOST_OPEN_FLOWS_A_NETWORK, the
+ * network index), this source's own (MOST_OPEN_FLOWS_A_SOURCE, the source index), or, only where either is busy
+ * (BUSY_NETWORK_FLOWS, BUSY_SOURCE_FLOWS; S210 TR-7, R2-1), every source's together (MOST_OPEN_FLOWS, the ends index),
+ * each count stopping at its cap. A source and network neither busy never count the server's flows.
  */
 async function flowsFull(
   tx: Transaction<OauthTables>,
   { source, network }: FlowSource,
   now: Date,
 ): Promise<'full' | 'network_full' | 'source_full' | undefined> {
-  const atCap = async (most: number, of?: readonly ['network_key' | 'source_key', string]): Promise<boolean> => {
+  const held = async (most: number, of?: readonly ['network_key' | 'source_key', string]): Promise<number> => {
     const { flows } = await tx
       .selectFrom((inner) => {
         const open = inner.selectFrom('oauth.flows').select('id').where('ends_at', '>', now);
@@ -101,18 +104,20 @@ async function flowsFull(
       })
       .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
       .executeTakeFirstOrThrow();
-    return flows >= most;
+    return flows;
   };
-  if (!(await atCap(QUIET_NETWORK_FLOWS, ['network_key', network]))) return undefined;
-  if (await atCap(MOST_OPEN_FLOWS)) return 'full';
-  if (await atCap(MOST_OPEN_FLOWS_A_NETWORK, ['network_key', network])) return 'network_full';
-  if (await atCap(MOST_OPEN_FLOWS_A_SOURCE, ['source_key', source])) return 'source_full';
+  const fromNetwork = await held(MOST_OPEN_FLOWS_A_NETWORK, ['network_key', network]);
+  const fromSource = await held(MOST_OPEN_FLOWS_A_SOURCE, ['source_key', source]);
+  const busy = fromNetwork >= BUSY_NETWORK_FLOWS || fromSource >= BUSY_SOURCE_FLOWS;
+  if (busy && (await held(MOST_OPEN_FLOWS)) >= MOST_OPEN_FLOWS) return 'full';
+  if (fromNetwork >= MOST_OPEN_FLOWS_A_NETWORK) return 'network_full';
+  if (fromSource >= MOST_OPEN_FLOWS_A_SOURCE) return 'source_full';
   return undefined;
 }
 
 /**
  * Opens the flow from `from` (its client address's source and network, 6F1 G4, AG8), for FLOW_SECONDS from its
- * creation, unless MOST_OPEN_FLOWS have not ended and this network holds QUIET_NETWORK_FLOWS (S210 TR-7), or this network holds MOST_OPEN_FLOWS_A_NETWORK or this source
+ * creation, unless MOST_OPEN_FLOWS have not ended and this source or network is busy (S210 TR-7, R2-1), or this network holds MOST_OPEN_FLOWS_A_NETWORK or this source
  * MOST_OPEN_FLOWS_A_SOURCE not ended, or this browser holds MOST_OPEN_FLOWS_A_BROWSER open and undecided, in a
  * transaction of its own whose statements are limited to 10 seconds, each count stopping at its cap (the ends index,
  * the network index, the source index, the browser index). Best effort, with no lock (lead's re-review: one would make
@@ -359,7 +364,7 @@ export type DeviceFlowOpened = 'opened' | 'full' | 'network_full' | 'source_full
 
 /**
  * Opens the device's flow from `from` (6F1 G4, AG8), for FLOW_SECONDS, unless MOST_OPEN_FLOWS have not ended and this
- * network holds QUIET_NETWORK_FLOWS (S210 TR-7), or this network holds MOST_OPEN_FLOWS_A_NETWORK or this source MOST_OPEN_FLOWS_A_SOURCE (the code flows' own caps, best
+ * source or network is busy (S210 TR-7, R2-1), or this network holds MOST_OPEN_FLOWS_A_NETWORK or this source MOST_OPEN_FLOWS_A_SOURCE (the code flows' own caps, best
  * effort, as openCodeFlow's), in a transaction of its own whose statements are limited to 10 seconds. A user code
  * another flow holds, ended or not, opens no flow: `collided`, and nothing kept.
  */

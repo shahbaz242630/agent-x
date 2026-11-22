@@ -3,9 +3,10 @@
 // day's cap, a flow decided once, its code used once, and both swept once past
 // their use; a device's flow claimed once and polled no sooner than its
 // interval; a client's metadata document kept a day.
-import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createTestDatabase, holdNamedLock, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
+import { createDatabase, type Database, lockName } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
@@ -26,8 +27,9 @@ import {
   clientSeen,
   MOST_REGISTRATIONS_A_DAY,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
-  QUIET_NETWORK_REGISTRATIONS,
+  BUSY_NETWORK_REGISTRATIONS,
   registerClient,
+  registrationsSince,
   sweepClientNetworks,
   sweepClients,
 } from './clients.ts';
@@ -49,7 +51,7 @@ import {
   MOST_OPEN_FLOWS_A_SOURCE,
   openCodeFlow,
   openDeviceFlow,
-  QUIET_NETWORK_FLOWS,
+  BUSY_SOURCE_FLOWS,
   sweepFlows,
 } from './flows.ts';
 import type { OauthTables } from './tables.ts';
@@ -167,30 +169,38 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     await expect(sweepClients(app, NOW, 0)).rejects.toBeInstanceOf(RangeError);
   });
 
-  it(`SEC-OAUTH-13 past ${String(MOST_REGISTRATIONS_A_DAY)} in 24 hours, refuses only a busy network and still takes a quiet one: no lockout (S210 TR-7)`, async () => {
+  it(`SEC-OAUTH-13 past ${String(MOST_REGISTRATIONS_A_DAY)} in 24 hours, refuses only a network holding ${String(BUSY_NETWORK_REGISTRATIONS)}; a busy shared one under it still registers: no lockout (S210 TR-7, R2-1)`, async () => {
     const day = new Date('2026-12-01T09:00:00Z');
     const admin = database.as('admin');
-    // The day's cap filled from 14 networks, each under its own share (about 143 of 150): a spread-out crowd.
+    // The day's cap filled by an attacker's 14 networks: 13 at their full 150, one at 45; and a shared network (a hosted
+    // agent platform's) with 5 of its customers' apps today, all counted in the 2,000.
+    const shared = fresh();
     await admin.query(
       `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at, network)
        select 'axcl_' || lpad(to_hex(n), 32, '0'), 'Filler', array['https://a.example/cb'], 'web', array['authorization_code'], $1,
-         'tr7-net-' || (n % 14)
+         case when n <= 1950 then 'tr7-net-' || (n % 13) when n <= 1995 then 'tr7-net-13' else $3 end
        from generate_series(1, $2::int) as n`,
-      [day, MOST_REGISTRATIONS_A_DAY],
+      [day, MOST_REGISTRATIONS_A_DAY, shared],
     );
     try {
       const at = new Date(day.getTime() + 1000);
-      // A network of the crowd is refused, the server's cap,
+      // An attacker's network at its full share is refused its 151st,
       expect(await registerClient(app, keys, registration(), at, 'tr7-net-1')).toEqual({
+        outcome: 'capped',
+        cap: 'network',
+      });
+      // the one at 45 registers up to the busy share, and is then refused, the server's cap,
+      for (let made = 45; made < BUSY_NETWORK_REGISTRATIONS; made += 1) {
+        expect(await registerClient(app, keys, registration(), at, 'tr7-net-13')).toMatchObject({
+          outcome: 'registered',
+        });
+      }
+      expect(await registerClient(app, keys, registration(), at, 'tr7-net-13')).toEqual({
         outcome: 'capped',
         cap: 'server',
       });
-      // while a network that has registered fewer than its few today still registers, up to them, and only then is refused.
-      const quiet = fresh();
-      for (let made = 0; made < QUIET_NETWORK_REGISTRATIONS; made += 1) {
-        expect(await registerClient(app, keys, registration(), at, quiet)).toMatchObject({ outcome: 'registered' });
-      }
-      expect(await registerClient(app, keys, registration(), at, quiet)).toEqual({ outcome: 'capped', cap: 'server' });
+      // while the shared network with 5 registers its 6th: it was refused here when it held 3 or more (R2-1).
+      expect(await registerClient(app, keys, registration(), at, shared)).toMatchObject({ outcome: 'registered' });
       // Another fresh network is let in all the same.
       expect(await registerClient(app, keys, registration(), at, fresh())).toMatchObject({ outcome: 'registered' });
       // A day on, the crowd's network registers again.
@@ -203,6 +213,130 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
       // Its crowd's networks would be left for the sweep below to clear.
       await admin.query("delete from oauth.clients where name = 'Filler'");
     }
+  });
+
+  it(`SEC-OAUTH-13 R2-3: the day's counts read no more than their caps, the network's by its own index, however many registered`, async () => {
+    const day = new Date('2026-12-15T09:00:00Z');
+    const admin = database.as('admin');
+    // 6,000 registered today, quiet networks' few each past the server's cap, and one network's 400 (more than its cap).
+    await admin.query(
+      `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at, network)
+       select 'axcl_e' || lpad(to_hex(n), 31, '0'), 'Filler', array['https://a.example/cb'], 'web', array['authorization_code'], $1,
+         case when n <= 400 then 'r23-busy' else 'r23-net-' || (n % 3000) end
+       from generate_series(1, 6000) as n`,
+      [day],
+    );
+    try {
+      await admin.query('analyze oauth.clients');
+      const since = new Date(day.getTime() - DAY_MS + 1000);
+      interface PlanNode {
+        readonly 'Node Type': string;
+        readonly 'Relation Name'?: string;
+        readonly 'Index Name'?: string;
+        readonly 'Actual Rows': number;
+        readonly Plans?: readonly PlanNode[];
+      }
+      // Every node of the plan as run: the table's reads among them, and the indexes it read by.
+      const planned = async (most: number, network?: string): Promise<PlanNode[]> => {
+        const { rows } = await sql<{
+          'QUERY PLAN': readonly [{ Plan: PlanNode }];
+        }>`explain (analyze, format json) ${registrationsSince(app, since, most, network)}`.execute(app);
+        const nodes: PlanNode[] = [];
+        const walk = (node: PlanNode): void => {
+          nodes.push(node);
+          for (const child of node.Plans ?? []) walk(child);
+        };
+        walk(rows[0]?.['QUERY PLAN'][0].Plan ?? { 'Node Type': 'none', 'Actual Rows': 0 });
+        return nodes;
+      };
+      const tableReads = (nodes: readonly PlanNode[]) => nodes.filter((node) => node['Relation Name'] === 'clients');
+      const server = tableReads(await planned(MOST_REGISTRATIONS_A_DAY));
+      expect(server).toHaveLength(1);
+      expect(server[0]?.['Actual Rows']).toBeLessThanOrEqual(MOST_REGISTRATIONS_A_DAY);
+      const network = await planned(MOST_REGISTRATIONS_A_NETWORK_A_DAY, 'r23-busy');
+      expect(network.map((node) => node['Index Name'])).toContain('clients_by_network');
+      expect(tableReads(network)).toHaveLength(1);
+      expect(tableReads(network)[0]?.['Actual Rows']).toBeLessThanOrEqual(MOST_REGISTRATIONS_A_NETWORK_A_DAY);
+      // And the counts themselves stop at the caps.
+      expect(await registrationsSince(app, since, MOST_REGISTRATIONS_A_DAY).executeTakeFirst()).toEqual({
+        registered: MOST_REGISTRATIONS_A_DAY,
+      });
+    } finally {
+      await admin.query("delete from oauth.clients where name = 'Filler'");
+    }
+  });
+
+  describe('SEC-OAUTH-13 R2-3: each count taken under its lock, the network’s before the server’s', () => {
+    const lockDay = new Date('2026-12-20T09:00:00Z');
+    /** `count` clients registered today from `network`, as the owner would find them; their ID prefix keeps them apart. */
+    const filled = (prefix: string, network: string, count: number, session = database.as('admin')) =>
+      session.query(
+        `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at, network)
+         select 'axcl_' || $1 || lpad(to_hex(n), 31, '0'), 'Filler', array['https://a.example/cb'], 'web',
+           array['authorization_code'], $2, $3
+         from generate_series(1, $4::int) as n`,
+        [prefix, lockDay, network, count],
+      );
+    /** Whether another session can take the named lock now, letting it go at once. */
+    const free = async (name: string) => {
+      const [row] = await database
+        .as('admin')
+        .query<{ free: boolean }>(
+          'select pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0)) as free',
+          [name],
+        );
+      if (row?.free === true) {
+        await database
+          .as('admin')
+          .query('select pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1, 0))', [name]);
+      }
+      return row?.free;
+    };
+
+    it('counts the network only once it holds the network’s lock: one committing its last place meanwhile is seen', async () => {
+      const network = fresh();
+      await filled('a', network, MOST_REGISTRATIONS_A_NETWORK_A_DAY - 1);
+      const holder = await database.connect('admin');
+      await holder.query('begin');
+      try {
+        await holdNamedLock(holder, lockName('oauth_client_network', network));
+        const registering = registerClient(app, keys, registration(), lockDay, network);
+        await waitUntilQueued(database.as('admin'), 1);
+        // The network's last place taken while the registration waits: it must count it.
+        await filled('b', network, 1, holder);
+        await holder.query('commit');
+        expect(await registering).toEqual({ outcome: 'capped', cap: 'network' });
+      } finally {
+        await holder.query('rollback');
+        await holder.end();
+        await database.as('admin').query("delete from oauth.clients where name = 'Filler'");
+      }
+    });
+
+    it('counts the server only once it holds the registrations’ lock, holding the network’s while it waits', async () => {
+      const busy = fresh();
+      // A busy network's 50, among 1,999 today: the server's last place still free.
+      await filled('c', busy, BUSY_NETWORK_REGISTRATIONS);
+      await filled('d', fresh(), MOST_REGISTRATIONS_A_DAY - 1 - BUSY_NETWORK_REGISTRATIONS);
+      const holder = await database.connect('admin');
+      await holder.query('begin');
+      try {
+        await holdNamedLock(holder, lockName('oauth_clients'));
+        const registering = registerClient(app, keys, registration(), lockDay, busy);
+        await waitUntilQueued(database.as('admin'), 1);
+        // Waiting on the server's lock, it holds its network's: taken first, never the other way round.
+        expect(await free(lockName('oauth_client_network', busy))).toBe(false);
+        // The server's last place taken meanwhile: it must count it.
+        await filled('e', fresh(), 1, holder);
+        await holder.query('commit');
+        expect(await registering).toEqual({ outcome: 'capped', cap: 'server' });
+        expect(await free(lockName('oauth_client_network', busy))).toBe(true);
+      } finally {
+        await holder.query('rollback');
+        await holder.end();
+        await database.as('admin').query("delete from oauth.clients where name = 'Filler'");
+      }
+    });
   });
 
   it(`6F1 G4: refuses a network past ${String(MOST_REGISTRATIONS_A_NETWORK_A_DAY)} in 24 hours; another network not`, async () => {
@@ -506,7 +640,7 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     ).rejects.toMatchObject({ code: '23514', constraint: 'a_device_flow_is_a_device' });
   });
 
-  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} flows are open, refuses only a busy network, of either kind; a quiet one still opens: no lockout`, async () => {
+  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} flows are open, refuses only a busy source or network, of either kind; one holding a few still opens: no lockout (R2-1)`, async () => {
     const admin = database.as('admin');
     const later = new Date('2027-01-01T09:00:00Z');
     // The server's cap filled by a crowd of 400 networks, 50 open flows each: every one under its own share of 100.
@@ -539,12 +673,33 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
           { source: fresh(), network },
         );
       expect(await codeFlow('tr7-net-2')).toBe('full');
-      // while a network holding fewer than its few open still opens them, of either kind, and only then is refused.
-      const quiet = fresh();
-      expect((await device(later, undefined, fresh(), quiet)).opened).toBe('opened');
-      for (let open = 1; open < QUIET_NETWORK_FLOWS; open += 1) expect(await codeFlow(quiet)).toBe('opened');
-      expect(await codeFlow(quiet)).toBe('full');
-      expect((await device(later, undefined, fresh(), quiet)).opened).toBe('full');
+      // while an address holding 3 open (an office's one IPv4 address, its own network) opens its 4th: it was refused
+      // here when its network held 3 or more (R2-1). It opens up to the busy share, of either kind, and only then is
+      // refused.
+      const office = fresh();
+      const fromOffice = () =>
+        openCodeFlow(
+          app,
+          keys,
+          {
+            id: flowId(),
+            clientId: 'axcl_0123456789abcdef0123456789abcdef',
+            redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+            state: null,
+            codeChallenge: challengeOf('v'.repeat(43)),
+            scopesAsked: ['requests:read'],
+            resource: 'https://app.agentx.example/v1/mcp',
+            browserHash: hashOf(fresh()),
+            createdAt: later,
+          },
+          { source: office, network: office },
+        );
+      expect((await device(later, undefined, office, office)).opened).toBe('opened');
+      for (let open = 1; open < 3; open += 1) expect(await fromOffice()).toBe('opened');
+      expect(await fromOffice()).toBe('opened');
+      for (let open = 4; open < BUSY_SOURCE_FLOWS; open += 1) expect(await fromOffice()).toBe('opened');
+      expect(await fromOffice()).toBe('full');
+      expect((await device(later, undefined, office, office)).opened).toBe('full');
       // Another fresh network opens all the same.
       expect(await codeFlow(fresh())).toBe('opened');
     } finally {

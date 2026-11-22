@@ -138,6 +138,7 @@ describe('a notice’s email (B5-1b)', () => {
     expect(messageFor(signIn(person, 'sign_in_restored'), 'p@example.test').text).toContain('can sign in again');
     expect(messageFor(signIn(person, 'password_changed'), 'p@example.test').subject).toContain('password');
     expect(messageFor(signIn(person, 'sign_in_email_changed'), 'p@example.test').subject).toContain('email address');
+    expect(messageFor(signIn(person, 'sign_in_phone_changed'), 'p@example.test').subject).toContain('phone number');
     // The S68 audit: a factor added, told as a removal is.
     expect(messageFor(signIn(person, 'second_factor_added'), 'p@example.test').subject).toBe(
       "Agent X: a second factor was added to a person's login",

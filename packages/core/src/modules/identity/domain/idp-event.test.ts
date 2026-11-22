@@ -5,6 +5,7 @@ import {
   classOfIdpEvent,
   endsSessions,
   isOurRoutineChange,
+  isToldOnlyToThePerson,
   isToldToThePerson,
   MOST_WATCHED_TYPES,
   PASSKEY_ADDED_EVENTS,
@@ -27,8 +28,9 @@ describe('the login service’s events we copy (B6-2b)', () => {
     ['user.human.mfa.u2f.token.verified', 'second_factor_added'],
     ['user.human.passwordless.token.verified', 'second_factor_added'],
     ['user.human.password.changed', 'password_changed'],
-    ['user.human.password.code.added', 'password_changed'],
+    ['user.human.password.code.added', 'password_reset_asked'],
     ['user.human.email.changed', 'sign_in_email_changed'],
+    ['user.human.phone.changed', 'sign_in_phone_changed'],
     ['user.locked', 'sign_in_blocked'],
     ['user.removed', 'sign_in_blocked'],
     ['user.reactivated', 'sign_in_restored'],
@@ -62,6 +64,7 @@ describe('the login service’s events we copy (B6-2b)', () => {
       'second_factor_removed',
       'sign_in_blocked',
       'sign_in_email_changed',
+      'sign_in_phone_changed',
     ]);
   });
 
@@ -77,8 +80,20 @@ describe('the login service’s events we copy (B6-2b)', () => {
       'second_factor_removed',
       'sign_in_blocked',
       'sign_in_email_changed',
+      'sign_in_phone_changed',
       'sign_in_restored',
     ]);
+  });
+
+  it('SEC-OPS-02 S210 R2-2: a password reset asked for ends no session and is told to the person alone; a password changed ends them', () => {
+    expect(classOfIdpEvent('user.human.password.code.added')).toBe('password_reset_asked');
+    expect(endsSessions('password_reset_asked')).toBe(false);
+    expect(isToldToThePerson('password_reset_asked')).toBe(false);
+    expect(isToldOnlyToThePerson('password_reset_asked')).toBe(true);
+    expect([...new Set(Object.values(WATCHED_IDP_EVENTS))].filter(isToldOnlyToThePerson)).toEqual([
+      'password_reset_asked',
+    ]);
+    expect(endsSessions('password_changed')).toBe(true);
   });
 });
 

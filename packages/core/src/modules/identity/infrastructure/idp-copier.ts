@@ -75,6 +75,13 @@
 //   within one run, leaves the new key alone when the addition is judged, so
 //   the removal is what shows the swap.
 //
+// A password reset asked for (S210 R2-2) changes no credential and anyone who
+// knows a login's name can ask for one, so it ends no session and is told to
+// the person alone, never the admins, at most once an hour (`told: 'yes'` on
+// the platform chain's record of the copy that told them). A flood of them is
+// copied once a person a page, the page's latest, the others counted on it
+// (`alsoAsked`), so it can't hold the copies of real changes back.
+//
 // Impersonation (which the stack never turns on) is logged as an error;
 // rights given in the login service, and tokens issued, as warnings. Each of
 // these, and a tied page, is told at once by an alert of its own
@@ -91,7 +98,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely, Transaction } from 'kysely';
 
-import { type Clock, DAY_MS, type IdGenerator } from '../../../shared-kernel/index.ts';
+import { type Clock, DAY_MS, HOUR_MS, type IdGenerator } from '../../../shared-kernel/index.ts';
 import { type AuditTables, createAuditTrail, nowChainsOf, waitWitnessed } from '../../audit/index.ts';
 import { type DirectoryTables, organizationsOf } from '../../directory/index.ts';
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
@@ -106,12 +113,13 @@ import {
   endsSessions,
   isOurRoutineChange,
   type OurLoginChanges,
+  isToldOnlyToThePerson,
   isToldToThePerson,
   PASSKEY_ADDED_EVENTS,
   SECOND_FACTOR_REMOVED_EVENTS,
 } from '../domain/idp-event.ts';
 import { restrictedUntil } from '../domain/removal-restriction.ts';
-import { toldOfReset } from './grant-notices.ts';
+import { toldOfReset, toldThePersonAlone } from './grant-notices.ts';
 import type { SecondFactorsHeld } from './idp-factors.ts';
 import type { IdpEvent, IdpEventFeed } from './idp-feed.ts';
 import { endSessionsOf, lockSessionsOf, sessionsEndedEvent } from './sessions.ts';
@@ -158,6 +166,32 @@ export interface IdpEventCopier {
 
 /** An event's name: its aggregate and its place among the aggregate's events. */
 const keyOf = (event: IdpEvent): string => `${event.aggregateType}:${event.aggregateId}:${event.sequence}`;
+
+/** An event read, and how many more of its kind about its login the page held before it, left uncopied (R2-2). */
+interface Kept {
+  readonly event: IdpEvent;
+  readonly alsoAsked: number;
+}
+
+/**
+ * The page's events to copy (S210 R2-2): every one, but of the events told to the person alone only the latest of each
+ * type about each login, counting the others on it. The latest, so the page's last event is always copied and where the
+ * copy got to moves on past the flood.
+ */
+function coalesced(page: readonly IdpEvent[]): Kept[] {
+  const kindOf = (event: IdpEvent) => `${event.aggregateType}:${event.aggregateId}:${event.type}`;
+  const latest = new Map<string, number>();
+  const seen = new Map<string, number>();
+  page.forEach((event, index) => {
+    if (!isToldOnlyToThePerson(event.eventClass)) return;
+    latest.set(kindOf(event), index);
+    seen.set(kindOf(event), (seen.get(kindOf(event)) ?? 0) + 1);
+  });
+  return page.flatMap((event, index): Kept[] => {
+    if (!isToldOnlyToThePerson(event.eventClass)) return [{ event, alsoAsked: 0 }];
+    return latest.get(kindOf(event)) === index ? [{ event, alsoAsked: (seen.get(kindOf(event)) ?? 1) - 1 }] : [];
+  });
+}
 
 /** Who made the change: the person themselves, someone else, or the login service itself. */
 const byWhom = (event: IdpEvent): 'self' | 'other' | 'system' =>
@@ -234,6 +268,17 @@ export function createIdpEventCopier({
   };
 
   /**
+   * Whether the person is told of this event, one told to them alone (R2-2): unless a copy told them within the hour
+   * before it, so a flood of resets asked for reaches their inbox once an hour at most.
+   */
+  const tellsAlone = async (event: IdpEvent, person: string): Promise<boolean> => {
+    const at = await latestPlatformTimeOf(database, 'at', [
+      { action: IDP_EVENT_COPIED, facts: { person, told: 'yes' }, oneOf: { type: [event.type] } },
+    ]);
+    return at === undefined || at.getTime() + HOUR_MS <= event.createdAt.getTime();
+  };
+
+  /**
    * Ends every session of the person, locking them and then their challenges
    * first (level 0b, in order of ID, as a demotion does), so the challenges
    * the sessions' end deletes are never locked out of order; how many ended.
@@ -250,13 +295,24 @@ export function createIdpEventCopier({
    * it: copied for this organisation already, nothing; copied for none yet,
    * this is the first copy, which ends the person's sessions when the change
    * does, unless this run ended them already (`endedThisRun`). `counts` is
-   * decided once, before the first copy.
+   * decided once, before the first copy; so is `tells`, which only the first
+   * organisation's copy of an event told to the person alone carries (R2-2).
    */
   const copyOnce = async (
     event: IdpEvent,
     person: string | undefined,
     orgId: string | null,
-    { counts, endedThisRun }: { readonly counts: boolean; readonly endedThisRun: Set<string> },
+    {
+      counts,
+      tells,
+      alsoAsked,
+      endedThisRun,
+    }: {
+      readonly counts: boolean;
+      readonly tells: boolean;
+      readonly alsoAsked: number;
+      readonly endedThisRun: Set<string>;
+    },
   ): Promise<boolean> => {
     const key = keyOf(event);
     const org = orgId ?? 'none';
@@ -271,6 +327,8 @@ export function createIdpEventCopier({
       person: person ?? null,
       ...(event.aggregateType === 'user' && { subject: event.aggregateId }),
       ...(counts && { counts: 'yes' }),
+      ...(tells && { told: 'yes' }),
+      ...(alsoAsked > 0 && { alsoAsked }),
     };
     const platformEvent = (signInsEnded: number | undefined) => ({
       actor: ACTOR,
@@ -321,6 +379,9 @@ export function createIdpEventCopier({
           });
           if (isToldToThePerson(event.eventClass)) {
             await outbox.add(tx, toldOfReset(orgId, event.eventClass, person, false));
+          } else if (tells) {
+            // The notice of a password changed, whose words name a reset asked for too: to the person alone.
+            await outbox.add(tx, toldThePersonAlone(orgId, 'password_changed', person));
           }
           await recordOnPlatform(tx, end);
           return true;
@@ -333,7 +394,7 @@ export function createIdpEventCopier({
   };
 
   /** Copies one event to every organisation its person belongs to; how many records it wrote. */
-  const copy = async (event: IdpEvent, endedThisRun: Set<string>): Promise<number> => {
+  const copy = async ({ event, alsoAsked }: Kept, endedThisRun: Set<string>): Promise<number> => {
     const person =
       event.aggregateType === 'user'
         ? await userOfSubject(database, { issuer, subject: event.aggregateId }, { keys, logger })
@@ -342,9 +403,15 @@ export function createIdpEventCopier({
     // Decided once, on the event's first copy: a run that stopped part-way decides nothing again.
     const copiedBefore = await platformEventWith(database, IDP_EVENT_COPIED, { event: keyOf(event) });
     const counts = !copiedBefore && person !== undefined ? await counted(event, person) : false;
+    let tells =
+      !copiedBefore && person !== undefined && orgs.length > 0 && isToldOnlyToThePerson(event.eventClass)
+        ? await tellsAlone(event, person)
+        : false;
     let written = 0;
     for (const orgId of orgs.length === 0 ? [null] : orgs) {
-      if (await copyOnce(event, person, orgId, { counts, endedThisRun })) written += 1;
+      if (await copyOnce(event, person, orgId, { counts, tells, alsoAsked, endedThisRun })) written += 1;
+      // Told once, by the first organisation's copy: the person is one person whatever organisations they are in.
+      tells = false;
     }
     if (written > 0) told(event, orgs.length);
     return written;
@@ -372,9 +439,12 @@ export function createIdpEventCopier({
   };
 
   /** Reads and copies pages until none is left, MOST_PAGES are read, or the signal is aborted. */
-  const copyAll = async (signal: AbortSignal | undefined): Promise<{ events: number; written: number }> => {
+  const copyAll = async (
+    signal: AbortSignal | undefined,
+  ): Promise<{ events: number; written: number; alsoAsked: number }> => {
     let events = 0;
     let written = 0;
+    let alsoAsked = 0;
     const until = new Date(clock.now().getTime() - SETTLE_MS);
     // Each person's sessions ended once a run, at their first event that ends them (R-15, S206): every event the run
     // copies was made before `until`, so before that end, which covers them all; and one person's changes in a burst
@@ -388,10 +458,11 @@ export function createIdpEventCopier({
     for (let page = 0; page < MOST_PAGES; page += 1) {
       if (since.getTime() >= until.getTime()) break;
       const found = await feed.eventsBetween(since, until, PAGE);
-      for (const event of found) {
-        if (signal?.aborted === true) return { events, written };
-        written += await copy(event, endedThisRun);
-        events += 1;
+      for (const kept of coalesced(found)) {
+        if (signal?.aborted === true) return { events, written, alsoAsked };
+        written += await copy(kept, endedThisRun);
+        events += 1 + kept.alsoAsked;
+        alsoAsked += kept.alsoAsked;
       }
       // A page not full is the last.
       const last = found.at(-1);
@@ -405,14 +476,14 @@ export function createIdpEventCopier({
         since = next;
       }
     }
-    return { events, written };
+    return { events, written, alsoAsked };
   };
 
   return {
     async run(signal) {
       try {
-        const { events, written } = await copyAll(signal);
-        if (written > 0) logger.info('idp_events.copied', { events, records: written });
+        const { events, written, alsoAsked } = await copyAll(signal);
+        if (written > 0) logger.info('idp_events.copied', { events, records: written, alsoAsked });
         return 'ran';
       } catch (error) {
         logger.warn('idp_events.run_failed', { err: error });
