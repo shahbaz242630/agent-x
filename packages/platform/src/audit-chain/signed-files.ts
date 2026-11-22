@@ -188,10 +188,41 @@ export async function* bodyLines(bytes: Buffer): AsyncGenerator {
   }
 }
 
+/** A stretch of a folder listed by one name start: its countdown's first digits, and below what was listed before. */
+interface Block {
+  readonly prefix: string;
+  readonly listedBelow: number;
+}
+
+/**
+ * The name starts that list the countdowns from `newest` up to `oldest` (TR-7 D1), the newest first: a list by a name's
+ * start alone (Azure's List Blobs can't begin from a given name), so each start is a whole power-of-ten stretch of
+ * countdowns. Each the widest whose stretch begins no more than `slackMs` before `newest`: names dated past it (a flood
+ * dated in 2200) are never listed at all, and a day's look back stays a score of calls, not one a hundred seconds.
+ */
+function* blocksOf(newest: number, oldest: number, slackMs: number): Generator<Block> {
+  let at = newest;
+  let listedBelow = 0;
+  while (at <= oldest) {
+    let digits = 0;
+    while (digits < 12 && Math.floor(at / 10 ** (digits + 1)) * 10 ** (digits + 1) >= newest - slackMs) digits += 1;
+    const start = Math.floor(at / 10 ** digits) * 10 ** digits;
+    yield {
+      prefix: String(start)
+        .padStart(13, '0')
+        .slice(0, 13 - digits),
+      listedBelow,
+    };
+    listedBelow = start + 10 ** digits;
+    at = listedBelow;
+  }
+}
+
 /**
  * Every well-named file in `folder`, newest first, with when it landed by the store's clock where the store says
  * (`created`), `most` names a list call. A name dated past `mostAt` is said (`future`) and passed over: no honest clock
- * names one so far ahead.
+ * names one so far ahead. With a `window` (TR-7 D1), only names dated from `since` (none: every one) to at most
+ * `slackMs` past `mostAt` are listed, so names a copy dated far ahead cost no list call, however many.
  */
 export async function* namesIn(
   from: WriteOnceStore,
@@ -199,20 +230,28 @@ export async function* namesIn(
   mostAt: () => number,
   future: (at: number) => void,
   most = NAMES_A_PAGE,
+  window?: { readonly since?: number | undefined; readonly slackMs: number },
 ): AsyncGenerator<{ readonly name: string; readonly at: number; readonly created: number | undefined }> {
-  let after: string | undefined;
-  do {
-    const page = await from.list(folder, most, after);
-    for (const name of page.names) {
-      const rest = name.slice(folder.length);
-      if (!FILE.test(rest)) continue;
-      const at = timeOfName(rest.slice(0, 13));
-      if (at > mostAt()) {
-        future(at);
-        continue;
+  const blocks: Iterable<Block> =
+    window === undefined
+      ? [{ prefix: '', listedBelow: 0 }]
+      : blocksOf(LAST_MS - mostAt(), LAST_MS - (window.since ?? 0), window.slackMs);
+  for (const { prefix, listedBelow } of blocks) {
+    let after: string | undefined;
+    do {
+      const page = await from.list(folder + prefix, most, after);
+      for (const name of page.names) {
+        const rest = name.slice(folder.length);
+        // Listed by an earlier start already (a wider one starts below where the last ended): passed over unsaid.
+        if (!FILE.test(rest) || Number(rest.slice(0, 13)) < listedBelow) continue;
+        const at = timeOfName(rest.slice(0, 13));
+        if (at > mostAt()) {
+          future(at);
+          continue;
+        }
+        yield { name, at, created: page.created?.get(name) };
       }
-      yield { name, at, created: page.created?.get(name) };
-    }
-    after = page.next;
-  } while (after !== undefined);
+      after = page.next;
+    } while (after !== undefined);
+  }
 }

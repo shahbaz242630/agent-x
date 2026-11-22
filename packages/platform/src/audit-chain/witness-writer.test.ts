@@ -395,6 +395,55 @@ describe('TR-14 the set-aside folder read', () => {
   });
 });
 
+/** A set-aside of `writer` signed with the operator's key, named at `at` (as the operator's command writes it). */
+async function setAsideFile(store: Store, writer: string, at: number): Promise<string> {
+  const name = fileName('e1/set-aside/', at);
+  store.files.set(
+    name,
+    await signedFile(keys, { label: 'audit-witness-set-aside', purpose: 'operator-signing' }, name, 1, [
+      JSON.stringify({ w: writer, reason: REASON }),
+    ]),
+  );
+  return name;
+}
+
+describe('TR-7 D1 lists bounded to the time window', () => {
+  it('a hundred thousand names dated in 2200 and as many back-dated set-asides cost a start and a refresh a few calls, one line', async () => {
+    const store = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const forger = copyOn(store, { time });
+    await forger.log.now(CHAIN, head(9n, 9));
+    const honest = copyOn(store, { time });
+    await honest.log.now(OTHER, head(3n, 1));
+    time.at += MINUTE;
+    await setAsideFile(store, forger.log.writer(), time.at);
+    for (let one = 0; one < 100_000; one += 1) {
+      store.files.set(fileName('e1/heads/', Date.UTC(2200, 0, 1) + one), Buffer.from('junk'));
+      store.files.set(fileName('e1/set-aside/', AT.getTime() - 48 * 60 * MINUTE - one * 20_000), Buffer.from('junk'));
+    }
+    // A few dated just past the clocks' spread: listed, and said once, with their count.
+    for (const ahead of [20, 21, 22])
+      store.files.set(fileName('e1/heads/', time.at + ahead * MINUTE), Buffer.from('junk'));
+    const reader = copyOn(store, { time });
+    const before = { ...store.calls };
+    expect(await reader.log.refreshWhole()).toBe(true);
+    expect(store.calls.lists - before.lists).toBeLessThanOrEqual(10);
+    // The set-aside and the honest file alone: the forger's passed over by name, no junk fetched.
+    expect(store.calls.smallGets - before.smallGets).toBe(2);
+    expect(seqs(reader.log.pending(OTHER))).toEqual([3n]);
+    expect(reader.log.pending(CHAIN)).toEqual([]);
+    expect(reader.alarms('set_aside')).toHaveLength(1);
+    expect(reader.alarms('future')).toEqual([
+      expect.objectContaining({ folders: [expect.objectContaining({ folder: 'e1/heads/', files: 3 })] }),
+    ]);
+    time.at += 10_000;
+    const later = store.calls.lists;
+    expect(await reader.log.refreshWhole()).toBe(true);
+    expect(store.calls.lists - later).toBeLessThanOrEqual(6);
+    expect(reader.alarms('future').length).toBeLessThanOrEqual(2);
+  });
+});
+
 describe('TR-14 review: a writer set aside twice, snapshots this release, a copy set aside rewriting', () => {
   it("holds a writer's earliest set-aside: a second line for it never passes over more; the command writes no second", async () => {
     const store = createFakeWriteOnceStore();

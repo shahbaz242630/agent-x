@@ -16,7 +16,10 @@
 // A file is taken only under the key its folder allows: a web copy holds the anchors' key, so a snapshot it could sign
 // would let it leave out a real head; snapshots are read from their own container alone, which no web copy can add to,
 // and a heads file can say only what was written, never what wasn't. A spoiled file is the alarm, and counts nothing.
-// A name dated past the clock is the alarm and passed over. A line dated past its own file's name (past the clocks'
+// A name dated past the clock is passed over, and the alarm once a pass with a count (TR-7 D1: a copy broken into can
+// name a million files in 2200; each a line would spend the logs' cap). Every list is bounded to the time it reads, by
+// name starts (signed-files.ts: namesIn), so names dated more than an hour past the clock (or as far as the read looks
+// back) are never even listed. A line dated past its own file's name (past the clocks'
 // spread) spoils the file, as no honest copy writes one: each names its file after its lines were noted. So a head is
 // never dated past a few minutes from when its file landed, and a rebase after that sets it aside (TR-3: a web copy's
 // key could otherwise date heads in 2099, which no rebase would ever set aside).
@@ -91,7 +94,8 @@
 // (`operator-signing`, which no copy of the API holds, and the store, which the database's owner can't reach), each
 // line `{w, reason}` a writer and the incident, also recorded on the platform chain; a writer's earliest set-aside
 // holds, and the command run again writes no second line. Every copy reads what landed since
-// its last pass first in every refresh (at most a hundred files a pass: a flood is said, `set_aside_flood`), then
+// its last pass first in every refresh (at most a hundred files a pass: a flood is said, `set_aside_flood`; a start back
+// as far as it reads heads files, and further only as its snapshots go: TR-7 D1, never the whole folder), then
 // passes over each heads file and snapshot that writer named at or before the set-aside's own name, each the alarm
 // (`set_aside`, by name; a start's snapshots said once, counted apart from the spoiled, and with no other snapshot it
 // reads heads files back from the oldest of them). Fail-closed: a file the writer names after is read and held as any
@@ -294,8 +298,17 @@ const RIGHT_ENOUGH_MS = 60_000;
 /** The most names a list call asks of the heads' folders: Azure's most, one call where a hundred names took one each. */
 const LIST_PAGE = 5000;
 
+/**
+ * How far past the clocks' spread a list reaches (TR-7 D1): names dated further ahead are never listed, so a copy that
+ * names a million files in 2200 costs no read a call; those within it are said, once a pass.
+ */
+const LIST_SLACK_MS = 60 * 60_000;
+
 /** How far back a start with no sound snapshot reads heads files: a day, far past any anchor's turn. */
 const NO_SNAPSHOT_READ_BACK_MS = 24 * 60 * 60_000;
+
+/** How far back a start reads set-aside files (TR-7 D1): every heads file it reads with no snapshot, and the lag. */
+const START_SET_ASIDE_BACK_MS = NO_SNAPSHOT_READ_BACK_MS + LAG_MS;
 
 /** How many spoiled snapshots a start goes back past: a day's at one an hour. */
 const MOST_SPOILED_SNAPSHOTS = 24;
@@ -705,6 +718,8 @@ export function createWitnessLog({
   const setAside = new Map<string, number>();
   const setAsideRead = new Set<string>();
   let setAsideFrom: number | undefined;
+  // How far back a set-aside read looks while no pass has fetched every new one (TR-7 D1): none, a start's reach.
+  let setAsideFloor: number | undefined;
   let floodSaidAt: number | undefined;
 
   // This copy's clock as the store's (TR-12): how far the store's Date was from the local clock on its latest answer,
@@ -1269,17 +1284,38 @@ export function createWitnessLog({
     else releasedRead.set(line.chain, [...(releasedRead.get(line.chain) ?? []), line.released]);
   };
 
-  /** Every well-named file of a folder, newest first; a name dated past the clock the alarm, passed over. */
-  const namesOf = (from: WriteOnceStore, at: string) =>
+  // Names dated past the clock this pass, by folder: the alarm once a pass (sayFuture), never once a name (TR-7 D1).
+  const future = new Map<string, { files: number; newest: number }>();
+
+  /**
+   * Every well-named file of a folder dated from `since` (none: back to the first), newest first; a name dated past the
+   * clock counted for the pass's alarm and passed over, and none dated further past it than LIST_SLACK_MS, or than the
+   * look back is long, even listed: a start's day back stays a few calls, a refresh's minutes reach an hour ahead.
+   */
+  const namesOf = (from: WriteOnceStore, at: string, since?: number) =>
     namesIn(
       from,
       at,
       () => now().getTime() + MOST_AHEAD_MS,
       (fileAt) => {
-        alarm('future', { folder: at, fileAt: new Date(fileAt).toISOString() });
+        const seen = future.get(at);
+        future.set(at, { files: (seen?.files ?? 0) + 1, newest: Math.max(seen?.newest ?? fileAt, fileAt) });
       },
       LIST_PAGE,
+      { since, slackMs: since === undefined ? LIST_SLACK_MS : Math.max(LIST_SLACK_MS, nowMs() - since) },
     );
+
+  /** The names dated past the clock since the last said: one alarm, each folder's count and newest. */
+  const sayFuture = (): void => {
+    if (future.size === 0) return;
+    const folders = [...future].map(([at, { files, newest }]) => ({
+      folder: at,
+      files,
+      newest: new Date(newest).toISOString(),
+    }));
+    future.clear();
+    alarm('future', { folders });
+  };
 
   /**
    * A file read whose name is further than the clocks' spread from when the store says it landed (TR-12): a copy naming
@@ -1342,12 +1378,12 @@ export function createWitnessLog({
    * they go), at most MOST_SET_ASIDE_READS a pass, so any copy flooding the folder slows no refresh (the rest wait for
    * the next pass; the flood said). This process's own among them: ownSetAside. Throws as a list or get does.
    */
-  const readSetAside = async (began: number): Promise<void> => {
+  const readSetAside = async (began: number, since: number | undefined): Promise<void> => {
     const at = folder('set-aside');
     let fetched = 0;
     let whole = true;
-    for await (const file of namesOf(timed, at)) {
-      if (setAsideFrom !== undefined && file.at < setAsideFrom - LAG_MS) break;
+    for await (const file of namesOf(timed, at, since)) {
+      if (since !== undefined && file.at < since) break;
       if (setAsideRead.has(file.name)) continue;
       if (fetched >= MOST_SET_ASIDE_READS) {
         whole = false;
@@ -1358,14 +1394,46 @@ export function createWitnessLog({
       setAsideRead.add(file.name);
     }
     if (whole) setAsideWhole(began);
-    else floodSaid(began, at);
+    else setAsideShort(began, at, since);
     if (setAside.has(writer)) ownSetAside();
   };
 
-  /** A set-aside pass that fetched every new file: the next one's look back moved on, older names forgotten. */
+  /**
+   * Where a pass's set-aside read looks back to (TR-7 D1): a look back before the last pass that fetched every new one;
+   * before any has, as far back as a start reads heads files (setAsideFloor, lowered as its snapshots go further), never
+   * the whole folder, which any copy holding the store's role can fill.
+   */
+  const setAsideSince = (began: number): number =>
+    setAsideFrom === undefined ? (setAsideFloor ?? began - START_SET_ASIDE_BACK_MS) : setAsideFrom - LAG_MS;
+
+  /**
+   * The set-asides read back to a file a start may take, dated `at` (TR-7 D1): where the reads so far didn't reach a
+   * look back before it, a day further back, so a writer set aside long ago is still known by its old snapshots.
+   */
+  const setAsideDownTo = async (at: number, began: number): Promise<void> => {
+    if (at - LAG_MS >= setAsideSince(began)) return;
+    const lower = at - LAG_MS - NO_SNAPSHOT_READ_BACK_MS;
+    setAsideFloor = lower;
+    await readSetAside(began, lower);
+  };
+
+  /**
+   * A set-aside pass that fetched every new file: the next one's look back moved on, older names forgotten once read
+   * (a start's reads back keep theirs, as the next may reach further).
+   */
   const setAsideWhole = (began: number): void => {
     setAsideFrom = began;
+    if (state === 'unread') return;
     for (const name of setAsideRead) if (timeOfFile(name) < began - 2 * LAG_MS) setAsideRead.delete(name);
+  };
+
+  /** A set-aside pass stopped short: the next looks back as far as this one did, and the flood is said. */
+  const setAsideShort = (began: number, at: string, since: number | undefined): void => {
+    if (since !== undefined) {
+      setAsideFrom = undefined;
+      setAsideFloor = since;
+    }
+    floodSaid(began, at);
   };
 
   /** A set-aside pass stopped short by a flood: said, at most once a SAY_EVERY_MS. */
@@ -1408,12 +1476,14 @@ export function createWitnessLog({
    */
   const readSnapshot = async (
     gained: Set<string>,
+    began: number,
   ): Promise<{ readonly at?: number | undefined; readonly asideFrom?: number | undefined }> => {
     if (snapshots === undefined) return {};
     let spoiled = 0;
     const aside = { count: 0, from: undefined as number | undefined, writers: new Set<string>() };
     let found: number | undefined;
     for await (const file of namesOf(snapshots, folder('snapshots'))) {
+      await setAsideDownTo(file.at, began);
       const kind = asideOf(file);
       if (kind === 'aside') {
         aside.count += 1;
@@ -1477,7 +1547,7 @@ export function createWitnessLog({
       [folder('heads'), HEADS_FILE],
       [folder('operator'), OPERATOR_FILE],
     ] as const) {
-      for await (const file of namesOf(timed, at)) {
+      for await (const file of namesOf(timed, at, since)) {
         if (file.at < since) break;
         if (namesRead.has(file.name)) continue;
         await readHeadsFile(at, kind, file, gained);
@@ -1497,7 +1567,7 @@ export function createWitnessLog({
       await askClock();
       const began = now();
       // The writers set aside first, so no file of theirs is read in this pass.
-      await readSetAside(began.getTime());
+      await readSetAside(began.getTime(), setAsideSince(began.getTime()));
       let newest: number | undefined;
       if (state === 'read') {
         // From the older of the newest file the last whole pass read and when it began, so nothing it didn't reach is
@@ -1505,7 +1575,7 @@ export function createWitnessLog({
         const from = Math.min(headsFrom ?? began.getTime(), wholeFrom ?? began.getTime());
         newest = await readHeads(from - LAG_MS, gained);
       } else {
-        const snapshot = await readSnapshot(gained);
+        const snapshot = await readSnapshot(gained, began.getTime());
         if (snapshot.at !== undefined) lastSnapshotAt = snapshot.at;
         const dayBack = Math.min(began.getTime() - NO_SNAPSHOT_READ_BACK_MS, (snapshot.asideFrom ?? Infinity) - LAG_MS);
         newest = await readHeads(snapshot.at === undefined ? dayBack : snapshot.at - LAG_MS, gained);
@@ -1523,6 +1593,8 @@ export function createWitnessLog({
     } catch (error) {
       failed('read', error);
       return { chains: [], whole: false };
+    } finally {
+      sayFuture();
     }
   };
 
@@ -1730,7 +1802,12 @@ export function createWitnessLog({
       if (!EVIDENCE_REFERENCE.test(reason)) throw new RangeError("a set-aside's reason is the incident's reference");
       // Named by the store's clock (askClock), as the copies judge which of the writer's files it covers.
       await askClock();
-      await readSetAside(now().getTime());
+      // The whole folder, however long ago a set-aside of the writer landed: a run again never writes a second.
+      try {
+        await readSetAside(now().getTime(), undefined);
+      } finally {
+        sayFuture();
+      }
       if (setAside.has(aside)) return 'before';
       const name = fileName(folder('set-aside'), now().getTime(), writer);
       const line = JSON.stringify({ w: aside, reason });
