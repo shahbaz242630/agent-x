@@ -84,8 +84,10 @@ export function registrationsSince(
  * whose statements are limited to 10 seconds. The network's day is counted first, under its own lock, so two at once
  * can't both take its last place; only a busy network (BUSY_NETWORK_REGISTRATIONS) then counts the server's day, under
  * the registrations' one lock (R2-3: a quiet network's registration never waits on anyone else's, nor counts them).
- * A quiet one registering meanwhile, under no server lock, may take the server a few past its cap: it is a backstop,
- * and the busy networks it holds are held all the same.
+ * So a network below the busy share ignores the server's cap altogether, however far past it the day is: the cap
+ * holds only the busy networks, and many quiet ones together can take the day well past it, each held to its own
+ * share alone. That is by design (no lockout of every organisation's next app); the API's alarm-only ceiling
+ * (oauth-ceilings.ts, S210 final) says so when the day passes five times the cap, refusing no one.
  */
 export async function registerClient(
   db: Kysely<OauthTables>,

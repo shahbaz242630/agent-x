@@ -6,7 +6,8 @@
 //
 // - The token goes only to the issuer's origin, through the same route as
 //   sign-in (`routedToIssuer`), and the outbound fetch's allowlist.
-// - Each event is read strictly: its type one we copy, its IDs Zitadel's
+// - Each event is read strictly: its type one the feed asked for (the resets
+//   asked for, or every other type we copy: S210 final), its IDs Zitadel's
 //   shape, its sequence digits, its time a time. Anything else throws, as
 //   does an answer larger than MOST_ANSWER_BYTES: the feed is then tried
 //   again later, never read in part. An event's payload, which may hold an
@@ -14,7 +15,7 @@
 // - A login service that can't be reached, refuses the token, or answers
 //   otherwise than 200 throws IdpFeedUnavailable, naming the step, never the
 //   answer.
-import { classOfIdpEvent, type IdpEventClass, WATCHED_IDP_EVENTS } from '../domain/idp-event.ts';
+import { classOfIdpEvent, FEED_TYPES, type IdpEventClass, type IdpFeedPart } from '../domain/idp-event.ts';
 import { field } from './zitadel-answer.ts';
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
@@ -66,8 +67,11 @@ export class IdpFeedUnavailable extends Error {
 }
 
 export interface IdpEventFeed {
-  /** The events we copy created from `since` to `until`, at most `most`, oldest first. Throws IdpFeedUnavailable. */
-  eventsBetween(since: Date, until: Date, most: number): Promise<readonly IdpEvent[]>;
+  /**
+   * The events of the feed `part` (FEED_TYPES) created from `since` to `until`, at most `most`, oldest first. Throws
+   * IdpFeedUnavailable.
+   */
+  eventsBetween(since: Date, until: Date, most: number, part: IdpFeedPart): Promise<readonly IdpEvent[]>;
 }
 
 const AGGREGATES: ReadonlySet<string> = new Set(['user', 'org', 'instance']);
@@ -124,11 +128,11 @@ function memberOf(eventClass: IdpEventClass, payload: unknown): Pick<IdpEvent, '
 export function createIdpEventFeed(login: ZitadelCallOptions): IdpEventFeed {
   const call = createZitadelCall(login, { timeoutMs: CALL_TIMEOUT_MS, mostAnswerBytes: MOST_ANSWER_BYTES });
   const unavailable = (how: string) => new IdpFeedUnavailable(how);
-  // At most MOST_WATCHED_TYPES: a frozen constant, held there by idp-event.test.ts.
-  const eventTypes = Object.keys(WATCHED_IDP_EVENTS);
 
   return {
-    async eventsBetween(since, until, most) {
+    async eventsBetween(since, until, most, part) {
+      // Each at most MOST_WATCHED_TYPES: frozen constants, held there by idp-event.test.ts.
+      const eventTypes = FEED_TYPES[part];
       if (!Number.isSafeInteger(most) || most < 1 || most > MOST_EVENTS_A_PAGE) {
         throw new RangeError(`a search takes 1 to ${String(MOST_EVENTS_A_PAGE)} events`);
       }
@@ -150,7 +154,9 @@ export function createIdpEventFeed(login: ZitadelCallOptions): IdpEventFeed {
       if (!Array.isArray(raw) || raw.length > most) throw new IdpFeedUnavailable('the answer holds no list of events');
       return raw.map((each) => {
         const event = eventOf(each);
-        if (event === undefined) throw new IdpFeedUnavailable('an event is not as the login service writes them');
+        if (event === undefined || !eventTypes.includes(event.type)) {
+          throw new IdpFeedUnavailable('an event is not as the login service writes them');
+        }
         return event;
       });
     },

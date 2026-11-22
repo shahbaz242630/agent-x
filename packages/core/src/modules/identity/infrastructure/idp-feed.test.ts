@@ -47,7 +47,7 @@ describe('the login service’s event feed (B6-2b)', () => {
   it('asks the event search for the types we copy, in the span, oldest first, with the token', async () => {
     const { asked, fetch } = zitadel(() => json({ events: [] }));
 
-    await feedWith(fetch).eventsBetween(SINCE, UNTIL, 50);
+    await feedWith(fetch).eventsBetween(SINCE, UNTIL, 50, 'changes');
 
     expect(asked).toHaveLength(1);
     const [call] = asked;
@@ -57,15 +57,33 @@ describe('the login service’s event feed (B6-2b)', () => {
     expect(JSON.parse(call?.init.body as string)).toEqual({
       asc: true,
       limit: 50,
-      event_types: Object.keys(WATCHED_IDP_EVENTS),
+      event_types: Object.keys(WATCHED_IDP_EVENTS).filter((type) => type !== 'user.human.password.code.added'),
       range: { since: SINCE.toISOString(), until: UNTIL.toISOString() },
     });
+  });
+
+  it('SEC-OPS-02 S210 final: asks for the resets asked for alone in a search of their own, and refuses any other type there', async () => {
+    const reset = { ...EVENT, type: { type: 'user.human.password.code.added' } };
+    let events: unknown[] = [reset];
+    const { asked, fetch } = zitadel(() => json({ events }));
+
+    expect(await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10, 'resets')).toEqual([
+      expect.objectContaining({ type: 'user.human.password.code.added', eventClass: 'password_reset_asked' }),
+    ]);
+    expect(JSON.parse(asked[0]?.init.body as string)).toMatchObject({
+      event_types: ['user.human.password.code.added'],
+    });
+    // Each search reads only the types it asked for: a change in the resets' answer, or a reset in the changes', fails.
+    events = [reset, EVENT];
+    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 10, 'resets')).rejects.toThrow(IdpFeedUnavailable);
+    events = [EVENT, reset];
+    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 10, 'changes')).rejects.toThrow(IdpFeedUnavailable);
   });
 
   it('goes through the internal origin, naming the issuer’s host, as sign-in does', async () => {
     const { asked, fetch } = zitadel(() => json({ events: [] }));
 
-    await feedWith(fetch, 'http://zitadel.internal:8080').eventsBetween(SINCE, UNTIL, 1);
+    await feedWith(fetch, 'http://zitadel.internal:8080').eventsBetween(SINCE, UNTIL, 1, 'changes');
 
     expect(asked[0]?.url).toBe('http://zitadel.internal:8080/admin/v1/events/_search');
     expect(new Headers(asked[0]?.init.headers).get('x-zitadel-instance-host')).toBe('auth.example.test');
@@ -86,7 +104,7 @@ describe('the login service’s event feed (B6-2b)', () => {
       }),
     );
 
-    const events = await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10);
+    const events = await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10, 'changes');
 
     expect(events).toEqual([
       {
@@ -129,7 +147,7 @@ describe('the login service’s event feed (B6-2b)', () => {
       }),
     );
 
-    const events = await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10);
+    const events = await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10, 'changes');
 
     expect(events.map((event) => event.member)).toEqual([
       { userId: '312000000000000050', roles: ['ORG_OWNER_VIEWER'] },
@@ -145,7 +163,7 @@ describe('the login service’s event feed (B6-2b)', () => {
   it('reads an answer with no events as none', async () => {
     const { fetch } = zitadel(() => json({}));
 
-    expect(await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10)).toEqual([]);
+    expect(await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10, 'changes')).toEqual([]);
   });
 
   it.each([
@@ -161,7 +179,7 @@ describe('the login service’s event feed (B6-2b)', () => {
   ])('refuses the whole page for an event with %s', async (_what, event) => {
     const { fetch } = zitadel(() => json({ events: [EVENT, event] }));
 
-    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 10)).rejects.toThrow(IdpFeedUnavailable);
+    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 10, 'changes')).rejects.toThrow(IdpFeedUnavailable);
   });
 
   it.each([
@@ -178,7 +196,7 @@ describe('the login service’s event feed (B6-2b)', () => {
   ])('fails as unavailable for %s, naming the step', async (_what, answer, step) => {
     const { fetch } = zitadel(answer);
 
-    const failed = feedWith(fetch).eventsBetween(SINCE, UNTIL, 1);
+    const failed = feedWith(fetch).eventsBetween(SINCE, UNTIL, 1, 'changes');
 
     await expect(failed).rejects.toThrow(IdpFeedUnavailable);
     await expect(failed).rejects.toThrow(step);
@@ -187,7 +205,7 @@ describe('the login service’s event feed (B6-2b)', () => {
   it.each([401, 403])('throws LoginTokenRefused for a refused token (%i), which the alert counts', async (status) => {
     const { fetch } = zitadel(() => json({ code: 7 }, status));
 
-    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 1)).rejects.toThrow(
+    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 1, 'changes')).rejects.toThrow(
       new LoginTokenRefused(`the login service refused the token: it answered ${String(status)}`),
     );
   });
@@ -195,8 +213,10 @@ describe('the login service’s event feed (B6-2b)', () => {
   it('refuses a page size out of bounds, an issuer that isn’t an origin, and a token that isn’t one', async () => {
     const { fetch } = zitadel(() => json({ events: [] }));
 
-    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 0)).rejects.toThrow(RangeError);
-    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, MOST_EVENTS_A_PAGE + 1)).rejects.toThrow(RangeError);
+    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 0, 'changes')).rejects.toThrow(RangeError);
+    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, MOST_EVENTS_A_PAGE + 1, 'changes')).rejects.toThrow(
+      RangeError,
+    );
     expect(() =>
       createIdpEventFeed({ issuer: `${ISSUER}/path`, internalOrigin: undefined, token: WORDS, fetch }),
     ).toThrow(RangeError);

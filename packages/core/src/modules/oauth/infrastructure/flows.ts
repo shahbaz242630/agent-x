@@ -86,6 +86,27 @@ export interface FlowSource {
 export type FlowOpened = 'opened' | 'full' | 'network_full' | 'source_full' | 'browser_full';
 
 /**
+ * How many flows of either kind are not ended at `now`, of one network or source or of every one, counted no further
+ * than `most` (each by its index: the ends, the network, the source), so no count reads past its cap however many are
+ * open. The server's alone is what the API's alarm-only ceiling counts too (S210 final).
+ */
+export async function openFlowsHeld(
+  db: Handle,
+  now: Date,
+  most: number,
+  of?: readonly ['network_key' | 'source_key', string],
+): Promise<number> {
+  const { flows } = await db
+    .selectFrom((inner) => {
+      const open = inner.selectFrom('oauth.flows').select('id').where('ends_at', '>', now);
+      return (of === undefined ? open : open.where(of[0], '=', of[1])).limit(most).as('open');
+    })
+    .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
+    .executeTakeFirstOrThrow();
+  return flows;
+}
+
+/**
  * Whether the flows of either kind not ended at `now` are at a cap: this network's (MOST_OPEN_FLOWS_A_NETWORK, the
  * network index), this source's own (MOST_OPEN_FLOWS_A_SOURCE, the source index), or, only where either is busy
  * (BUSY_NETWORK_FLOWS, BUSY_SOURCE_FLOWS; S210 TR-7, R2-1), every source's together (MOST_OPEN_FLOWS, the ends index),
@@ -96,16 +117,7 @@ async function flowsFull(
   { source, network }: FlowSource,
   now: Date,
 ): Promise<'full' | 'network_full' | 'source_full' | undefined> {
-  const held = async (most: number, of?: readonly ['network_key' | 'source_key', string]): Promise<number> => {
-    const { flows } = await tx
-      .selectFrom((inner) => {
-        const open = inner.selectFrom('oauth.flows').select('id').where('ends_at', '>', now);
-        return (of === undefined ? open : open.where(of[0], '=', of[1])).limit(most).as('open');
-      })
-      .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
-      .executeTakeFirstOrThrow();
-    return flows;
-  };
+  const held = (most: number, of?: readonly ['network_key' | 'source_key', string]) => openFlowsHeld(tx, now, most, of);
   const fromNetwork = await held(MOST_OPEN_FLOWS_A_NETWORK, ['network_key', network]);
   const fromSource = await held(MOST_OPEN_FLOWS_A_SOURCE, ['source_key', source]);
   const busy = fromNetwork >= BUSY_NETWORK_FLOWS || fromSource >= BUSY_SOURCE_FLOWS;

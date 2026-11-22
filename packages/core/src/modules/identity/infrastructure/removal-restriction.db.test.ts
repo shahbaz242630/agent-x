@@ -17,7 +17,7 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import { createPlatformChain, type PlatformControlsTables } from '../../platform-controls/index.ts';
-import { classOfIdpEvent } from '../domain/idp-event.ts';
+import { classOfIdpEvent, FEED_TYPES } from '../domain/idp-event.ts';
 import { createIdpEventCopier } from './idp-copier.ts';
 import type { IdpEvent } from './idp-feed.ts';
 import { addMembership } from './memberships.ts';
@@ -105,9 +105,10 @@ async function copied(...events: IdpEvent[]): Promise<void> {
   const copier = createIdpEventCopier({
     database: app,
     feed: {
-      eventsBetween: (since, until, most) =>
+      eventsBetween: (since, until, most, part) =>
         Promise.resolve(
           events
+            .filter((each) => FEED_TYPES[part].includes(each.type))
             .filter((each) => each.createdAt > since && each.createdAt < until)
             .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
             .slice(0, most),

@@ -547,6 +547,12 @@ export const PLAIN_WORDS = {
     broke: 'Nothing for now: the brake that keeps payments moving under a flood of sign-ins was off for 30 seconds.',
     next: 'Nothing if rare. If it repeats, the database is struggling: check its health.',
   },
+  'auth.platform_growth_anchor_stale': {
+    happened:
+      "The shared audit chain grew past the sign-in brake's limit, but its last anchor is old, so the brake stayed off.",
+    broke: 'Sign-ins and step-ups go on; some payments may wait until the anchor check runs again.',
+    next: "The anchor check has stalled and alerts on its own: follow that alert's runbook to get it running.",
+  },
   'auth.person_sessions_spent': {
     happened: 'One person signed in more than a hundred times in a day, so this sign-in was refused.',
     broke: 'Only that person waits; sessions they hold go on, and everyone else signs in as usual.',
@@ -656,6 +662,21 @@ export const PLAIN_WORDS = {
       "Today's MCP app registrations passed Agent X's total, so a network that had registered a few was refused.",
     broke: "Only busy networks wait; a network's first few apps still register, and registered apps still connect.",
     next: 'Look for many networks registering over and over: a spread-out attack.',
+  },
+  'oauth.registrations_past_ceiling': {
+    happened: "Today's MCP app registrations passed five times Agent X's daily total, from many quiet networks.",
+    broke: 'Nobody was refused: quiet networks still register. The table grows far faster than any real day.',
+    next: 'Look for many networks each registering a few apps: a spread-out attack. Block them at the front door.',
+  },
+  'oauth.flows_past_ceiling': {
+    happened: 'Open OAuth sign-ins passed five times their total, from many quiet networks.',
+    broke: 'Nobody was refused: quiet networks still connect. The table grows far faster than any real use.',
+    next: 'Look for many addresses each opening a few sign-ins: a spread-out attack. Block them at the front door.',
+  },
+  'oauth.ceiling_unread': {
+    happened: 'The check that counts MCP app registrations or open OAuth sign-ins against their alarm could not read.',
+    broke: 'Nothing was refused; only that alarm was not checked this minute.',
+    next: 'Nothing if rare: it counts again within a minute. If it repeats, check the database is healthy.',
   },
   'oauth.flows_capped': {
     happened:
@@ -1295,6 +1316,21 @@ export const PLAIN_WORDS = {
     happened: "The job that copies the login service's admin events into the audit trail failed this run.",
     broke: 'Events not yet copied are waiting; any copied before the failure are kept.',
     next: 'It carries on from where it stopped at the next run, every 5 minutes. If it repeats, check the login service.',
+  },
+  'idp_events.changes_late': {
+    happened: 'The job copying sign-in changes from the login service is over two runs behind.',
+    broke: 'Changed passwords or second factors are copied late, so their alarms are late too.',
+    next: "Look for a flood of changes in the login service's history, and for failures on the job's lines.",
+  },
+  'idp_events.position_ahead': {
+    happened: 'The login event copy job is already past a minute ago, so it read nothing this run.',
+    broke: 'Login changes are copied late until the clock passes that point, a few minutes at most.',
+    next: "Check the servers' clocks. If they agree, a row may be planted in the audit chain: see the runbook.",
+  },
+  'idp_events.tied_page_resets': {
+    happened: 'A full page of password reset requests had the same time, so the copy job moved past that moment.',
+    broke: 'Some reset requests from that moment may be missing from the audit trail; no sign-in change is.',
+    next: "Nothing if rare. If it repeats, look for a reset request flood in the login service's history.",
   },
   'idp_events.tied_page': {
     happened: 'A full page of login service events all had the same time, so the copy job moved past that moment.',

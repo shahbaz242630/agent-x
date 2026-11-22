@@ -1,0 +1,23 @@
+-- agentx: no transaction (concurrent index)
+-- S210 final (F1): the login events copier reads password resets asked for in a feed search of
+-- their own, with a read position of their own, so a flood of public "forgot password" requests
+-- can never use the page budget of the feed that carries real credential changes. Each feed's
+-- position is still the latest `at` the platform chain holds for a copy, now among its own event
+-- types (idp-copier.ts): the resets' one type, or every other type copied, one seek a type.
+--
+-- This index keys the action, the copy's event type and its `at` in byte order ("C"), each as
+-- platform-events.ts writes them (`(details::jsonb ->> 'type')`, `(details::jsonb ->> 'at')`),
+-- so each type's latest copy is one index entry however many copies of other types follow it.
+-- It takes the place of 0084's `audit_events_by_at`, dropped after it is built: the copier was
+-- that index's only reader, and it now always names the types. A plain index missing is speed to
+-- the schema guard, never drift (schema-guard.ts), so the image before this migration reads on,
+-- its single position by the action's index, slower but the same.
+-- The platform chain is a global table, of no organisation (0003): no org_id to lead with, and
+-- no table, column or grant changes.
+--
+-- Built and dropped concurrently, outside a transaction (the first line; migrate.ts), as 0116's:
+-- events go on being recorded throughout. A build that fails leaves the index not valid, which
+-- the guard reads as speed, not drift, and the next run drops it and builds it again; the old
+-- index goes only once the new one stands.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_events_by_type_at ON platform_controls.audit_events (action, (details::jsonb ->> 'type'), ((details::jsonb ->> 'at') COLLATE "C"));
+DROP INDEX CONCURRENTLY IF EXISTS platform_controls.audit_events_by_at;

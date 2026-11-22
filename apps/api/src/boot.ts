@@ -381,7 +381,13 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
     witness,
     // New sessions and step-ups wait while the platform chain grows too far past its anchor (R2-4): its anchors given
     // by the job list, the jobs copy's or a web copy's read-only ones.
-    growthBrake: createPlatformGrowthBrake({ database, clock: systemClock, logger }),
+    growthBrake: createPlatformGrowthBrake({
+      database,
+      clock: systemClock,
+      logger,
+      // Three missed anchor checks: the anchor check's own alarm (job-list.ts).
+      staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
+    }),
     flows: createLoginFlows({ clock: systemClock }),
     // Held to the signed states' digest once the jobs keep it (AT13c): a session put back after its signed end. A cut
     // platform chain answered in the database by every session ended, signed (AT13h).
