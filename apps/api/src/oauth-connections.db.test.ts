@@ -1109,6 +1109,29 @@ describe(`SEC-OAUTH-05, SEC-OAUTH-08 a refresh token rotated, used once (Postgre
     });
   });
 
+  it('Shannon p6 MISC-02: closes the head at a reuse, so the newest token is refused even where the revoke was lost', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const first = await connected(org, admin, agentId);
+    const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
+    const second = issued(await grants.refresh(refresh, CALLER));
+    // A key check holding the brake's shared side past the revoke's wait: the reuse is found, its revoke lost.
+    const inside = await holding(brakeShared(lockName(AGENT_BRAKE, org, agentId)));
+    // Its route answers busy (temporarily_unavailable); here the lock's own error.
+    await expect(grants.refresh(refresh, CALLER)).rejects.toThrow('lock timeout');
+    await letGo(inside);
+    // Before MISC-02 the newest token was still the head, and refreshed: the stolen chain went on.
+    expect(await grants.refresh({ ...refresh, refreshToken: second.refreshToken }, CALLER)).toMatchObject({
+      outcome: 'refused',
+      error: 'invalid_grant',
+    });
+    expect(await accepted(second.accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('oauth.refresh_reused')).toEqual([expect.objectContaining({ revoked: true, orgId: org })]);
+    // The head closed on purpose is no tamper sign: no integrity alarm for the newest token, unused, refused.
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
   it('refuses a refresh token past its 30 idle days, and an access token sent as one', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');

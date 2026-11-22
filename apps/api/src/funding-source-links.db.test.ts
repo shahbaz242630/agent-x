@@ -24,6 +24,7 @@ import {
   createTestDatabase,
   FixedClock,
   holdNamedLock,
+  LogCapture,
   SequentialIds,
   type TestDatabase,
   testLogger,
@@ -585,6 +586,39 @@ describe(`confirming a link with the partner (D2-3b, Postgres ${server.version})
     clock.advanceBy(15 * MINUTE_MS);
 
     expect(confirmedOf(await confirm(admin, link.id))).toMatchObject({ link: { outcome: 'expired' } });
+  });
+
+  it('Shannon p6: turns down a link the partner confirms with another organisation’s source, told, adding nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { link, authoriseUrl } = startedOf(await start(admin));
+    await rail.bank.approve(org, sessionOf(authoriseUrl), ACCOUNT);
+    const capture = new LogCapture();
+    const astray = createFundingSourceLinks({
+      database: app,
+      keys,
+      ids,
+      clock,
+      rail: {
+        ...rail,
+        confirmSourceLink: async (asked) => {
+          const outcome = await rail.confirmSourceLink(asked);
+          return outcome.kind === 'linked'
+            ? { ...outcome, source: { ...outcome.source, organizationId: ids.next() } }
+            : outcome;
+        },
+      },
+      partner: 'fake',
+      logger: testLogger(capture),
+    });
+
+    const confirmed = await astray.confirm(admin, keyed(admin, LINK_CONFIRM_OPERATION), link.id, 'cancel', CORRELATION);
+
+    expect(confirmedOf(confirmed)).toMatchObject({ link: { outcome: 'rejected', sourceId: null }, source: null });
+    expect((await rows(org)).sources).toEqual([]);
+    expect(capture.lines().filter((line) => line.event === 'funding_sources.partner_answer_mismatch')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: org, linkId: link.id }),
+    ]);
   });
 
   it('never adds a source gone at the partner before Agent X confirmed it: settled rejected', async () => {

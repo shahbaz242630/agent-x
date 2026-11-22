@@ -1120,6 +1120,40 @@ describe('with the bank check or another admin at the same payment (forced, ADR-
     expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual(['payment_mark_proposed', 'payment_mark_ended']);
   });
 
+  it('Shannon p6 MISC-08: two withdrawals queued at the proposal: one withdraws, the other NO_FAILURE_PROPOSAL', async () => {
+    const { w, transaction, first, second } = await markable();
+    await proposed(first, transaction.id);
+    const confirms = [];
+    for (const who of [first, second]) {
+      const challengeId = askedFor(await withdrawing(who, transaction.id));
+      await stepUp(who, challengeId);
+      confirms.push(() => confirmingWithdrawal(who, transaction.id, challengeId));
+    }
+    const [one, two] = confirms;
+    if (one === undefined || two === undefined) throw new Error('two confirms');
+    // Both read the payment FOR SHARE together, so they meet at the proposal's row: held here, they queue behind it.
+    const holder = await database.connect('owner');
+    try {
+      await holder.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+      await holder.query('begin');
+      await holder.query(
+        "select id from transactions.failure_proposals where transaction_id = $1 and status = 'OPEN' for no key update",
+        [transaction.id],
+      );
+      const firstAnswer = one();
+      await waitUntilQueued(database.as('admin'), 1);
+      const secondAnswer = two();
+      await waitUntilQueued(database.as('admin'), 2);
+      await holder.query('commit');
+      expect(await Promise.allSettled([firstAnswer, secondAnswer])).toEqual([
+        { status: 'fulfilled', value: expect.objectContaining({ outcome: 'withdrawn' }) as unknown },
+        { status: 'fulfilled', value: refused(409, 'NO_FAILURE_PROPOSAL') },
+      ]);
+    } finally {
+      await holder.end();
+    }
+  });
+
   it('SEC-DP-14 two admins proposing at once: one proposal, the other FAILURE_PROPOSAL_OPEN', async () => {
     const { w, transaction, first, second } = await markable();
     const confirms = [];

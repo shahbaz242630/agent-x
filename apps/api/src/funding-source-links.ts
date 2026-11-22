@@ -261,6 +261,13 @@ export function createFundingSourceLinks({
       await settleLink(tx, key, { outcome: outcome.reason }, now);
       return 200;
     }
+    // An answer naming another organisation is the partner's fault, as at a refresh (funding-source-changes.ts):
+    // nothing of it kept, the link rejected, and told (Shannon p6; addSource refuses it too, as a bare 500).
+    if (outcome.source.organizationId.toLowerCase() !== member.orgId.toLowerCase()) {
+      logger.child({ orgId: member.orgId }).error('funding_sources.partner_answer_mismatch', { linkId: link.id });
+      await settleLink(tx, key, { outcome: 'rejected' }, now);
+      return 200;
+    }
     // Limits in another currency than the account's (the S68 audit): kept, they'd show agents the wrong one.
     if (!limitsInAccountCurrency(outcome.source)) {
       logger.child({ orgId: member.orgId }).error('funding_sources.currency_mismatch', { linkId: link.id });

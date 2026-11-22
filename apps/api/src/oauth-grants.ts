@@ -22,7 +22,9 @@
 //   0102, R-15, S206), locked before the token's row and moved to the new
 //   token in the same transaction: any other token is a reuse, and one whose
 //   row still says unused (`used_at` cleared by the database's owner) is the
-//   integrity alarm too (check `refresh_token`, reason `not_head`). A
+//   integrity alarm too (check `refresh_token`, reason `not_head`). A reuse
+//   closes the head (Shannon p6 MISC-02), so nothing is refreshed after even
+//   if its revoke is lost, and no alarm is raised for the closed head. A
 //   connection with no head (made before 0102, not refreshed since) is
 //   refused, nothing issued, so its client connects again (S207, R-15): its
 //   tokens would be judged by `used_at` alone, which the owner can clear. A refresh
@@ -60,10 +62,12 @@ import {
   agentKeyOf,
   agentOf,
   type AgentsTables,
+  CLOSED_HEAD,
   CONNECTIONS,
   connectionOf,
   credentialAt,
   type HeadCheck,
+  headClosed,
   headMoved,
   headOf,
   type IssuedTokens,
@@ -545,8 +549,11 @@ export function createOauthGrants({
    * alarm where its row still says unused. Undefined: it is the head. A head tampered with is a reuse too: its alarm
    * is the signed state's own, and the organisation's hold follows.
    */
+  const REUSED = { outcome: 'reused' as const, forgot: undefined };
   const notTheHead = (head: Exclude<HeadCheck, { readonly outcome: 'unset' }>, row: TokenRow, tokenId: string) => {
-    if (head.outcome === 'tampered') return { outcome: 'reused' as const, forgot: undefined };
+    if (head.outcome === 'tampered') return REUSED;
+    // Closed at an earlier reuse (MISC-02): a reuse again, its revoke retried, but no alarm: nothing was hidden.
+    if (head.refreshId === CLOSED_HEAD) return REUSED;
     if (head.refreshId === tokenId.toLowerCase()) return undefined;
     return { outcome: 'reused' as const, forgot: row.usedAt === null ? ('not_head' as const) : undefined };
   };
@@ -707,10 +714,13 @@ export function createOauthGrants({
         if (head.outcome === 'unset') return { outcome: 'refused' as const, reason: 'no_head' as const };
         const row = await tokenRowLocked(tx, orgId, presented.tokenId);
         if (row === undefined) return { outcome: 'refused' as const, reason: 'missing' as const };
-        const reuse = notTheHead(head, row, presented.tokenId);
-        if (reuse !== undefined) return reuse;
-        if (!(await usedNow(tx, orgId, presented.tokenId, now))) {
-          return { outcome: 'reused' as const, forgot: undefined };
+        const reuse =
+          notTheHead(head, row, presented.tokenId) ??
+          ((await usedNow(tx, orgId, presented.tokenId, now)) ? undefined : REUSED);
+        if (reuse !== undefined) {
+          // Closed here, under the head's lock, so nothing is refreshed after even if the revoke is lost (MISC-02).
+          if (head.outcome === 'set') await headClosed(tx, states, head, { orgId, id: presented.keyId });
+          return reuse;
         }
         const tokens = await pairAndHead(tx, states, head, {
           orgId,

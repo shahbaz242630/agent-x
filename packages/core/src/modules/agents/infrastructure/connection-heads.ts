@@ -80,3 +80,33 @@ export async function headMoved(
     .execute();
   await states.record(tx, CONNECTION_HEADS, { orgId, id }, 'new', fields, change);
 }
+
+/** The refresh ID a closed head names: no token is ever issued with it (they are UUIDv7), so none is the head again. */
+export const CLOSED_HEAD = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * Closes the connection's head on a refresh token's reuse (Shannon p6 MISC-02), in the transaction that found it,
+ * under the head lock headOf took: no refresh of the connection is issued after, even if the revoke that follows in
+ * its own transaction is lost (busy, or the process stopped). Takes the chain head's lock, so it comes last. A head
+ * already closed is left as it is.
+ */
+export async function headClosed(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  read: Extract<HeadCheck, { readonly outcome: 'set' }>,
+  key: { readonly orgId: string; readonly id: string },
+): Promise<void> {
+  if (read.refreshId === CLOSED_HEAD) return;
+  await states.record(
+    tx,
+    CONNECTION_HEADS,
+    key,
+    read.state,
+    { refresh_id: CLOSED_HEAD },
+    {
+      actor: { type: 'system' as const, id: 'oauth-server' },
+      action: 'connection_head.closed',
+      details: { reason: 'refresh_reused', refreshId: read.refreshId },
+    },
+  );
+}
