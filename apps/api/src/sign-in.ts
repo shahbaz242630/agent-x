@@ -38,6 +38,13 @@
 //   are held to SIGN_IN_STARTS a minute per network, as the open flows are
 //   counted (an IPv4 address, an IPv6 /48: clientSite) (TR-17):
 //   past it RATE_LIMITED, 429 with Retry-After, and no flow begun.
+// - S210 TR-7: a person opens at most MOST_SESSIONS_A_DAY sessions and
+//   completes MOST_STEP_UPS_A_DAY step-ups in any 24 hours, as each adds to
+//   the shared platform chain (person-chain-caps.ts). A sign-in past it is
+//   RATE_LIMITED, 429 with Retry-After, and no session opened; a step-up past
+//   it STEP_UP_FAILED as any other, though no security event, as nothing about
+//   the sign-in was wrong. Each warned at most once a minute (capWarning).
+//   A sign-out is never refused.
 // - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
 //   a step-up for a challenge of the signed-in person's own session: a flow
 //   cookie, and off to the login service to sign in again (`prompt=login`).
@@ -71,7 +78,10 @@ import {
   type LoginSessions,
   MOST_OPEN_SIGN_INS,
   MOST_OPEN_SIGN_INS_A_NETWORK,
+  MOST_SESSIONS_A_DAY,
+  MOST_STEP_UPS_A_DAY,
   RETURN_PATH,
+  SessionsSpent,
   type SignIn,
   SignInBusy,
   SignInFailed,
@@ -244,6 +254,9 @@ export const SIGN_IN_STARTS = { most: 20, windowMs: 60_000 } as const;
 /** How long to wait before starting again when the login service can't be reached: long enough for it to wake from zero. */
 const UNAVAILABLE_RETRY_SECONDS = 15;
 
+/** How long to wait before signing in again past the day's sessions (TR-7): an hour, as the oldest leave the 24 hours. */
+const SESSIONS_SPENT_RETRY_SECONDS = 3600;
+
 export function registerSignIn(
   app: FastifyInstance,
   {
@@ -268,6 +281,9 @@ export function registerSignIn(
     { most: MOST_OPEN_SIGN_INS_A_NETWORK },
     'started',
   );
+  // S210 TR-7: a person past their day's sessions or step-ups, said the same way.
+  const sessionsSpent = capWarning(logger, clock, 'auth.person_sessions_spent', { most: MOST_SESSIONS_A_DAY });
+  const stepUpsSpent = capWarning(logger, clock, 'auth.person_step_ups_spent', { most: MOST_STEP_UPS_A_DAY });
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
   const failed = (request: FastifyRequest, reply: FastifyReply, failure: SignInFailure, reason?: string) => {
     logger
@@ -308,16 +324,20 @@ export function registerSignIn(
    */
   const stepUpFailed = (request: FastifyRequest, reply: FastifyReply, failed: StepUpFailed) => {
     const { failure, userId } = failed;
-    logger
-      .child({ correlationId: request.id })
-      .warn('auth.step_up_failed', userId === undefined ? { failure } : { failure, userId });
-    // Tied to no organisation: the step-up routes are a person's own, and verify none (6E1b).
-    securityEvents.note({
-      kind: 'sign_in_failed',
-      reason: `step_up_${failure}`,
-      ip: request.ip,
-      ...(userId !== undefined && { userId }),
-    });
+    // Past the day's step-ups the sign-in itself was sound (S210 TR-7): the cap's own line, no security event.
+    if (failure === 'step_ups_spent') stepUpsSpent();
+    else {
+      logger
+        .child({ correlationId: request.id })
+        .warn('auth.step_up_failed', userId === undefined ? { failure } : { failure, userId });
+      // Tied to no organisation: the step-up routes are a person's own, and verify none (6E1b).
+      securityEvents.note({
+        kind: 'sign_in_failed',
+        reason: `step_up_${failure}`,
+        ip: request.ip,
+        ...(userId !== undefined && { userId }),
+      });
+    }
     if (failed.back === undefined) return sendErrorBody(reply, 403, 'STEP_UP_FAILED', request.id);
     return reply
       .code(302)
@@ -384,6 +404,17 @@ export function registerSignIn(
       });
     } catch (thrown) {
       if (thrown instanceof StepUpFailed) return stepUpFailed(request, reply, thrown);
+      if (thrown instanceof SessionsSpent) {
+        sessionsSpent();
+        return sendErrorBody(
+          reply
+            .header('retry-after', String(SESSIONS_SPENT_RETRY_SECONDS))
+            .header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0)),
+          429,
+          'RATE_LIMITED',
+          request.id,
+        );
+      }
       if (!(thrown instanceof SignInFailed)) throw thrown;
       if (thrown.failure === 'provider_unavailable') return unavailable(request, reply, thrown.message);
       return failed(request, reply, thrown.failure, thrown.message);

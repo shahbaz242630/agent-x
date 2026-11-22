@@ -8,6 +8,9 @@ import {
   LoginSessionsUnavailable,
   MOST_OPEN_SIGN_INS,
   MOST_OPEN_SIGN_INS_A_NETWORK,
+  MOST_SESSIONS_A_DAY,
+  MOST_STEP_UPS_A_DAY,
+  SessionsSpent,
   type SignIn,
   SignInBusy,
   SignInFailed,
@@ -1175,6 +1178,85 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     expect(response.statusCode).toBe(403);
     expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
     expect(response.headers['set-cookie']).toBeUndefined();
+  });
+});
+
+describe("SEC-LIM-13 S210 TR-7 a person's day's sessions and step-ups", () => {
+  const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c2';
+  const coming = () =>
+    callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`);
+
+  it('refuses a sign-in past the day’s sessions as RATE_LIMITED, 429 with Retry-After, the flow cookie cleared, warned once a minute; sign-out still works', async () => {
+    const standIn = new StandIn();
+    standIn.failWith = new SessionsSpent(USER_ID);
+    const { app, capture, noted } = await server(standIn);
+
+    const response = await app.inject(coming());
+
+    expect(response.statusCode).toBe(429);
+    expect(response.json()).toEqual(errorBody('RATE_LIMITED', response.headers['x-correlation-id'] as string));
+    expect(response.headers['retry-after']).toBe('3600');
+    // No new session cookie: the one the browser holds is left as it is.
+    expect(setCookies(response.headers['set-cookie'])).toEqual([
+      `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+    ]);
+    await app.inject(coming());
+    expect(capture.lines().filter((line) => line.event === 'auth.person_sessions_spent')).toEqual([
+      expect.objectContaining({ level: 'warn', most: MOST_SESSIONS_A_DAY, refused: 1 }),
+    ]);
+    // Nothing about the sign-in was wrong: no failed sign-in noted or logged.
+    expect(noted).toEqual([]);
+    expect(capture.lines().map((line) => line.event)).not.toContain('auth.sign_in_failed');
+    // A sign-out is never refused.
+    const out = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/sign-out',
+      headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}`, origin: PUBLIC_ORIGIN },
+    });
+    expect(out.statusCode).toBe(200);
+    expect(standIn.signedOut).toEqual([SESSION_ID]);
+  });
+
+  it('refuses a step-up past the day’s step-ups at its start as STEP_UP_FAILED, warned once a minute, no security event', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    standIn.beginFailsWith = new StepUpFailed('step_ups_spent', 'test', USER_ID);
+    const { app, capture, noted } = await server(standIn);
+    const starting = {
+      url: `/v1/auth/step-up?challenge=${CHALLENGE}`,
+      headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}` },
+    };
+
+    const response = await app.inject(starting);
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
+    expect(response.headers['set-cookie']).toBeUndefined();
+    await app.inject(starting);
+    expect(capture.lines().filter((line) => line.event === 'auth.person_step_ups_spent')).toEqual([
+      expect.objectContaining({ level: 'warn', most: MOST_STEP_UPS_A_DAY, refused: 1 }),
+    ]);
+    expect(capture.lines().map((line) => line.event)).not.toContain('auth.step_up_failed');
+    expect(noted).toEqual([]);
+  });
+
+  it('sends a step-up refused past the day’s step-ups as it comes back to its page, failed', async () => {
+    const standIn = new StandIn();
+    standIn.failWith = new StepUpFailed('step_ups_spent', 'test', USER_ID, {
+      returnTo: '/members/confirm',
+      challengeId: CHALLENGE,
+    });
+    const { app, capture, noted } = await server(standIn);
+
+    const response = await app.inject(coming());
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe(`/members/confirm?stepUpFailed=${CHALLENGE}`);
+    expect(setCookies(response.headers['set-cookie'])).toEqual([
+      `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+    ]);
+    expect(capture.lines().filter((line) => line.event === 'auth.person_step_ups_spent')).toHaveLength(1);
+    expect(noted).toEqual([]);
   });
 });
 

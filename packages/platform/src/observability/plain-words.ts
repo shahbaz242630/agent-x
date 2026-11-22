@@ -528,6 +528,17 @@ export const PLAIN_WORDS = {
     broke: 'People on a busy network were asked to try again shortly; everyone else signs in as usual.',
     next: 'Look for many addresses starting sign-ins over and over. They end within ten minutes.',
   },
+  'auth.person_sessions_spent': {
+    happened: 'One person signed in more than a hundred times in a day, so this sign-in was refused.',
+    broke: 'Only that person waits; sessions they hold go on, and everyone else signs in as usual.',
+    next: 'Someone may be signing in over and over to fill the shared audit chain: find who.',
+  },
+  'auth.person_step_ups_spent': {
+    happened:
+      'One person confirmed more than two hundred changes by signing in again in a day, so this one was refused.',
+    broke: "Only that person's change waits; they stay signed in, and everyone else carries on.",
+    next: 'A busy approver may need more; else someone may be filling the shared audit chain: find who.',
+  },
   'auth.sign_ins_gave_way': {
     happened:
       'One address or network had more sign-ins under way than its share, so its oldest unfinished ones were let go.',
