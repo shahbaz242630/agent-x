@@ -118,6 +118,11 @@ export interface WitnessAnchors {
 }
 
 export interface WitnessLog extends ChainWitness {
+  /**
+   * pending, each head's time on this process's own clock (TR-12): for setting against a time it took itself (the
+   * digest's accepts), where pending's are the store's clock, as file names go.
+   */
+  witnessed(chain: Chain, most?: number): readonly WitnessedHead[];
   /** note(chain, head, 'now') and a wait for it (settled): for a writer outside the API's requests, the operator's. */
   now(chain: Chain, head: { readonly seq: bigint; readonly hash: Buffer }): Promise<void>;
   /** note(chain, head, 'soon'). */
@@ -207,6 +212,9 @@ const MOST_AHEAD_MS = 5 * 60_000;
 
 /** How far before the newest file read a later read looks again: a file named earlier may land later. */
 const LAG_MS = MOST_AHEAD_MS;
+
+/** How finely Azure's Date tells the store's time: whole seconds, rounded down. */
+const DATE_STEP_MS = 1000;
 
 /** The most names a list call asks of the heads' folders: Azure's most, one call where a hundred names took one each. */
 const LIST_PAGE = 5000;
@@ -447,8 +455,8 @@ interface Queued {
   readonly chain: string;
   readonly head: WitnessedHead;
   readonly klass: WitnessClass;
-  /** The head itself where it was noted before this copy had the store's time: dated at its file's (TR-12). */
-  readonly undated: { at: number } | undefined;
+  /** The head itself where noted before this copy had the store's time: re-dated by it once first known (TR-12). */
+  undated: { at: number } | undefined;
   readonly confirmed: Promise<void>;
   readonly done: () => void;
 }
@@ -550,9 +558,11 @@ export function createWitnessLog({
   // whether one was asked yet, and when a clock far off was last said.
   let offset = 0;
   let clockAsked = false;
+  let offsetKnown = false;
   let skewSaidAt: number | undefined;
   /** Every time this log names or dates: the local clock set by the store's (the header). */
-  const now = (): Date => new Date(localNow().getTime() + offset);
+  const nowMs = (): number => localNow().getTime() + offset;
+  const now = (): Date => new Date(nowMs());
 
   /** A clock more than the clocks' spread off the store's, said and the alarm, at most once a SAY_EVERY_MS. */
   const skewed = (fields: Record<string, unknown>): void => {
@@ -567,9 +577,29 @@ export function createWitnessLog({
   const heard = (): void => {
     const at = store.serverTime?.();
     if (at === undefined) return;
-    offset = at - localNow().getTime();
+    const here = localNow().getTime();
+    // Azure's Date is whole seconds, rounded down: the store's time is somewhere in [at, at + DATE_STEP_MS). A clock
+    // within it is right as it stands (an honest copy dates as it always did); one outside is set to its nearest end.
+    if (here < at) offset = at - here;
+    else offset = here >= at + DATE_STEP_MS ? at + DATE_STEP_MS - 1 - here : 0;
     clockAsked = true;
+    if (!offsetKnown) {
+      offsetKnown = true;
+      redate();
+    }
     if (Math.abs(offset) > MOST_AHEAD_MS) skewed({ offsetMs: offset });
+  };
+
+  /**
+   * The heads noted before the store's time was first known, dated as noted by the store's clock now it is (TR-12): so
+   * a Put failing after, or a snapshot, never carries the local clock's time, nor one later than noted.
+   */
+  const redate = (): void => {
+    for (const queued of queue) {
+      if (queued.undated === undefined) continue;
+      queued.undated.at += offset;
+      queued.undated = undefined;
+    }
   };
 
   /**
@@ -873,12 +903,12 @@ export function createWitnessLog({
 
   /** The next file's worth written: whether it was. Taken back into the queue where it wasn't. */
   const writeOnce = async (): Promise<boolean> => {
-    const taking = nextFile();
+    let taking: Queued[] = [];
     try {
+      // The store's time first, so heads noted before it are re-dated while still in the queue.
       await askClock();
+      taking = nextFile();
       const at = now().getTime();
-      // Noted before the store's time was known: dated at its file's, never by a clock perhaps slow (never earlier).
-      for (const { undated } of taking) if (undated !== undefined) undated.at = at;
       const name = fileName(ownFolder, at);
       const bytes = await signedFile(
         keys,
@@ -960,14 +990,14 @@ export function createWitnessLog({
     const head: { readonly seq: bigint; readonly hash: Buffer; at: number } = {
       seq,
       hash: Buffer.from(hash),
-      at: now().getTime(),
+      at: nowMs(),
     };
     keep(name, head);
     let done = (): void => undefined;
     const confirmed = new Promise<void>((resolve) => {
       done = resolve;
     });
-    const undated = !clockAsked && store.serverTime !== undefined ? head : undefined;
+    const undated = !offsetKnown && store.serverTime !== undefined ? head : undefined;
     const queued: Queued = { chain: name, head, klass, undated, confirmed, done };
     queue.push(queued);
     if (klass !== 'now') return;
@@ -1242,6 +1272,9 @@ export function createWitnessLog({
     },
     pending(chain: Chain, most?: number): readonly WitnessedHead[] {
       return standing(nameOf(chain), most);
+    },
+    witnessed(chain: Chain, most?: number): readonly WitnessedHead[] {
+      return standing(nameOf(chain), most).map((head) => ({ ...head, at: head.at - offset }));
     },
     async flush(): Promise<void> {
       await write(true);
