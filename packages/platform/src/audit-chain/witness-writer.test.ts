@@ -444,6 +444,45 @@ describe('TR-7 D1 lists bounded to the time window', () => {
   });
 });
 
+describe('TR-7 D6 a set-aside flood', () => {
+  it('never keeps a real set-aside unread: read oldest first, and names far from when they landed passed over, said', async () => {
+    const store = createFakeWriteOnceStore();
+    const time = { at: AT.getTime() };
+    const reader = copyOn(store, { time });
+    expect(await reader.log.refreshWhole()).toBe(true);
+    time.at += 1000;
+    const forger = copyOn(store, { time });
+    await forger.log.now(CHAIN, head(9n, 9));
+    time.at += 3 * MINUTE;
+    const real = await setAsideFile(store, forger.log.writer(), time.at);
+    store.created.set(real, time.at);
+    // Junk the flooder names after the real one, landing as named, more each pass than a pass fetches; and junk named
+    // before it (inside the look back) that landed only now.
+    const flood = (count: number) => {
+      for (let one = 0; one < count; one += 1) {
+        const name = fileName('e1/set-aside/', time.at + 1 + one);
+        store.files.set(name, Buffer.from('junk'));
+        store.created.set(name, time.at + 1 + one);
+        const early = fileName('e1/set-aside/', AT.getTime() - 4 * MINUTE - one);
+        store.files.set(early, Buffer.from('junk'));
+        store.created.set(early, time.at);
+      }
+    };
+    flood(300);
+    time.at += 1000;
+    await forger.log.now(CHAIN, head(10n, 8));
+    expect(await reader.log.refreshWhole()).toBe(true);
+    flood(300);
+    expect(await reader.log.refreshWhole()).toBe(true);
+    // The forger's file named before the set-aside passed over from the first pass after it landed; its later one held.
+    expect(reader.alarms('set_aside')).toHaveLength(1);
+    expect(seqs(reader.log.pending(CHAIN))).toEqual([10n]);
+    expect(reader.alarms('set_aside_late')).toHaveLength(1);
+    expect(reader.alarms('set_aside_misdated').map(({ files }) => files)).toEqual([300, 300]);
+    expect(reader.alarms('set_aside_flood')).toHaveLength(1);
+  });
+});
+
 describe('TR-14 review: a writer set aside twice, snapshots this release, a copy set aside rewriting', () => {
   it("holds a writer's earliest set-aside: a second line for it never passes over more; the command writes no second", async () => {
     const store = createFakeWriteOnceStore();

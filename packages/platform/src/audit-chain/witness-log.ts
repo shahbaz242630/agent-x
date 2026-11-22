@@ -1373,27 +1373,34 @@ export function createWitnessLog({
   };
 
   /**
-   * The set-aside files not read yet, each signed with the operator's key, which no copy of the API holds: newest first,
-   * back to a look back before the last pass that fetched them all (the operator's are named by the store's clock as
-   * they go), at most MOST_SET_ASIDE_READS a pass, so any copy flooding the folder slows no refresh (the rest wait for
-   * the next pass; the flood said). This process's own among them: ownSetAside. Throws as a list or get does.
+   * The set-aside files not read yet, each signed with the operator's key, which no copy of the API holds: back to
+   * `since` (setAsideSince; none, the whole folder: the operator's own check), at most MOST_SET_ASIDE_READS a pass, so
+   * any copy flooding the folder slows no refresh (the rest wait for the next pass; the flood said). Oldest first, and
+   * none whose name is further from when the store says it landed than the clocks' spread (TR-7 D6): the operator names
+   * its files by the store's clock as they go, so a flood named after a real one never keeps it unread, and one named
+   * before it must have landed back then. This process's own among them: ownSetAside. Throws as a list or get does.
    */
   const readSetAside = async (began: number, since: number | undefined): Promise<void> => {
     const at = folder('set-aside');
-    let fetched = 0;
-    let whole = true;
+    const waiting: { readonly name: string; readonly at: number }[] = [];
+    let misdated = 0;
     for await (const file of namesOf(timed, at, since)) {
       if (since !== undefined && file.at < since) break;
       if (setAsideRead.has(file.name)) continue;
-      if (fetched >= MOST_SET_ASIDE_READS) {
-        whole = false;
-        break;
+      if (file.created !== undefined && Math.abs(file.at - file.created) > MOST_AHEAD_MS) {
+        misdated += 1;
+        setAsideRead.add(file.name);
+        continue;
       }
-      fetched += 1;
+      waiting.push(file);
+    }
+    // Listed newest first.
+    for (const file of waiting.toReversed().slice(0, MOST_SET_ASIDE_READS)) {
       await readSetAsideFile(at, file);
       setAsideRead.add(file.name);
     }
-    if (whole) setAsideWhole(began);
+    if (misdated > 0) alarm('set_aside_misdated', { folder: at, files: misdated });
+    if (waiting.length <= MOST_SET_ASIDE_READS) setAsideWhole(began);
     else setAsideShort(began, at, since);
     if (setAside.has(writer)) ownSetAside();
   };
