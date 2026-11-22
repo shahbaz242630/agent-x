@@ -58,6 +58,7 @@ import {
   keepClientMetadata,
   newFlowCookie,
   type OauthTables,
+  QUIET_NETWORK_FLOWS,
   QUIET_NETWORK_REGISTRATIONS,
   sweepClients,
 } from '@agentx/core/modules/oauth';
@@ -669,28 +670,40 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     });
   });
 
-  it(`refuses every new flow while ${String(MOST_OPEN_FLOWS)} are open, with the warning`, async () => {
+  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} are open, refuses only a busy network's new flow, with the warning; a quiet one still opens`, async () => {
     const admin = database.as('admin');
+    // The server's cap filled by a crowd of 400 networks, each under its own share.
     await admin.query(
-      `insert into oauth.flows (id, kind, client_id, redirect_uri, code_challenge, scopes_asked, resource, browser_hash, created_at, ends_at)
-       select gen_random_uuid(), 'code', 'filler', 'https://a.example/cb', $1, 'requests:read', 'r', $2, $3, $4
-       from generate_series(1, $5::int)`,
+      `insert into oauth.flows (id, kind, client_id, redirect_uri, code_challenge, scopes_asked, resource, browser_hash, created_at, ends_at, source_key, network_key)
+       select gen_random_uuid(), 'code', 'filler', 'https://a.example/cb', $1, 'requests:read', 'r', $2, $3, $4,
+         'tr7-source-' || n, 'tr7-net-' || (n % 400)
+       from generate_series(1, $5::int) as n`,
       [challengeOf(VERIFIER), 'f'.repeat(64), START, new Date(START.getTime() + 900_000), MOST_OPEN_FLOWS],
     );
+    const authorize = (ip: string) => authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), ip);
+    const busy = '198.51.100.40';
     try {
-      const answer = await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
+      // A network with fewer than its few open is let in, up to them,
+      for (let open = 0; open < QUIET_NETWORK_FLOWS; open += 1) {
+        expect(await authorize(busy)).toMatchObject({ outcome: 'opened' });
+      }
+      expect(lines('oauth.flows_capped')).toEqual([]);
+      // and only then refused, back to the client to try again, with the warning.
+      const answer = await authorize(busy);
       if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
       expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
       expect(lines('oauth.flows_capped')).toEqual([expect.objectContaining({ level: 'warn', refused: 1 })]);
       // At most one line a minute, however many are refused, then one counting them.
-      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
+      await authorize(busy);
       expect(lines('oauth.flows_capped')).toHaveLength(1);
       clock.advanceBy(60_000);
-      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
+      await authorize(busy);
       expect(lines('oauth.flows_capped')).toEqual([
         expect.objectContaining({ refused: 1 }),
         expect.objectContaining({ refused: 2 }),
       ]);
+      // Another network, quiet, still opens one: no one locked out.
+      expect(await authorize(fresh())).toMatchObject({ outcome: 'opened' });
     } finally {
       await admin.query("delete from oauth.flows where client_id = 'filler'");
     }

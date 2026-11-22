@@ -104,6 +104,7 @@ export {
   MOST_OPEN_FLOWS_A_BROWSER,
   MOST_OPEN_FLOWS_A_NETWORK,
   MOST_OPEN_FLOWS_A_SOURCE,
+  QUIET_NETWORK_FLOWS,
   flowDecided,
   type FlowDecision,
   type FlowRead,

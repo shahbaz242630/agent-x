@@ -628,8 +628,10 @@ export const PLAIN_WORDS = {
     next: 'Look for many networks registering over and over: a spread-out attack.',
   },
   'oauth.flows_capped': {
-    happened: 'So many OAuth sign-ins were under way at once that Agent X refused new ones.',
-    broke: 'People connecting an app were told to try again soon; connected apps carry on.',
+    happened:
+      'So many OAuth sign-ins were under way that Agent X refused new ones from networks already holding a few.',
+    broke:
+      'Only people on those networks were told to try again soon; others still connect, and connected apps carry on.',
     next: 'Look for many addresses opening sign-ins over and over. They end within minutes.',
   },
   'oauth.source_capped': {

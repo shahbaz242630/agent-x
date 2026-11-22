@@ -49,6 +49,7 @@ import {
   MOST_OPEN_FLOWS_A_SOURCE,
   openCodeFlow,
   openDeviceFlow,
+  QUIET_NETWORK_FLOWS,
   sweepFlows,
 } from './flows.ts';
 import type { OauthTables } from './tables.ts';
@@ -505,19 +506,50 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     ).rejects.toMatchObject({ code: '23514', constraint: 'a_device_flow_is_a_device' });
   });
 
-  it('counts device flows against the server’s cap of open flows', async () => {
+  it(`SEC-OAUTH-13 S210 TR-7: while ${String(MOST_OPEN_FLOWS)} flows are open, refuses only a busy network, of either kind; a quiet one still opens: no lockout`, async () => {
     const admin = database.as('admin');
     const later = new Date('2027-01-01T09:00:00Z');
+    // The server's cap filled by a crowd of 400 networks, 50 open flows each: every one under its own share of 100.
     await admin.query(
       `insert into oauth.flows (id, kind, client_id, redirect_uri, code_challenge, browser_hash, scopes_asked,
-         resource, created_at, ends_at)
+         resource, created_at, ends_at, source_key, network_key)
        select ('0199a0f0-0000-7000-9000-' || lpad(to_hex(n), 12, '0'))::uuid, 'code', 'c', 'https://a.example/cb',
-         $1, $2, 'requests:read', 'r', $3, $4
+         $1, $2, 'requests:read', 'r', $3, $4, 'tr7-source-' || n, 'tr7-net-' || (n % 400)
        from generate_series(1, $5::int) as n`,
       [challengeOf('v'.repeat(43)), 'e'.repeat(64), later, new Date(later.getTime() + 1000), MOST_OPEN_FLOWS],
     );
-    expect((await device(later)).opened).toBe('full');
-    await admin.query("delete from oauth.flows where id::text like '0199a0f0-0000-7000-9000-%'");
+    try {
+      // A network of the crowd is refused, a device's flow as a code flow,
+      expect((await device(later, undefined, fresh(), 'tr7-net-1')).opened).toBe('full');
+      const codeFlow = (network: string) =>
+        openCodeFlow(
+          app,
+          keys,
+          {
+            id: flowId(),
+            clientId: 'axcl_0123456789abcdef0123456789abcdef',
+            redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+            state: null,
+            codeChallenge: challengeOf('v'.repeat(43)),
+            scopesAsked: ['requests:read'],
+            resource: 'https://app.agentx.example/v1/mcp',
+            browserHash: hashOf(fresh()),
+            createdAt: later,
+          },
+          { source: fresh(), network },
+        );
+      expect(await codeFlow('tr7-net-2')).toBe('full');
+      // while a network holding fewer than its few open still opens them, of either kind, and only then is refused.
+      const quiet = fresh();
+      expect((await device(later, undefined, fresh(), quiet)).opened).toBe('opened');
+      for (let open = 1; open < QUIET_NETWORK_FLOWS; open += 1) expect(await codeFlow(quiet)).toBe('opened');
+      expect(await codeFlow(quiet)).toBe('full');
+      expect((await device(later, undefined, fresh(), quiet)).opened).toBe('full');
+      // Another fresh network opens all the same.
+      expect(await codeFlow(fresh())).toBe('opened');
+    } finally {
+      await admin.query("delete from oauth.flows where id::text like '0199a0f0-0000-7000-9000-%'");
+    }
   });
 
   it(`6F1 G4: holds one source to ${String(MOST_OPEN_FLOWS_A_SOURCE)} flows not ended, of either kind, decided or not`, async () => {
