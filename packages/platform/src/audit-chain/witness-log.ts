@@ -46,8 +46,10 @@
 // its answer (Azure's, over TLS), the first file waiting on a list for it: none within a minute of it (an honest clock
 // dates as it always did), else set late, never early (a head dated early could fall before a rebase it came after). An honest copy with a wrong clock lands in
 // every reader's next pass, however far off. More than the clocks' spread off is said (`audit.witness_clock_skew`, the
-// alarm `clock_skew`): this copy's offset, or a file read whose name is that far from when the store says it landed
-// (its Creation-Time), a copy the store's time didn't set. A line is never dated past its own file's name.
+// alarm `clock_skew`): this copy's offset. A file read whose name is that far from when the store says it landed (its
+// Creation-Time) was misdated by its writer: the alarm `misdated_heads`, naming that writer and the file (S210 R1-1: a
+// copy broken into can back-date a file in the jobs leader's ID past the leader's own look back, so `impersonated`
+// never fires). A line is never dated past its own file's name.
 //
 // Held: every head read or noted (`pending`, a list per chain, never only the highest: a stale copy's head on a cut
 // branch must not bury the honest one below it), set aside by a rebase dated after it. Let go only once confirmed on the
@@ -105,8 +107,9 @@
 //
 // The operator's step (playbook H, forks on many chains at once, R-12):
 //   1. Read the fork alarms' `writer` and `against`: the ID named across most chains is the suspect. Count only IDs
-//      named by heads files; `snapshot` names no one, and never set the jobs leader aside on fork alarms alone. No
-//      `impersonated` alarm may name it (else the copy it names was framed: restart that revision, set nothing aside).
+//      named by heads files; `snapshot` names no one, and never set the jobs leader aside on fork alarms alone. Set
+//      aside only an ID no `impersonated` or `misdated_heads` alarm names (else the copy it names was framed: restart
+//      that revision, set nothing aside).
 //   2. Find its copy: ContainerAppConsoleLogs where Log has 'audit.witness_writer' and that ID; RevisionName and
 //      ContainerGroupName are the platform's, never the copy's word. An ID no such line names was made up: go to 5.
 //   3. Set it aside: deploy/azure/operator.ts witness-set-aside --writer <ID> --reason <incident>. Every copy passes
@@ -1347,14 +1350,19 @@ export function createWitnessLog({
 
   /**
    * A file read whose name is further than the clocks' spread from when the store says it landed (TR-12): a copy naming
-   * files by a clock the store's time didn't set (an older build, or one whose store gave no time), said.
+   * files by a clock the store’s time didn’t set (an older build, or one whose store gave no time, or one back-dating
+   * on purpose), the alarm `misdated_heads` naming that writer and the file (S210 R1-1: a file named back-dated in the
+   * jobs leader’s ID is never listed by the leader’s own refresh, so never `impersonated`, yet its heads would name the
+   * leader in fork alarms). Read as any other: a detector, never a gate. `clock_skew` is this copy’s own offset alone.
    */
   const judgeLanding = (
     at: string,
-    { at: fileAt, created }: { readonly at: number; readonly created: number | undefined },
+    { name, at: fileAt, created }: { readonly name: string; readonly at: number; readonly created: number | undefined },
   ): void => {
     if (created === undefined || Math.abs(fileAt - created) <= MOST_AHEAD_MS) return;
-    skewed({
+    alarm('misdated_heads', {
+      writer: writerOfName(name),
+      file: name,
       folder: at,
       fileAt: new Date(fileAt).toISOString(),
       landedAt: new Date(created).toISOString(),
