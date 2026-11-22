@@ -44,9 +44,10 @@ import {
   testLogger,
 } from '@agentx/testing';
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { CORRELATION_HEADER } from './correlation.ts';
 import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables } from './handoff-world.helper.test.ts';
 import { type ApiProcess, runApi } from './main.ts';
@@ -512,8 +513,10 @@ async function connectionOf(owner: Member, agentId: string): Promise<string> {
 }
 
 let keysUsed = 0;
+/** Each answered request's correlation ID, by the organisation its caller named: the access-log row it still owes. */
+const owedRows = new Map<string, string>();
 /** One request as the caller sends it: a write from our own origin with a fresh idempotency key and its body. */
-function send(
+async function send(
   caller: Readonly<Record<string, string>>,
   method: string,
   url: string,
@@ -522,7 +525,7 @@ function send(
   keysUsed += 1;
   const writes = method !== 'GET';
   if (api === undefined) throw new Error('the API is not running');
-  return api.inject({
+  const response = await api.inject({
     method: method as NonNullable<InjectOptions['method']>,
     url,
     headers: {
@@ -535,6 +538,33 @@ function send(
     },
     ...(writes && { payload: JSON.stringify(worded(url, body ?? {})) }),
   });
+  const correlationId = response.headers[CORRELATION_HEADER];
+  const org = caller[ORGANIZATION_HEADER];
+  if (typeof correlationId === 'string' && org !== undefined) owedRows.set(correlationId, org);
+  return response;
+}
+
+/**
+ * Waits until every request A's members sent has its access-log row. The recorder writes a row in onResponse, after
+ * inject's answer has resolved, so a row of the step before could land between this step's before and after reads.
+ * That is the probable cause of TR-15 (the access.requests digest differed once on pg16, then passed on re-run): not
+ * proven, as the failure was not caught in the act.
+ */
+async function accessRowsWritten(): Promise<void> {
+  const owed = [...owedRows].filter(([, org]) => org === theirs.world.org).map(([id]) => id);
+  await vi.waitFor(
+    async () => {
+      const rows = await database
+        .as('admin')
+        .query<{ written: string }>(
+          'select count(*)::text as written from access.requests where org_id = $1 and correlation_id = any($2::uuid[])',
+          [theirs.world.org, owed],
+        );
+      expect(Number(rows[0]?.written)).toBe(owed.length);
+    },
+    { timeout: 10_000, interval: 50 },
+  );
+  for (const id of owed) owedRows.delete(id);
 }
 
 /** An answer as compared: its status and reason code. */
@@ -554,6 +584,7 @@ const callerOf = (op: Operation) =>
 
 /** Every row of organisation A's, in every table that names an organisation, read as the admin: a digest a table. */
 async function theirRows(): Promise<Record<string, string | null>> {
+  await accessRowsWritten();
   // Each table's statement built in Postgres from its own name (%I) and A's ID (%L), run there, its digest read back.
   const rows = await database.as('admin').query<{ name: string; digest: string | null }>(
     `select c.table_schema || '.' || c.table_name as name,
