@@ -37,6 +37,7 @@ import {
   createWitnessLog,
   type DigestLog,
   signAnchor,
+  type WitnessedHead,
   type WitnessLog,
 } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, type SignedStateTable } from '@agentx/platform/db';
@@ -55,6 +56,7 @@ import {
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { CONSENT_EXPIRY_CHOSEN, consentExpiryOf } from './consent-expiry-choice.ts';
+import { createAnchorCheck } from './anchor-check.ts';
 import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables } from './handoff-world.helper.test.ts';
 import { carriesRest } from './mandate-carry-rest.ts';
@@ -224,7 +226,7 @@ async function jobsCopy(
     mostBytes: digestBytes,
     ...(writes === undefined ? {} : { writes }),
     // Its reads held to the heads witnessed too (PR-1c); left out, only Tx A's own walk holds to them.
-    ...(readsHeld ? { witnessed: (each: Chain, most?: number) => witness.pending(each, most) } : {}),
+    ...(readsHeld ? { witnessed: (each: Chain, most?: number) => witness.heldTo(each, most) } : {}),
     anchors: { rebasedAfter, holds: () => true },
   });
   await digest.read();
@@ -1651,104 +1653,104 @@ describe('SEC-DB-20 TR-1 (13): a walk past its reach', () => {
   });
 });
 
-describe('SEC-DB-20 TR-1 (6): the pause hidden for a moment', () => {
-  /** The platform rows past `seq`, the head and the pause row, as the owner saves them to put back. */
-  async function ownerSaves(seq: string) {
-    const owner = await database.connect('owner');
-    try {
-      const saved = async (statement: string, values: unknown[] = []) =>
-        // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written just below.
-        (await owner.query<{ row: string }>(statement, values)).map(({ row }) => row);
-      return {
-        events: await saved(
-          'select pg_catalog.to_jsonb(e)::text as row from platform_controls.audit_events e where e.seq > $1',
-          [seq],
-        ),
-        signatures: await saved(
-          'select pg_catalog.to_jsonb(s)::text as row from platform_controls.operator_signatures s where s.seq > $1',
-          [seq],
-        ),
-        head: await saved('select pg_catalog.to_jsonb(h)::text as row from platform_controls.audit_head h'),
-        pause: await saved('select pg_catalog.to_jsonb(p)::text as row from platform_controls.handoff_pause p'),
-      };
-    } finally {
-      await owner.end();
-    }
+/** The platform rows past `seq`, the head and the pause row, as the owner saves them to put back. */
+async function ownerSaves(seq: string) {
+  const owner = await database.connect('owner');
+  try {
+    const saved = async (statement: string, values: unknown[] = []) =>
+      // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written just below.
+      (await owner.query<{ row: string }>(statement, values)).map(({ row }) => row);
+    return {
+      events: await saved(
+        'select pg_catalog.to_jsonb(e)::text as row from platform_controls.audit_events e where e.seq > $1',
+        [seq],
+      ),
+      signatures: await saved(
+        'select pg_catalog.to_jsonb(s)::text as row from platform_controls.operator_signatures s where s.seq > $1',
+        [seq],
+      ),
+      head: await saved('select pg_catalog.to_jsonb(h)::text as row from platform_controls.audit_head h'),
+      pause: await saved('select pg_catalog.to_jsonb(p)::text as row from platform_controls.handoff_pause p'),
+    };
+  } finally {
+    await owner.end();
   }
+}
 
-  /** The owner's statements, as the owner may run them. */
-  async function owner(statements: readonly (readonly [string, readonly unknown[]])[]) {
-    const connection = await database.connect('owner');
-    try {
-      // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the tests below.
-      for (const [statement, values] of statements) await connection.query(statement, [...values]);
-    } finally {
-      await connection.end();
-    }
+/** The owner's statements, as the owner may run them. */
+async function owner(statements: readonly (readonly [string, readonly unknown[]])[]) {
+  const connection = await database.connect('owner');
+  try {
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the tests below.
+    for (const [statement, values] of statements) await connection.query(statement, [...values]);
+  } finally {
+    await connection.end();
   }
+}
 
-  /** The platform head row's place, as stored. */
-  const platformHead = async () =>
-    (await database.as('owner').query<{ seq: string }>('select seq::text from platform_controls.audit_head'))[0]?.seq ??
-    '0';
+/** The platform head row's place, as stored. */
+const platformHead = async () =>
+  (await database.as('owner').query<{ seq: string }>('select seq::text from platform_controls.audit_head'))[0]?.seq ??
+  '0';
 
-  /**
-   * The operator pauses (witnessed by W); the owner cuts the pause off with the platform chain's end and points the row
-   * back at the resume. What puts it back.
-   */
-  async function pauseHidden(store: FakeWriteOnceStore) {
-    const before = await platformHead();
-    const shown = await ownerSaves(before);
-    const w = witnessOver(store);
-    witnessWith(w);
-    try {
-      await pauseAll(true);
-      await w.settled([PLATFORM]);
-    } finally {
-      witnessWith(undefined);
-    }
-    const paused = await ownerSaves(before);
-    const [head] = shown.head;
-    const [pause] = shown.pause;
-    await owner([
-      ['delete from platform_controls.operator_signatures where seq > $1', [before]],
-      ['delete from platform_controls.audit_events where seq > $1', [before]],
+/**
+ * The operator pauses (witnessed by W); the owner cuts the pause off with the platform chain's end and points the row
+ * back at the resume. What puts it back.
+ */
+async function pauseHidden(store: FakeWriteOnceStore) {
+  const before = await platformHead();
+  const shown = await ownerSaves(before);
+  const w = witnessOver(store);
+  witnessWith(w);
+  try {
+    await pauseAll(true);
+    await w.settled([PLATFORM]);
+  } finally {
+    witnessWith(undefined);
+  }
+  const paused = await ownerSaves(before);
+  const [head] = shown.head;
+  const [pause] = shown.pause;
+  await owner([
+    ['delete from platform_controls.operator_signatures where seq > $1', [before]],
+    ['delete from platform_controls.audit_events where seq > $1', [before]],
+    [
+      'update platform_controls.audit_head h set seq = r.seq, hash = r.hash, mac = r.mac, mac_key_version = r.mac_key_version from pg_catalog.jsonb_populate_record(null::platform_controls.audit_head, $1::jsonb) r',
+      [head],
+    ],
+    [
+      'update platform_controls.handoff_pause p set paused = r.paused, event_seq = r.event_seq, event_id = r.event_id from pg_catalog.jsonb_populate_record(null::platform_controls.handoff_pause, $1::jsonb) r',
+      [pause],
+    ],
+  ]);
+  return () =>
+    owner([
+      ...paused.events.map(
+        (row) =>
+          [
+            'insert into platform_controls.audit_events select * from pg_catalog.jsonb_populate_record(null::platform_controls.audit_events, $1::jsonb)',
+            [row],
+          ] as const,
+      ),
+      ...paused.signatures.map(
+        (row) =>
+          [
+            'insert into platform_controls.operator_signatures select * from pg_catalog.jsonb_populate_record(null::platform_controls.operator_signatures, $1::jsonb)',
+            [row],
+          ] as const,
+      ),
       [
         'update platform_controls.audit_head h set seq = r.seq, hash = r.hash, mac = r.mac, mac_key_version = r.mac_key_version from pg_catalog.jsonb_populate_record(null::platform_controls.audit_head, $1::jsonb) r',
-        [head],
+        [paused.head[0]],
       ],
       [
         'update platform_controls.handoff_pause p set paused = r.paused, event_seq = r.event_seq, event_id = r.event_id from pg_catalog.jsonb_populate_record(null::platform_controls.handoff_pause, $1::jsonb) r',
-        [pause],
+        [paused.pause[0]],
       ],
     ]);
-    return () =>
-      owner([
-        ...paused.events.map(
-          (row) =>
-            [
-              'insert into platform_controls.audit_events select * from pg_catalog.jsonb_populate_record(null::platform_controls.audit_events, $1::jsonb)',
-              [row],
-            ] as const,
-        ),
-        ...paused.signatures.map(
-          (row) =>
-            [
-              'insert into platform_controls.operator_signatures select * from pg_catalog.jsonb_populate_record(null::platform_controls.operator_signatures, $1::jsonb)',
-              [row],
-            ] as const,
-        ),
-        [
-          'update platform_controls.audit_head h set seq = r.seq, hash = r.hash, mac = r.mac, mac_key_version = r.mac_key_version from pg_catalog.jsonb_populate_record(null::platform_controls.audit_head, $1::jsonb) r',
-          [paused.head[0]],
-        ],
-        [
-          'update platform_controls.handoff_pause p set paused = r.paused, event_seq = r.event_seq, event_id = r.event_id from pg_catalog.jsonb_populate_record(null::platform_controls.handoff_pause, $1::jsonb) r',
-          [paused.pause[0]],
-        ],
-      ]);
-  }
+}
 
+describe('SEC-DB-20 TR-1 (6): the pause hidden for a moment', () => {
   it('hidden through Tx A: the gate finds the platform chain cut below the pause witnessed, and sends nothing', async () => {
     const store = createFakeWriteOnceStore();
     const { w, acting } = await ready();
@@ -1809,5 +1811,328 @@ describe('SEC-DB-20 TR-1 (6): the pause hidden for a moment', () => {
     });
     const submitted = await handOffOnJ(w, j, { witness });
     expect(await outcome(w, request.id, submitted)).toMatchObject({ submitted: 1, request: 'HANDED_OFF', held: [] });
+  });
+});
+
+describe('SEC-DB-20 TR-9 a head the probe released, its cut branch put back after: held by Tx A and the gate', () => {
+  /** The organisation's chain: its newest place, and each event past `after` as a row to put back (JSON text). */
+  async function orgEvents(w: World, after = '0') {
+    const found = { top: '0', rows: [] as string[] };
+    await asOwner(w, async (owner) => {
+      const rows = await owner.query<{ row: string }>(
+        'select pg_catalog.to_jsonb(e)::text as row from audit.events e where e.org_id = $1 and e.seq > $2::bigint order by e.seq',
+        [w.org, after],
+      );
+      const [top] = await owner.query<{ seq: string }>(
+        'select coalesce(pg_catalog.max(seq), 0)::text as seq from audit.events where org_id = $1',
+        [w.org],
+      );
+      found.top = top?.seq ?? '0';
+      found.rows = rows.map(({ row }) => row);
+    });
+    return found;
+  }
+
+  /** The owner's rows put in at their own places, whatever stood there taken out first. */
+  const orgSwappedIn = (w: World, rows: readonly string[]) =>
+    asOwner(w, async (owner) => {
+      for (const row of rows) {
+        await owner.query(
+          'delete from audit.events e using pg_catalog.jsonb_populate_record(null::audit.events, $1::jsonb) r where e.org_id = r.org_id and e.seq = r.seq',
+          [row],
+        );
+        await owner.query(
+          'insert into audit.events select * from pg_catalog.jsonb_populate_record(null::audit.events, $1::jsonb)',
+          [row],
+        );
+      }
+    });
+
+  /** The platform's rows put in at their own places, whatever stood there taken out first. */
+  const platformSwappedIn = (rows: readonly string[]) =>
+    owner(
+      rows.flatMap((row) => [
+        [
+          'delete from platform_controls.audit_events e using pg_catalog.jsonb_populate_record(null::platform_controls.audit_events, $1::jsonb) r where e.seq = r.seq',
+          [row],
+        ],
+        [
+          'insert into platform_controls.audit_events select * from pg_catalog.jsonb_populate_record(null::platform_controls.audit_events, $1::jsonb)',
+          [row],
+        ],
+      ]),
+    );
+
+  /** As the anchor check's probe ends (letGoBelowHighest): every head held above the anchor but the highest released. */
+  const releasedBelowHighest = (j: JobsCopy, each: Chain, heldTo: readonly WitnessedHead[]) => {
+    const anchored = j.anchors.latest(each)?.seq ?? 0n;
+    const [, ...below] = heldTo.filter(({ seq }) => seq > anchored);
+    j.witness.release(each, below);
+  };
+
+  /**
+   * J's probe of the organisation's chain through the anchor check's own path between runs (probeWitnessed, its
+   * letGoBelowHighest releasing into J's witness log): found whole, nothing held.
+   */
+  async function orgProbed(w: World, j: JobsCopy) {
+    const trail = createAuditTrail({ keys, ids });
+    const holds: string[] = [];
+    const check = createAnchorCheck({
+      chains: [],
+      organizations: {
+        list: () => Promise.resolve([w.org]),
+        recorded: () => Promise.resolve([w.org]),
+        probe: (chains, signal, pages) => trail.probeHeads(app, chains, signal, pages),
+        verify: (orgId, anchor, heldTo) => trail.checkFromAnchor(app, orgId, anchor ?? CHAIN_START, undefined, heldTo),
+        hold: (orgId) => {
+          holds.push(orgId);
+          return Promise.resolve();
+        },
+      },
+      keys,
+      clock,
+      logger: testLogger(capture),
+      staleAfterMs: 900_000,
+      deadlineMs: 120_000,
+      anchors: j.anchors,
+      witness: j.witness,
+    });
+    const before = j.witness.pending({ kind: 'organisation', orgId: w.org }).length;
+    await check.probeWitnessed([w.org]);
+    expect(holds).toEqual([]);
+    // Every head but the highest above the anchor released by the check itself.
+    expect(j.witness.pending({ kind: 'organisation', orgId: w.org })).toHaveLength(Math.min(before, 1));
+  }
+
+  /** J's probe of the platform chain, as the anchor check runs it: found whole, its heads released. */
+  async function platformProbed(j: JobsCopy) {
+    const heldTo = j.witness.pending(PLATFORM);
+    expect(await chain.probeWitnessed(app, heldTo)).toBeUndefined();
+    releasedBelowHighest(j, PLATFORM, heldTo);
+  }
+
+  /** A stale web copy's writes on the cut branch, `count` of them: only the last one's head witnessed (W's own). */
+  async function staleOnW(store: FakeWriteOnceStore, count: number, write: () => Promise<unknown>, each: Chain) {
+    for (let made = 1; made <= count; made += 1) {
+      const onW = made === count ? witnessOver(store) : undefined;
+      witnessWith(onW);
+      try {
+        await write();
+        await onW?.settled([each]);
+      } finally {
+        witnessWith(undefined);
+      }
+    }
+  }
+
+  /** A write of the organisation's that holds nothing: as a web copy left on the cut branch would add. */
+  const orgWrite = (w: World) => () =>
+    signed(w, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: OPERATOR,
+        action: 'handoff.held_for_bank',
+        subject: { type: 'handoff_hold', id: ids.next(), version: 1 },
+        details: { hold: 'lane' },
+      }),
+    );
+
+  /** A platform write that pauses nothing. */
+  const platformWrite = () =>
+    createPlatformChain({ keys, ids }).recordAlone(app, {
+      actor: { type: 'system', id: 'api' },
+      action: 'platform.started',
+      details: { configHash: 'b'.repeat(64), release: 'r-test' },
+    });
+
+  /**
+   * The attack (TR-9): W suspends the agent at S, witnessed; the owner cuts the chain back below it; a stale copy writes
+   * three events on the cut branch, the last witnessed (H'). J reads both; the owner swaps the original S back in for
+   * J's probe alone, which finds every head held on the chain and releases S; then puts the cut branch back. J holds
+   * H' alone as pending, S as a compact released entry.
+   */
+  async function stopReleasedThenCut(w: World, j: JobsCopy, store: FakeWriteOnceStore) {
+    const orgChain = { kind: 'organisation', orgId: w.org } as const;
+    const before = (await orgEvents(w)).top;
+    const cut = await savedForCut(w);
+    await suspendOnW(w, store);
+    const stop = await orgEvents(w, before);
+    await cut();
+    await staleOnW(store, 3, orgWrite(w), orgChain);
+    const branch = await orgEvents(w, before);
+    await j.witness.refresh();
+    await orgSwappedIn(w, stop.rows);
+    await orgProbed(w, j);
+    await orgSwappedIn(w, branch.rows.slice(0, stop.rows.length));
+    // The stop released: J's pending holds the cut branch's head alone, which Tx A's walk reaches.
+    expect(j.witness.pending(orgChain).map(({ seq }) => seq)).toEqual([BigInt(branch.top)]);
+    expect(j.witness.fingerprints(orgChain).map(({ seq }) => seq)).toContain(BigInt(stop.top));
+  }
+
+  it('Tx A: the stop released and its cut branch put back: never paid, the alarm at the stop, the organisation held', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const j = await jobsCopy(w, store, new Map(), { readsHeld: false });
+    await stopReleasedThenCut(w, j, store);
+    const submitted = await handOffOnJ(w, j);
+    expect(await outcome(w, request.id, submitted)).toMatchObject({ submitted: 0, request: 'APPROVED', held: [] });
+    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'hold_tampered' }));
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ chain: 'organisation', check: 'witness', reason: 'cut_back' }),
+    );
+    expect(await heldNow(w)).toBe('held');
+  });
+
+  it('the reads held to the digest as well: never paid, the alarm', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const j = await jobsCopy(w, store);
+    await stopReleasedThenCut(w, j, store);
+    const submitted = await handOffOnJ(w, j);
+    expect(await outcome(w, request.id, submitted)).toMatchObject({ submitted: 0, request: 'APPROVED' });
+    expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
+  });
+
+  it('the gate: the stop read and released after Tx A’s commit, its cut put back: sends nothing, the organisation held', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const j = await jobsCopy(w, store);
+    await j.witness.refresh();
+    const before = (await orgEvents(w)).top;
+    const cut = await savedForCut(w);
+    await suspendOnW(w, store);
+    const stop = await orgEvents(w, before);
+    await cut();
+    // Tx A never saw the stop (J's view read before it); J reads it after the commit, and the owner fools its probe.
+    const witness = beforeGateRead(j.witness, async () => {
+      await j.witness.refresh();
+      const branch = await orgEvents(w, before);
+      await orgSwappedIn(w, stop.rows);
+      await orgProbed(w, j);
+      await orgSwappedIn(w, branch.rows.slice(0, stop.rows.length));
+    });
+    const submitted = await handOffOnJ(w, j, { witness });
+    expect(await outcome(w, request.id, submitted)).toEqual({
+      submitted: 0,
+      request: 'HANDED_OFF',
+      transaction: 'SUBMISSION_PENDING',
+      held: ['cut_back'],
+    });
+    expect(await heldNow(w)).toBe('held');
+  });
+
+  /**
+   * The platform's form: the operator pauses at P (witnessed by W); the owner cuts the platform chain back below it and
+   * points the pause row back at the resume. Its `release`: a stale copy writes three platform events, the last
+   * witnessed; J reads them; the owner swaps the pause back in for J's probe, which releases P, then puts the cut branch
+   * back.
+   */
+  async function pauseCut(store: FakeWriteOnceStore) {
+    const before = await platformHead();
+    const shown = await ownerSaves(before);
+    const onW = witnessOver(store);
+    witnessWith(onW);
+    try {
+      await pauseAll(true);
+      await onW.settled([PLATFORM]);
+    } finally {
+      witnessWith(undefined);
+    }
+    const paused = await ownerSaves(before);
+    await owner([
+      ['delete from platform_controls.operator_signatures where seq > $1', [before]],
+      ['delete from platform_controls.audit_events where seq > $1', [before]],
+      [
+        'update platform_controls.audit_head h set seq = r.seq, hash = r.hash, mac = r.mac, mac_key_version = r.mac_key_version from pg_catalog.jsonb_populate_record(null::platform_controls.audit_head, $1::jsonb) r',
+        [shown.head[0]],
+      ],
+      [
+        'update platform_controls.handoff_pause p set paused = r.paused, event_seq = r.event_seq, event_id = r.event_id from pg_catalog.jsonb_populate_record(null::platform_controls.handoff_pause, $1::jsonb) r',
+        [shown.pause[0]],
+      ],
+    ]);
+    return async (j: JobsCopy) => {
+      await staleOnW(store, 3, platformWrite, PLATFORM);
+      const branch = await ownerSaves(before);
+      await j.witness.refresh();
+      await platformSwappedIn(paused.events);
+      await platformProbed(j);
+      await platformSwappedIn(branch.events.slice(0, paused.events.length));
+      expect(j.witness.pending(PLATFORM)).toHaveLength(1);
+      expect(j.witness.fingerprints(PLATFORM).length).toBeGreaterThan(0);
+    };
+  }
+
+  it('the pause walk: the pause released and its cut platform branch put back: never paid, the platform alarm', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const j = await jobsCopy(w, store, new Map(), { readsHeld: false });
+    await j.witness.refresh();
+    await (
+      await pauseCut(store)
+    )(j);
+    const submitted = await handOffOnJ(w, j);
+    expect(await outcome(w, request.id, submitted)).toMatchObject({ submitted: 0, request: 'APPROVED', held: [] });
+    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'pause_tampered' }));
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ chain: 'platform', check: 'witness', reason: 'cut_back' }),
+    );
+  });
+
+  it('the gate: the pause read and released after Tx A’s commit, its cut put back: sends nothing', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const j = await jobsCopy(w, store);
+    await j.witness.refresh();
+    const release = await pauseCut(store);
+    const witness = beforeGateRead(j.witness, () => release(j));
+    const submitted = await handOffOnJ(w, j, { witness });
+    expect(await outcome(w, request.id, submitted)).toMatchObject({
+      submitted: 0,
+      transaction: 'SUBMISSION_PENDING',
+      held: ['platform_cut_back'],
+    });
+    // The platform's cut holds no organisation.
+    expect(await heldNow(w)).toBe('clear');
+  });
+});
+
+describe('SEC-DB-20 TR-18 a `soon` head cut off: Tx A held to it as to a `now` one', () => {
+  it('an agent’s decision witnessed with the next flush, the chain cut back below it: never paid, the alarm, held', async () => {
+    const store = createFakeWriteOnceStore();
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED(), orderReference: 'ORD-SOON' });
+    const j = await jobsCopy(w, store, new Map(), { readsHeld: false });
+    await j.witness.refresh();
+    let cut: () => Promise<void> = () => Promise.resolve();
+    await asOwner(w, async (owner) => {
+      const head = await owner.saveHead();
+      cut = () => asOwner(w, (again) => again.windBack(head));
+    });
+    // The same order asked again on W: denied as a duplicate, its events all `soon` (witness-class.ts), so its head goes
+    // out only with the flush; and it moves no money, nor any row the hand-off reads.
+    const onW = witnessOver(store);
+    witnessWith(onW);
+    try {
+      expect((await ask(acting, w, { amount: ALLOWED(), orderReference: 'ORD-SOON' })).decision).toBe('DENY');
+      expect(store.files.size).toBe(0);
+      await onW.flush();
+    } finally {
+      witnessWith(undefined);
+    }
+    expect(store.files.size).toBe(1);
+    await cut();
+    await j.witness.refresh();
+    const submitted = await handOffOnJ(w, j);
+    expect(await outcome(w, request.id, submitted)).toMatchObject({ submitted: 0, request: 'APPROVED', held: [] });
+    expect(lines('handoff.waiting')).toContainEqual(expect.objectContaining({ why: 'hold_tampered' }));
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ chain: 'organisation', check: 'witness', reason: 'cut_back' }),
+    );
+    expect(await heldNow(w)).toBe('held');
   });
 });

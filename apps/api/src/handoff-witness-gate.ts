@@ -29,7 +29,15 @@ import {
   type PlatformControlsTables,
 } from '@agentx/core/modules/platform-controls';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
-import type { Chain, ChainStep, CheckedPoint, HeadSeen, SignedSeen, WitnessLog } from '@agentx/platform/audit-chain';
+import {
+  type Chain,
+  type ChainStep,
+  type CheckedPoint,
+  hashHolds,
+  type HeadSeen,
+  type SignedSeen,
+  type WitnessLog,
+} from '@agentx/platform/audit-chain';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -96,7 +104,7 @@ export function createHandoffWitnessGate({
   most = MOST_WALKED_WITHIN,
   walks,
 }: {
-  readonly witness: Pick<WitnessLog, 'now' | 'settled' | 'refreshWhole' | 'pending' | 'beyondMemory'>;
+  readonly witness: Pick<WitnessLog, 'now' | 'settled' | 'refreshWhole' | 'pending' | 'heldTo' | 'beyondMemory'>;
   readonly database: Database<AuditTables & PlatformControlsTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
@@ -125,9 +133,10 @@ export function createHandoffWitnessGate({
   ): Promise<Doubt | undefined> => {
     const chain: Chain = { kind: 'organisation', orgId };
     const others: HeadSeen[] = [];
-    for (const seen of witness.pending(chain)) {
+    // Every head held, the compact ones too (TR-9): a stop released on a probe is held to here as at Tx A.
+    for (const seen of witness.heldTo(chain)) {
       if (seen.seq !== head.seq) others.push(seen);
-      else if (!seen.hash.equals(head.hash))
+      else if (!hashHolds(head.hash, seen.hash))
         return { reason: 'cut_back', fork: { chain: 'organisation', seq: seen.seq } };
     }
     const judged = judgeWitnessed(others, org.start, org.walk, 'unjudged');
@@ -143,7 +152,7 @@ export function createHandoffWitnessGate({
 
   /** The platform's witnessed heads against Tx A's walk to `P`, and above it a walk from `P` that must hold no pause. */
   const platformDoubt = async (walked: Walked): Promise<Doubt | undefined> => {
-    const pending = witness.pending(PLATFORM);
+    const pending = witness.heldTo(PLATFORM);
     const judged = judgeWitnessed(pending, walked.start, walked.walk, 'unjudged');
     if (judged.kind === 'cut') return { reason: 'platform_cut_back', fork: { chain: 'platform', seq: judged.seq } };
     if (judged.kind === 'held') return undefined;
@@ -165,6 +174,7 @@ export function createHandoffWitnessGate({
     // Tx A's head out, and a read of the store begun after the commit, at once. Its commit noted it already (`now`,
     // its Put under way): waited for, never a second line; one not noted is noted now.
     const { seq, hash } = head;
+    // Whole heads alone: H_A is this commit's own, never one released yet (a compact entry noted nothing here).
     const noted = witness.pending(chain).some((seen) => seen.seq === seq && seen.hash.equals(hash));
     const out = noted ? witness.settled([chain]) : witness.now(chain, head);
     const [put, read] = await Promise.allSettled([out, witness.refreshWhole()]);

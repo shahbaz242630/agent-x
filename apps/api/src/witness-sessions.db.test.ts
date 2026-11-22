@@ -149,7 +149,7 @@ async function cutWitnessedOnW() {
     epoch: 1,
     alertAfterMs: 60_000,
     mostBytes: 64 * 1024 * 1024,
-    witnessed: (chain) => onJ.pending(chain),
+    witnessed: (chain) => onJ.heldTo(chain),
   });
   await digest.read();
   expect(digest.heads(PLATFORM)?.seen).toBeUndefined();

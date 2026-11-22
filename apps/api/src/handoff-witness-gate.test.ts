@@ -55,9 +55,12 @@ function witnessWith({
   put = () => Promise.resolve(),
   whole = () => Promise.resolve(true),
   beyond = false,
+  released = {},
 }: {
   readonly org?: readonly HeadSeen[];
   readonly platform?: readonly HeadSeen[];
+  /** Compact heads (TR-9: released on a probe's finding), each its place and its hash's first 16 bytes, by chain. */
+  readonly released?: { readonly org?: readonly HeadSeen[]; readonly platform?: readonly HeadSeen[] };
   readonly put?: () => Promise<void>;
   readonly whole?: () => Promise<boolean>;
   readonly beyond?: boolean;
@@ -69,6 +72,10 @@ function witnessWith({
     settled: vi.fn(put),
     refreshWhole: vi.fn(whole),
     pending: vi.fn(pending),
+    heldTo: vi.fn((chain: Chain) => [
+      ...pending(chain),
+      ...((chain.kind === 'platform' ? released.platform : released.org) ?? []).map((head) => ({ ...head, at: 0 })),
+    ]),
     beyondMemory: vi.fn(() => beyond),
   };
 }
@@ -150,6 +157,46 @@ describe('SEC-DB-20 TR-1 F.6 the witness gate before the partner call', () => {
       expect(held).toEqual(['cut_back']);
       expect(forks).toEqual([expect.objectContaining({ chain: 'organisation', check: 'witness', reason: 'cut_back' })]);
     }
+  });
+
+  it('TR-9: compact heads released on a probe are held to as heads, by their first 16 bytes', async () => {
+    const compact = (seq: bigint, fill = Number(seq)) => ({ seq, hash: hash(fill).subarray(0, 16) });
+    // On the path, at H_A's place: by their first bytes, the payment goes.
+    const onPath = await cleared(
+      witnessWith({ released: { org: [compact(4n), compact(8n)], platform: [compact(5n)] } }),
+    );
+    expect(onPath).toEqual({ go: true, held: [], forks: [] });
+    // Another event at a released place, or at H_A's: a fork, held, the organisation held.
+    for (const org of [[compact(4n, 99)], [compact(8n, 99)]]) {
+      const { go, held, forks } = await cleared(witnessWith({ released: { org } }));
+      expect({ go, held }).toEqual({ go: false, held: ['cut_back'] });
+      expect(forks).toEqual([expect.objectContaining({ chain: 'organisation', check: 'witness', reason: 'cut_back' })]);
+    }
+    const platform = await cleared(witnessWith({ released: { platform: [compact(5n, 99)] } }));
+    expect(platform.held).toEqual(['platform_cut_back']);
+    // Below Tx A's stretch (TR-18): nothing to place it on, held unjudged; the organisation's and the platform's.
+    expect(await cleared(witnessWith({ released: { org: [compact(1n)] } }))).toEqual({
+      go: false,
+      held: ['unjudged'],
+      forks: [],
+    });
+    expect((await cleared(witnessWith({ released: { platform: [compact(1n)] } }))).held).toEqual(['unjudged']);
+    // Above Tx A's head: handed to the walk from the head it locked, which compares them by their first bytes.
+    const asked: (readonly HeadSeen[])[] = [];
+    const walks: GateWalks = {
+      ...NO_WALKS,
+      org: (_orgId, _from, heldTo) => {
+        asked.push(heldTo);
+        return Promise.resolve(refused('cut_back', 9n));
+      },
+    };
+    expect((await cleared(witnessWith({ released: { org: [compact(9n)] } }), txA(), { walks })).held).toEqual([
+      'cut_back',
+    ]);
+    expect(asked.flat().map(({ seq, hash: part }) => [seq, part.length])).toEqual([
+      [9n, 16],
+      [8n, 32],
+    ]);
   });
 
   it('a platform head off Tx A’s platform path is the platform cut: held and the alarm, no organisation held', async () => {
