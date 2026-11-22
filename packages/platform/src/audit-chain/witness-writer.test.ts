@@ -72,7 +72,7 @@ const seqs = (heads: readonly { readonly seq: bigint }[]) => heads.map(({ seq })
 const names = (store: Store, folder: string) =>
   [...store.files.keys()].filter((name) => name.startsWith(`e1/${folder}/`));
 
-describe('TR-14 the witness log: every file names its writer', () => {
+describe('SEC-DB-20 TR-14 the witness log: every file names its writer', () => {
   it("opens each file's name with its process's writer ID, which the closing line signs, and every reader takes it", async () => {
     const store = createFakeWriteOnceStore();
     const copy = copyOn(store);
@@ -111,7 +111,7 @@ describe('TR-14 the witness log: every file names its writer', () => {
   });
 });
 
-describe("TR-14 the operator's set-aside list", () => {
+describe("SEC-DB-20 TR-14 the operator's set-aside list", () => {
   it("passes over every heads file a writer set aside named until then, each said by name; another writer's still read", async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };
@@ -205,7 +205,7 @@ describe("TR-14 the operator's set-aside list", () => {
   });
 });
 
-describe('TR-14 a file written in a process’s own name', () => {
+describe('SEC-DB-20 TR-14 a file written in a process’s own name', () => {
   it('is the alarm, naming the writer and the file, and is read as any other: a detector, never a gate', async () => {
     const store = createFakeWriteOnceStore();
     const copy = copyOn(store);
@@ -254,7 +254,7 @@ const headLine = (seq: bigint, fill: number, at: number, w?: string) =>
     ...(w === undefined ? {} : { w }),
   });
 
-describe('TR-14 a set-aside is fail-closed', () => {
+describe('SEC-DB-20 TR-14 a set-aside is fail-closed', () => {
   it('passes over only what the writer named until the set-aside: a head it writes after is read and held, said late', async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };
@@ -279,7 +279,7 @@ describe('TR-14 a set-aside is fail-closed', () => {
   });
 });
 
-describe('TR-14 attribution through snapshots', () => {
+describe('SEC-DB-20 TR-14 attribution through snapshots', () => {
   it("a fork met from a snapshot names each head's own writer, never the leader that kept it; one before TR-14, `snapshot`", async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
@@ -316,7 +316,7 @@ describe('TR-14 attribution through snapshots', () => {
   });
 });
 
-describe('TR-7 review: a start under a set-aside flood', () => {
+describe('SEC-DB-20 TR-7 review: a start under a set-aside flood', () => {
   it('fetches a bounded number, takes no snapshot past them, holds a stop from the day’s heads files, and says so', async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
@@ -353,7 +353,7 @@ describe('TR-7 review: a start under a set-aside flood', () => {
   });
 });
 
-describe('TR-7 review: a start reading set-asides further back for an old snapshot', () => {
+describe('SEC-DB-20 TR-7 review: a start reading set-asides further back for an old snapshot', () => {
   it('takes no snapshot that a set-aside it left unfetched could pass over', async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
@@ -372,7 +372,7 @@ describe('TR-7 review: a start reading set-asides further back for an old snapsh
   });
 });
 
-describe('TR-7 re-review: a start’s set-aside reads, failed or flooded', () => {
+describe('SEC-DB-20 TR-7 re-review: a start’s set-aside reads, failed or flooded', () => {
   it('a fetch that fails mid-way leaves the reach where it was: the retry still finds the set-aside, the snapshot passed over', async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
@@ -419,7 +419,7 @@ describe('TR-7 re-review: a start’s set-aside reads, failed or flooded', () =>
   });
 });
 
-describe('TR-14 set-aside snapshots at a start', () => {
+describe('SEC-DB-20 TR-14 set-aside snapshots at a start', () => {
   it("goes back past a day's of a set-aside leader's snapshots, a quarter hour apart, to an older one, its state whole", async () => {
     const store = createFakeWriteOnceStore();
     const snapshots = createFakeWriteOnceStore();
@@ -505,7 +505,7 @@ describe('TR-14 set-aside snapshots at a start', () => {
   });
 });
 
-describe('TR-14 the set-aside folder read', () => {
+describe('SEC-DB-20 TR-14 the set-aside folder read', () => {
   it('a flood of junk slows no refresh: at most a hundred fetched a pass, said; the rest wait for the next', async () => {
     const store = createFakeWriteOnceStore();
     const reader = copyOn(store);
@@ -590,7 +590,7 @@ async function setAsideFile(store: Store, writer: string, at: number): Promise<s
   return name;
 }
 
-describe('TR-7 D1 lists bounded to the time window', () => {
+describe('SEC-DB-20 TR-7 D1 lists bounded to the time window', () => {
   it('a hundred thousand names dated in 2200 and as many back-dated set-asides cost a start and a refresh a few calls, one line', async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };
@@ -627,7 +627,7 @@ describe('TR-7 D1 lists bounded to the time window', () => {
   });
 });
 
-describe('TR-7 D6 a set-aside flood', () => {
+describe('SEC-DB-20 TR-7 D6 a set-aside flood', () => {
   it('never keeps a real set-aside unread: read oldest first, and names far from when they landed passed over, said', async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };
@@ -666,7 +666,7 @@ describe('TR-7 D6 a set-aside flood', () => {
   });
 });
 
-describe('TR-14 review: a writer set aside twice, snapshots this release, a copy set aside rewriting', () => {
+describe('SEC-DB-20 TR-14 review: a writer set aside twice, snapshots this release, a copy set aside rewriting', () => {
   it("holds a writer's earliest set-aside: a second line for it never passes over more; the command writes no second", async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };

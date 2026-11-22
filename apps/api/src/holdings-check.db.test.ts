@@ -761,7 +761,7 @@ describe('the holdings check (E1)', () => {
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
   });
 
-  it('finds a request deleted with its claim, as the log still holds it, so its order can’t be paid twice unseen', async () => {
+  it('SEC-DB-21 finds a request deleted with its claim, as the log still holds it, so its order can’t be paid twice unseen', async () => {
     const { w, acting } = await ready();
     const { allowed } = await requests(acting, w);
     const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);

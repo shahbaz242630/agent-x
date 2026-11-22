@@ -757,7 +757,7 @@ describe('a message the check can’t take yet waits for the next run', () => {
   });
 });
 
-describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', () => {
+describe('what the front door refuses or can’t place (SEC-PTR-01, SEC-PTR-05, SEC-PTR-06)', () => {
   it('SEC-PTR-05: keeps an unknown reference encrypted, alerts once, and changes nothing', async () => {
     const { w } = await ready();
     const { send } = await door(w);

@@ -438,7 +438,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect(await made(w.org)).toEqual({ requests: 1, months: 0 });
   });
 
-  it('denies what the organisation can’t give, each recorded with its reason', async () => {
+  it('SEC-AG-03 denies what the organisation can’t give, each recorded with its reason', async () => {
     const { w, mandateId, acting } = await ready();
     const unverified = await world();
     const elsewhere = { supplierId: unverified.suppliers[0] ?? '', fundingSourceId: unverified.source };
@@ -688,7 +688,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect(fresh).toMatchObject({ decision: 'ALLOW', status: 'APPROVED' });
   });
 
-  it('SEC-AV-08 refuses with nothing made a currency the deployment doesn’t take, a revoked key and a frozen organisation', async () => {
+  it('SEC-AV-08, SEC-AG-03 refuses with nothing made a currency the deployment doesn’t take, a revoked key and a frozen organisation', async () => {
     const { w, acting } = await ready();
     expect(await ask(acting, asking(w, { amount: money(1_000_000n, 'USD') }))).toEqual(
       refused(422, 'CURRENCY_NOT_ALLOWED'),
@@ -951,7 +951,7 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect(decidedOf(await ask(acting, asking(w), 'again'))).toMatchObject({ decision: 'ALLOW' });
   });
 
-  it("refuses on what it is asked before the supplier's lock: a supplier held takes nothing from the refusal", async () => {
+  it("SEC-AG-03 refuses on what it is asked before the supplier's lock: a supplier held takes nothing from the refusal", async () => {
     const { w, acting } = await ready();
     const holder = await database.connect('admin');
     try {

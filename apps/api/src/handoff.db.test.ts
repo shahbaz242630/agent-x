@@ -705,7 +705,7 @@ describe('authority withdrawn since the approval: denied now, its holdings freed
     ['the agent suspended', 'AGENT_SUSPENDED'],
     // Payee substitution (SEC-PAY-01): its details changed after the approval, never paid on the old decision.
     ['the supplier’s details changed', 'SUPPLIER_NOT_VERIFIED,SUPPLIER_CHANGED'],
-  ] as const)('denies it once %s', async (what, causes) => {
+  ] as const)('SEC-AG-12 denies it once %s', async (what, causes) => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     await STOPS[what](w, await mandateIdOf(w));
@@ -1306,7 +1306,7 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
   });
 });
 
-describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, SEC-PAY-02, decision 3)', () => {
+describe('the hand-off’s own failures and walls (SEC-DP-03, SEC-DP-04, SEC-TEN-09, SEC-PAY-02, decision 3)', () => {
   /** Whether the request is handed off, read past the walls (the hand-off's own transaction is still open). */
   const handedOff = async (requestId: string) =>
     (

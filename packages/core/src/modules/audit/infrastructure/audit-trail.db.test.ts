@@ -572,7 +572,7 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     expect(await problemOf(other)).toEqual({ reason: 'hash', seq: 1n });
   });
 
-  it('a correctly chained event appended with no valid MAC, and the head moved to it', async () => {
+  it('SEC-DB-02 a correctly chained event appended with no valid MAC, and the head moved to it', async () => {
     // The attacker can compute every hash: the format is public. Only the MAC needs the key.
     const [head] = await attacker.query<{ hash: Buffer }>('select hash from audit.heads where org_id = $1', [org]);
     if (head === undefined) throw new Error('The chain has no head');
@@ -1851,7 +1851,7 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       expect(await latest(org)).toEqual({ kind: 'broken', seq: 2n });
     });
 
-    it("a signed event forged with the chain's real hashes but no key, as the newest", async () => {
+    it("SEC-DB-02 a signed event forged with the chain's real hashes but no key, as the newest", async () => {
       const [head] = await attacker.query<{ hash: Buffer }>('select hash from audit.heads where org_id = $1', [org]);
       if (head === undefined) throw new Error('The chain has no head');
       const forged = signed(org, 3, 'ACTIVE');

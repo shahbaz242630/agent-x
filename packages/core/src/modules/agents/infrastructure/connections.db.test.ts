@@ -184,7 +184,7 @@ beforeEach(async () => {
   );
 });
 
-describe(`SEC-OAUTH-01, -07, -08 the connection check (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-01, SEC-OAUTH-07, SEC-OAUTH-08 the connection check (Postgres ${server.version})`, () => {
   it('accepts an access token at its resource, as its agent, with what its token, key and agent all hold', async () => {
     const agent = await newAgent(['requests:read', 'requests:write', 'suppliers:read']);
     const keyId = await connect(agent, { scopes: ['requests:read', 'requests:write', 'suppliers:read'] });
@@ -286,7 +286,7 @@ describe(`SEC-OAUTH-01, -07, -08 the connection check (Postgres ${server.version
   });
 });
 
-describe(`SEC-OAUTH-06, -14 rows tampered with (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-06, SEC-OAUTH-14 rows tampered with (Postgres ${server.version})`, () => {
   it('refuses a token whose row was stretched or widened: its MAC no longer matches', async () => {
     const { accessToken } = await tokens(await connect(await newAgent()));
     const presented = parseConnectionToken(accessToken, 'access');

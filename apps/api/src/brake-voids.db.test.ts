@@ -612,7 +612,7 @@ beforeEach(() => {
   payeeRail = createFakeRail({ clock, ids });
 });
 
-describe('the brakes void their own pending requests in their transaction (C2b)', () => {
+describe('SEC-AG-11 the brakes void their own pending requests in their transaction (C2b)', () => {
   it.each(Object.keys(BRAKES) as Brake[])(
     'voids the waiting and the approved once %s, before its first event: DENIED with its cause, holdings released',
     async (what) => {
@@ -676,7 +676,7 @@ describe('the brakes void their own pending requests in their transaction (C2b)'
     await voidedBefore(w, [approved, waiting], 'MANDATE_NOT_IN_FORCE', await newestSeq(w, 'mandate', mandateId));
   });
 
-  it('voids them when the agent’s pause is made a cancel, with the agent’s cause', async () => {
+  it('SEC-AG-15 voids them when the agent’s pause is made a cancel, with the agent’s cause', async () => {
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);
     await suspended(w, 'pause');

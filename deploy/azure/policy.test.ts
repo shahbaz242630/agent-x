@@ -6135,7 +6135,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(WATCH_ROLE, starting('Microsoft.App/jobs/stop/action')))).toEqual(['job-watch']);
   });
 
-  it("SEC-DB-07 Stage G's mark and checks (AZ3): their own identity, given the owner's, the app's and the backup role's logins for a run alone (S204-b)", () => {
+  it("SEC-OPS-11 Stage G's mark and checks (AZ3): their own identity, given the owner's, the app's and the backup role's logins for a run alone (S204-b)", () => {
     // No deployment gives Stage G's identity a read: none stands between runs.
     const grants = staging.predictedResources
       .filter((resource) => ASSIGNMENTS(resource))

@@ -221,7 +221,7 @@ describe(`suspending a source: the brake, with no step-up (D2-4b, Postgres ${ser
     ['admin', 'cancel'],
     ['approver', 'pause'],
   ] as const)(
-    'is one write by an %s: SUSPENDED, funding nothing, with their choice for its requests: %s',
+    'SEC-AG-15 is one write by an %s: SUSPENDED, funding nothing, with their choice for its requests: %s',
     async (role, choice) => {
       const org = await organization();
       const admin = await member(org, 'admin');

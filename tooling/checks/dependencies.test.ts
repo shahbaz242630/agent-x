@@ -40,7 +40,7 @@ describe('Rule Book §5: production dependencies are reviewed', () => {
     expect(manifests.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('allows only listed packages as production dependencies', () => {
+  it('SEC-DATA-03 allows only listed packages as production dependencies', () => {
     const unlisted = manifests.flatMap(({ file, dependencies }) =>
       externalDependencies(dependencies)
         .filter((name) => !Object.hasOwn(ALLOWED_DEPENDENCIES, name))
