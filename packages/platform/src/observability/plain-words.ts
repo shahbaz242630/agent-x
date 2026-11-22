@@ -890,6 +890,11 @@ export const PLAIN_WORDS = {
     broke: 'Those not reached are still read from the log alone; nothing else changed.',
     next: 'It is tried again in about an hour. If it keeps failing, check the error.',
   },
+  'state_names.witness_stale': {
+    happened: 'Older records were not linked this run: the witness store could not be read whole just before.',
+    broke: 'Nothing: linking waits, so no record is linked without every recent chain head checked.',
+    next: 'It is tried again in about an hour. If it repeats, see the witness read failure lines.',
+  },
   'state_names.run_failed': {
     happened: 'The list of organisations could not be read, so no older records were linked this run.',
     broke: 'Nothing changed; older records are still read from the log alone.',
