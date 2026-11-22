@@ -407,7 +407,7 @@ export interface AnchorCheckOptions {
   /** The witness log (TR-1): the heads each probe and walk is held to, let go once confirmed. None, held to none. */
   readonly witness?:
     | (Pick<WitnessLog, 'pending' | 'prune' | 'refresh' | 'freshAt' | 'beyondMemory'> &
-        Partial<Pick<WitnessLog, 'walkedPast' | 'fingerprints' | 'release'>>)
+        Partial<Pick<WitnessLog, 'walkedPast' | 'fingerprints' | 'release' | 'baseBelow'>>)
     | undefined;
 }
 
@@ -707,17 +707,19 @@ export function createAnchorCheck({
   /**
    * Where a chain's confirming walk starts: where it reached at the last run, where every head below that was checked on
    * it; else afresh from the lowest head (one that came in since below where it reached starts it again). A compact one
-   * lowest (a head released, or a fingerprint: TR-3) gives no whole hash to link from: from the chain's start then.
+   * lowest (a head released, or a fingerprint: TR-3) gives no whole hash to link from: from the highest anchor at or
+   * below it that the log kept as one its compact heads went above (baseBelow), else from the chain's start. A wrong
+   * start can't pass: the walk links every event from it and must end on the anchor's own hash.
    */
-  const walkStart = (key: string, heads: readonly Witnessed[], lowest: Witnessed) => {
-    const saved = confirming.get(key);
+  const walkStart = (chain: Chain, heads: readonly Witnessed[], lowest: Witnessed) => {
+    const saved = confirming.get(keyOf(chain));
     const resumes =
       saved !== undefined &&
       heads.every((head) => head.seq > saved.cursor.seq || saved.checked.some((one) => sameHead(one, head)));
     if (resumes) return { cursor: saved.cursor, checked: [...saved.checked] };
-    const whole = lowest.hash.length === CHAIN_START.hash.length;
+    const base = lowest.hash.length === CHAIN_START.hash.length ? lowest : witness?.baseBelow?.(chain, lowest.seq);
     return {
-      cursor: whole ? { seq: lowest.seq, hash: lowest.hash, macKeyVersion: 0 } : CHAIN_START,
+      cursor: base === undefined ? CHAIN_START : { seq: base.seq, hash: base.hash, macKeyVersion: 0 },
       checked: [] as Witnessed[],
     };
   };
@@ -754,8 +756,9 @@ export function createAnchorCheck({
     const [lowest] = heads;
     if (lowest === undefined) return 'holds';
     if (confirm === undefined) return 'waiting';
-    let { cursor } = walkStart(key, heads, lowest);
-    const { checked } = walkStart(key, heads, lowest);
+    const started = walkStart(chain, heads, lowest);
+    let { cursor } = started;
+    const { checked } = started;
     // Those at the walk's own starting place: its hash, or a fork.
     const start = cursor;
     const atStart = heads.filter((one) => one.seq === start.seq && !checked.some((done) => sameHead(done, one)));

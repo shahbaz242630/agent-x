@@ -52,7 +52,8 @@ function anchorsWith(rebases = new Map<string, Date>(), latest = new Map<string,
     },
     latest: (chain) => {
       const seq = latest.get(name(chain));
-      return seq === undefined ? undefined : { seq };
+      // Its whole hash as the anchors' log keeps it (TR-3: the base a confirming walk starts from).
+      return seq === undefined ? undefined : { seq, hash: hash(Number(seq) + 100) };
     },
   };
 }
@@ -657,6 +658,8 @@ describe('TR-3 the witness log: dates, memory, Puts and replays', () => {
     expect(seqs(log.pending(CHAIN))).toEqual([1n]);
     expect(log.beyondMemory(CHAIN)).toBe(true);
     expect(log.beyondMemory(PLATFORM)).toBe(false);
+    // The anchor its fingerprint went above kept, for a walk confirming it to start from.
+    expect(log.baseBelow(CHAIN, 3n)).toEqual({ seq: 2n, hash: hash(102) });
     // Only the platform's held: it gives way then.
     const alone = witnessOn(undefined, { mostBytes: forHeads(2) });
     for (const seq of [1n, 2n, 3n]) alone.log.soon(PLATFORM, head(seq, 1));
@@ -837,6 +840,48 @@ describe('TR-3 the witness log: dates, memory, Puts and replays', () => {
 });
 
 describe('TR-3 heads released on a probe’s finding', () => {
+  it('keep the anchor they went above, in the snapshot too, as the base a confirming walk starts from; let go with them, or by a rebase', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const rebases = new Map<string, Date>();
+    const latest = new Map([[ORG, 2n]]);
+    const { log } = witnessOn(undefined, { snapshots, leads: true, time });
+    log.useAnchors(anchorsWith(rebases, latest));
+    for (const seq of [3n, 4n, 5n]) log.soon(CHAIN, head(seq, Number(seq)));
+    log.release(CHAIN, [head(3n, 3), head(4n, 4)]);
+    latest.set(ORG, 6n);
+    expect(log.baseBelow(CHAIN, 3n)).toEqual({ seq: 2n, hash: hash(102) });
+    expect(log.baseBelow(CHAIN, 1n)).toBeUndefined();
+    expect(log.baseBelow(OTHER, 9n)).toBeUndefined();
+    await log.refresh();
+    await log.flush();
+    const restarted = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
+    await restarted.log.refresh();
+    expect(restarted.log.baseBelow(CHAIN, 4n)).toEqual({ seq: 2n, hash: hash(102) });
+    // Passed by a walk, the released heads go, and their base with them.
+    restarted.log.walkedPast(CHAIN, 2n, 6n, restarted.log.fingerprints(CHAIN));
+    expect(restarted.log.fingerprints(CHAIN)).toEqual([]);
+    expect(restarted.log.baseBelow(CHAIN, 4n)).toBeUndefined();
+    rebases.set(ORG, new Date(time.held.at + 1));
+    expect(log.baseBelow(CHAIN, 3n)).toBeUndefined();
+  });
+
+  it('a snapshot’s base line with anything else on it spoils the snapshot', async () => {
+    const at = START.getTime() - MINUTE;
+    const base = (more: Record<string, string>) =>
+      JSON.stringify({ c: `organisation:${ORG}`, b: '2', a: 'ab'.repeat(32), ...more, t: new Date(at).toISOString() });
+    const good = createFakeWriteOnceStore();
+    await planted(good.files, 'snapshots', SNAPSHOT, [base({})], { at });
+    const { log, capture } = witnessOn(createFakeWriteOnceStore(), { snapshots: good });
+    await log.refresh();
+    expect(integrity(capture)).toEqual([]);
+    const bad = createFakeWriteOnceStore();
+    await planted(bad.files, 'snapshots', SNAPSHOT, [base({ s: '3' })], { at });
+    const spoiled = witnessOn(createFakeWriteOnceStore(), { snapshots: bad });
+    await spoiled.log.refresh();
+    expect(integrity(spoiled.capture).map(({ reason }) => reason)).toEqual(['spoiled']);
+  });
+
   const forks = (capture: LogCapture) =>
     capture.lines().filter((one) => one.event === 'audit.integrity_failed' && one.reason === 'fork');
 

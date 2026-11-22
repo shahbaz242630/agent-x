@@ -57,7 +57,9 @@
 // link between them, and the owner can put rows back beside a cut branch for just that statement. Every later walk is
 // held to them as to fingerprints (a place holding another event is a fork, the alarm and the hold), and a walk from the
 // anchor that passes them, linked event by event, lets them go (walkedPast). A head noted again at a released place is
-// the same one, or a fork, as with a held head. They take the fingerprints' share; past it, a head stays held.
+// the same one, or a fork, as with a held head. They take the fingerprints' share; past it, a head stays held. With
+// them each chain keeps the anchors (place and whole hash) its compact heads went above (`baseBelow`), in the snapshot
+// too: a walk confirming one that ended at or below a later anchor starts from there, not from the chain's first event.
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import type { WriteOnceStore } from '../storage/write-once.ts';
@@ -99,7 +101,8 @@ export interface ChainWitness {
 /** What the witness log asks of the anchors' log: the rebases it read, and each chain's latest anchor. */
 export interface WitnessAnchors {
   rebasedAfter(chain: Chain, at: Date): boolean;
-  latest(chain: Chain): { readonly seq: bigint } | undefined;
+  /** The chain's latest anchor: its place, and its whole hash where the log keeps it (TR-3: baseBelow). */
+  latest(chain: Chain): { readonly seq: bigint; readonly hash?: Buffer } | undefined;
 }
 
 export interface WitnessLog extends ChainWitness {
@@ -161,6 +164,11 @@ export interface WitnessLog extends ChainWitness {
    * heads' share, the rest stay held.
    */
   release(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void;
+  /**
+   * The highest anchor (its place and whole hash) the chain's compact heads went above, at or below `seq` (TR-3): where
+   * a walk confirming those at or below the anchor starts, its first link checked from it. None kept, none.
+   */
+  baseBelow(chain: Chain, seq: bigint): { readonly seq: bigint; readonly hash: Buffer } | undefined;
   /** The organisation chains holding more than one head, the most first, at most `most`: probed between anchor runs. */
   crowded(most: number): readonly Chain[];
   /** The anchors' log this one goes by, once it is made: none until then, and no head is set aside or let go by it. */
@@ -307,7 +315,8 @@ type HeadLine =
   | { readonly chain: string; readonly head: WitnessedHead }
   | { readonly chain: string; readonly lost: LostMark }
   | { readonly chain: string; readonly print: Compact }
-  | { readonly chain: string; readonly released: Compact };
+  | { readonly chain: string; readonly released: Compact }
+  | { readonly chain: string; readonly base: Compact };
 
 /**
  * A line as its file of `fileAt` gives it: none where it isn't one, or is dated past the file's name beyond the clocks'
@@ -315,11 +324,12 @@ type HeadLine =
  */
 function lineFrom(fields: unknown, fileAt: number): HeadLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
-  const { c, s, h, t, l, f, x, r, ...rest } = fields as Record<string, unknown>;
+  const { c, s, h, t, l, f, x, r, b, a, ...rest } = fields as Record<string, unknown>;
   const dated = timeIn(t)?.getTime();
   if (Object.keys(rest).length > 0 || typeof c !== 'string' || !CHAIN.test(c) || dated === undefined) return undefined;
   if (dated > fileAt + MOST_AHEAD_MS) return undefined;
   const at = Math.min(dated, fileAt);
+  if (b !== undefined || a !== undefined) return baseLine(c, { s, h, l, f, x, r }, b, a, at);
   if (s === undefined && h === undefined) return lostLine(c, l, f, at);
   if (l !== undefined || f !== undefined || typeof s !== 'string' || !SEQ.test(s)) return undefined;
   const seq = BigInt(s);
@@ -336,6 +346,23 @@ function lineFrom(fields: unknown, fileAt: number): HeadLine | undefined {
     ? { chain: c, released: { seq, hash: Buffer.from(r, 'hex'), at } }
     : undefined;
 }
+
+/** A snapshot's anchor its chain's compact heads went above (`b` its place, `a` its whole hash), and nothing else. */
+function baseLine(
+  chain: string,
+  others: Readonly<Record<string, unknown>>,
+  b: unknown,
+  a: unknown,
+  at: number,
+): HeadLine | undefined {
+  if (Object.values(others).some((one) => one !== undefined)) return undefined;
+  if (typeof b !== 'string' || !SEQ.test(b) || typeof a !== 'string' || !HASH.test(a)) return undefined;
+  return { chain, base: { seq: BigInt(b), hash: Buffer.from(a, 'hex'), at } };
+}
+
+/** A snapshot's line for an anchor a chain's compact heads went above. */
+const baseText = (chain: string, { seq, hash, at }: Compact): string =>
+  JSON.stringify({ c: chain, b: seq.toString(), a: hash.toString('hex'), t: new Date(at).toISOString() });
 
 /** A snapshot's mark of heads let go for memory: the lowest where it says it, else none known (a rebase alone then). */
 function lostLine(chain: string, l: unknown, f: unknown, at: number): HeadLine | undefined {
@@ -452,6 +479,8 @@ export function createWitnessLog({
   const released = new Map<string, Packed>();
   // Compact heads of both kinds, in all.
   let printCount = 0;
+  // Each chain's anchors its compact heads went above (place, whole hash, when kept): where a confirming walk starts.
+  const bases = new Map<string, Compact[]>();
   let lostSaidAt: number | undefined;
 
   // Heads waiting for their Put, and each chain's `now` heads not yet written.
@@ -548,6 +577,7 @@ export function createWitnessLog({
       const at = now().getTime();
       if (lowest !== undefined) {
         lostOne(name, lowest.seq, at);
+        keepBase(name);
         printOne(name, { seq: lowest.seq, hash: lowest.hash, at });
       }
       if (lostSaidAt === undefined || at - lostSaidAt >= SAY_EVERY_MS) {
@@ -585,6 +615,30 @@ export function createWitnessLog({
   const dropPrints = (name: string): void => {
     printCount -= prints.get(name)?.count ?? 0;
     prints.delete(name);
+    tidyBases(name);
+  };
+
+  /** The chain's latest anchor kept as one its compact heads went above, where the anchors' log gives its whole hash. */
+  const keepBase = (name: string): void => {
+    const anchor = anchors?.latest(chainOfName(name));
+    if (anchor?.hash === undefined) return;
+    const kept = bases.get(name) ?? [];
+    if (kept.some(({ seq, hash }) => seq === anchor.seq && hash.equals(anchor.hash ?? hash))) return;
+    bases.set(name, [...kept, { seq: anchor.seq, hash: Buffer.from(anchor.hash), at: now().getTime() }]);
+    changedSinceSnapshot = true;
+  };
+
+  /** A chain's bases let go once it holds no compact head. */
+  const tidyBases = (name: string): void => {
+    if (!prints.has(name) && !released.has(name)) bases.delete(name);
+  };
+
+  /** A chain's bases that still stand: those kept before a rebase of it let go. */
+  const basesOf = (name: string): Compact[] => {
+    const list = bases.get(name) ?? [];
+    const kept = list.filter(({ at }) => anchors?.rebasedAfter(chainOfName(name), new Date(at)) !== true);
+    if (kept.length !== list.length) bases.set(name, kept);
+    return kept;
   };
 
   /** A chain's fingerprints, each its place and its hash's first bytes. */
@@ -597,6 +651,7 @@ export function createWitnessLog({
     for (const one of list) pack = packIn(pack, one);
     if (pack === undefined) released.delete(name);
     else released.set(name, pack);
+    tidyBases(name);
     changedSinceSnapshot = true;
   };
 
@@ -850,26 +905,34 @@ export function createWitnessLog({
     ) {
       return false;
     }
+    // A snapshot's released heads gathered by chain, each chain's packed once at the end.
+    const releasedRead = new Map<string, Compact[]>();
     for await (const fields of bodyLines(got)) {
       const line = lineFrom(fields, at);
       if (line === undefined) continue;
       if ('head' in line) {
         if (keep(line.chain, line.head)) gained.add(line.chain);
       } else if (kind === SNAPSHOT_FILE) {
-        snapshotLine(line);
+        snapshotLine(line, releasedRead);
       }
     }
+    for (const [name, list] of releasedRead) setReleased(name, [...unpacked(released.get(name)), ...list]);
     return true;
   };
 
   /**
-   * A snapshot's line other than a head: a mark of heads let go, a fingerprint, or a head released. A heads file says
-   * only what was written, so these come from a snapshot alone.
+   * A snapshot's line other than a head: a mark of heads let go, a fingerprint, a head released (gathered into
+   * `releasedRead`), or an anchor compact heads went above. A heads file says only what was written, so these come from
+   * a snapshot alone.
    */
-  const snapshotLine = (line: Exclude<HeadLine, { readonly head: WitnessedHead }>): void => {
+  const snapshotLine = (
+    line: Exclude<HeadLine, { readonly head: WitnessedHead }>,
+    releasedRead: Map<string, Compact[]>,
+  ): void => {
     if ('lost' in line) lostRead(line.chain, line.lost);
     else if ('print' in line) printOne(line.chain, line.print);
-    else setReleased(line.chain, [...unpacked(released.get(line.chain)), line.released]);
+    else if ('base' in line) bases.set(line.chain, [...(bases.get(line.chain) ?? []), line.base]);
+    else releasedRead.set(line.chain, [...(releasedRead.get(line.chain) ?? []), line.released]);
   };
 
   /** Every well-named file of a folder, newest first; a name dated past the clock the alarm, passed over. */
@@ -1008,6 +1071,7 @@ export function createWitnessLog({
     for (const name of [...released.keys()]) {
       for (const one of releasedOf(name)) lines.push(compactText(name, 'r', one));
     }
+    for (const name of [...bases.keys()]) for (const base of basesOf(name)) lines.push(baseText(name, base));
     return lines;
   };
 
@@ -1114,6 +1178,12 @@ export function createWitnessLog({
       const name = nameOf(chain);
       return [...(beyond(name) ? printsOf(name) : []), ...releasedOf(name)].map(({ seq, hash }) => ({ seq, hash }));
     },
+    baseBelow(chain: Chain, seq: bigint): { readonly seq: bigint; readonly hash: Buffer } | undefined {
+      let best: Compact | undefined;
+      for (const base of basesOf(nameOf(chain)))
+        if (base.seq <= seq && (best === undefined || base.seq > best.seq)) best = base;
+      return best === undefined ? undefined : { seq: best.seq, hash: best.hash };
+    },
     release(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void {
       const name = nameOf(chain);
       const list = held.get(name);
@@ -1122,6 +1192,7 @@ export function createWitnessLog({
       const room = Math.max(0, mostPrints - printCount);
       const leaving = list.filter((one) => going.has(writtenKey(name, one))).slice(0, room);
       if (leaving.length === 0) return;
+      keepBase(name);
       setReleased(name, [...releasedOf(name), ...leaving.map(({ seq, hash, at }) => ({ seq, hash, at }))]);
       setList(
         name,

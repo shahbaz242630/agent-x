@@ -74,6 +74,8 @@ function withWitness({
   const toldAsked: bigint[][] = [];
   // Each chain's heads released on a probe's finding, as the log hands them to a walk.
   const releasedHeads = new Map<string, { seq: bigint; hash: Buffer }[]>();
+  // The anchor each chain's compact heads went above, as the log keeps it: where a confirming walk starts.
+  const bases = new Map<string, { seq: bigint; hash: Buffer }>();
   const clock = new FixedClock(AT);
   const nameOf = (chain: Chain) => (chain.kind === 'platform' ? 'platform' : chain.orgId);
   const organizations: OrganisationChains = {
@@ -142,6 +144,10 @@ function withWitness({
         if (mark !== undefined && all && from < mark.low && to >= mark.high) lost.delete(nameOf(chain));
         return lost.has(nameOf(chain));
       },
+      baseBelow: (chain, seq) => {
+        const base = bases.get(nameOf(chain));
+        return base !== undefined && base.seq <= seq ? base : undefined;
+      },
       fingerprints: (chain) => [
         ...(lost.has(nameOf(chain)) ? (prints.get(nameOf(chain)) ?? []) : []),
         ...(releasedHeads.get(nameOf(chain)) ?? []),
@@ -167,6 +173,7 @@ function withWitness({
     toldAsked,
     released,
     releasedHeads,
+    bases,
     clock,
     anchors,
     alarms,
@@ -522,6 +529,21 @@ describe('TR-1 the anchor check held to the witness log', () => {
       expect.objectContaining({ level: 'error', event: 'audit.witness_head_unconfirmed', orgId: ORG, heads: 1 }),
     );
     expect(waiting.toldAsked).not.toContainEqual([4n]);
+  });
+
+  it('TR-3: the walk confirming a compact head starts from the anchor the log kept it went above, not the chain’s first event; one kept above it, never', async () => {
+    const run = anchoredElsewhere(walkingTo(() => true));
+    run.releasedHeads.set(ORG, [{ seq: 4n, hash: Buffer.alloc(16, 4) }]);
+    run.bases.set(ORG, point(2n));
+    await run.check.run();
+    expect(run.steps.filter((step) => step.startsWith(`confirm ${ORG}`))).toEqual([`confirm ${ORG} 2`]);
+    expect(run.toldAsked).toContainEqual([4n]);
+    // A base above the lowest compact head is no start for it: from the chain's start.
+    const above = anchoredElsewhere(walkingTo(() => true));
+    above.releasedHeads.set(ORG, [{ seq: 4n, hash: Buffer.alloc(16, 4) }]);
+    above.bases.set(ORG, point(5n));
+    await above.check.run();
+    expect(above.steps.filter((step) => step.startsWith(`confirm ${ORG}`))).toEqual([`confirm ${ORG} 0`]);
   });
 
   it('one walk a chain, from its lowest held head, checks every other head on the way: a place holding another event is the alarm', async () => {
