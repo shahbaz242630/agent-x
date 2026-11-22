@@ -4,10 +4,10 @@ import { join } from 'node:path';
 
 import { LONGEST_ABSOLUTE_SECONDS } from '@agentx/core/modules/identity';
 import { APPROVAL_HORIZON_MS } from '@agentx/core/modules/spend-requests';
-import { signAnchor, subjectKey } from '@agentx/platform/audit-chain';
+import { createWitnessLog, signAnchor, subjectKey } from '@agentx/platform/audit-chain';
 import type { Config } from '@agentx/platform/config';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { LogCapture, testLogger } from '@agentx/testing';
+import { createFakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { anchorLogOf, anchorsKeptOf } from './anchor-store.ts';
@@ -126,5 +126,33 @@ describe("where the chains' anchors are kept (PL-58)", () => {
     time.at = AT.getTime() + APPROVAL_HORIZON_MS + DAY + 3_600_000;
     kept.digest.record(chain, new Map(), new Date(time.at));
     expect(kept.digest.latest(chain, 'spend_request', REQUEST)).toBeUndefined();
+  });
+
+  it('SEC-DB-20 TR-9: its digest holds each read to the witness log’s whole held set, a head released on a probe’s finding too', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'anchors-'));
+    folders.push(directory);
+    const witness = createWitnessLog({
+      store: createFakeWriteOnceStore().store,
+      keys,
+      logger: testLogger(),
+      now: () => AT,
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    const kept = anchorsKeptOf(configWith({ directory, container: null }, 2), { ...services, witness });
+    if (kept === undefined) throw new Error('A folder is named');
+    await kept.log.read();
+    await kept.digest.read();
+    const chain = { kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000001' } as const;
+    const stop = { seq: 4n, hash: Buffer.alloc(32, 4) };
+    const higher = { seq: 6n, hash: Buffer.alloc(32, 6) };
+    witness.soon(chain, stop);
+    witness.soon(chain, higher);
+    // An anchor below both, kept whole, as the probe releases above it (this folder's log holds none).
+    witness.useAnchors({ rebasedAfter: () => false, latest: () => ({ seq: 2n, hash: Buffer.alloc(32, 2) }) });
+    witness.release(chain, [stop]);
+    expect(witness.pending(chain)).toEqual([expect.objectContaining(higher)]);
+    expect(kept.digest.heads(chain)?.heldTo).toEqual([higher, { seq: 4n, hash: stop.hash.subarray(0, 16) }]);
   });
 });
