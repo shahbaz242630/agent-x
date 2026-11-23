@@ -213,7 +213,7 @@ describe('an admin sees their members by name (S212 F3, decision 27)', () => {
     as('viewer');
     open('/more/members');
     expect(await screen.findByRole('link', { name: 'Approver' })).toBeDefined();
-    expect(screen.getByText(/Names and email addresses stay with your sign-in service/)).toBeDefined();
+    expect(screen.getByText(/Names and email addresses are shown to admins only/)).toBeDefined();
     expect(screen.queryByText(/by name, role and Agent X ID/)).toBeNull();
   });
 });
