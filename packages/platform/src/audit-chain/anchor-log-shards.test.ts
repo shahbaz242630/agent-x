@@ -1149,34 +1149,39 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       expect([...fake.files.keys()].filter((name) => name.includes('/changes/'))).toHaveLength(1);
     });
 
-    it('more than a list’s worth carried: several lists, each within a reader’s bound, and no alarm', async () => {
-      const fake = movedStore({ done: true });
-      const { log, alarms } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
-      await log.read();
-      const other = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
-      await other.log.read();
-      fake.instead.put = (name, bytes) =>
-        name.includes('/changes/') ? Promise.reject(new Error('the store is away')) : fake.real.put(name, bytes);
-      // Four writes of a file in most shards, every list failing: over 600 names carried.
-      for (let write = 0; write < 4; write += 1) {
-        for (let index = 0; index < 400; index += 1) log.keep(anchorAt(organisation(1000 + write * 400 + index), 1n));
+    // Under 1 s alone; a whole-suite run on a loaded machine took it past the 5 s default (S212).
+    it(
+      'more than a list’s worth carried: several lists, each within a reader’s bound, and no alarm',
+      { timeout: 30_000 },
+      async () => {
+        const fake = movedStore({ done: true });
+        const { log, alarms } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+        await log.read();
+        const other = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+        await other.log.read();
+        fake.instead.put = (name, bytes) =>
+          name.includes('/changes/') ? Promise.reject(new Error('the store is away')) : fake.real.put(name, bytes);
+        // Four writes of a file in most shards, every list failing: over 600 names carried.
+        for (let write = 0; write < 4; write += 1) {
+          for (let index = 0; index < 400; index += 1) log.keep(anchorAt(organisation(1000 + write * 400 + index), 1n));
+          await log.flush();
+        }
+        delete fake.instead.put;
         await log.flush();
-      }
-      delete fake.instead.put;
-      await log.flush();
-      const lists = [...fake.files.keys()].filter((name) => name.includes('/changes/'));
-      const named = lists.map((name) => (linesOf(fake.files.get(name))[0]?.files as unknown[]).length);
-      expect(named.toSorted((one, other) => other - one)[0]).toBeLessThanOrEqual(256);
-      expect(named.reduce((one, other) => one + other, 0)).toBe(
-        shardFiles(fake).filter((name) => SHARD_FILE_NAME.test(name)).length,
-      );
-      await other.log.read();
-      expect(other.alarms()).toEqual([]);
-      expect(alarms()).toEqual([]);
-      expect(named.reduce((one, other) => one + other, 0)).toBeGreaterThan(600);
-      expect(lists.length).toBeGreaterThanOrEqual(3);
-      expect(other.log.organisations()).toHaveLength(1600);
-    });
+        const lists = [...fake.files.keys()].filter((name) => name.includes('/changes/'));
+        const named = lists.map((name) => (linesOf(fake.files.get(name))[0]?.files as unknown[]).length);
+        expect(named.toSorted((one, other) => other - one)[0]).toBeLessThanOrEqual(256);
+        expect(named.reduce((one, other) => one + other, 0)).toBe(
+          shardFiles(fake).filter((name) => SHARD_FILE_NAME.test(name)).length,
+        );
+        await other.log.read();
+        expect(other.alarms()).toEqual([]);
+        expect(alarms()).toEqual([]);
+        expect(named.reduce((one, other) => one + other, 0)).toBeGreaterThan(600);
+        expect(lists.length).toBeGreaterThanOrEqual(3);
+        expect(other.log.organisations()).toHaveLength(1600);
+      },
+    );
 
     it('a forged list named minutes ahead hides no real list after it (review probe)', async () => {
       const { fake, log, alarms } = await readOnce();
