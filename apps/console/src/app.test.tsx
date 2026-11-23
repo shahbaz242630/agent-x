@@ -85,12 +85,16 @@ describe('the console’s frame (6A1)', () => {
     window.history.pushState({}, '', '/');
   });
 
-  it('E6-P1 says no late sign-in on the sign-in page without the query', async () => {
+  it('E6-P1 says no late sign-in on the sign-in page without the query, and keeps its address as written', async () => {
     answers = { 'GET /v1/auth/session': { status: 401, body: { error: { code: 'UNAUTHENTICATED' } } } };
-    window.history.pushState({}, '', '/');
-    open('/');
-    expect(await screen.findByRole('button', { name: 'Sign in' })).toBeDefined();
+    window.history.pushState({}, '', '/payments?q=a%20b');
+    open('/payments?q=a%20b');
+    await userEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
     expect(screen.queryByText(/took too long/)).toBeNull();
+    expect(goTo).toHaveBeenCalledWith(
+      `/v1/auth/sign-in?${new URLSearchParams({ returnTo: '/payments?q=a%20b' }).toString()}`,
+    );
+    window.history.pushState({}, '', '/');
   });
 
   it('E6-P1 tells a signed-in person their late step-up didn’t count, and Close cleans the address', async () => {

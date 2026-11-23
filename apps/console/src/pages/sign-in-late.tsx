@@ -8,16 +8,18 @@ import { t } from '../text.ts';
 /** The query a sign-in that found nothing waiting at its way back comes home with (sign-in.ts, E6-P1). */
 export const SIGN_IN_LATE = 'signInLate';
 
+/** Whether the address says a sign-in came back late. */
+export const cameBackLate = (search: string): boolean => new URLSearchParams(search).has(SIGN_IN_LATE);
+
 /** The address without it: what a sign-in started from here comes back to. */
 export function withoutSignInLate(pathname: string, search: string): string {
+  // Untouched without it: rebuilding would turn `%20` into `+`, which a return path may not hold.
+  if (!cameBackLate(search)) return pathname + search;
   const query = new URLSearchParams(search);
   query.delete(SIGN_IN_LATE);
   const rest = query.toString();
   return rest === '' ? pathname : `${pathname}?${rest}`;
 }
-
-/** Whether the address says a sign-in came back late. */
-export const cameBackLate = (search: string): boolean => new URLSearchParams(search).has(SIGN_IN_LATE);
 
 /** Signed in: says the sign-in or step-up came back too late, so nothing changed, and how to carry on. */
 export function SignInLate() {
