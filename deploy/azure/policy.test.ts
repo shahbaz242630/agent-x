@@ -3272,6 +3272,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
           'evidence-store',
         ]);
       }
+      // A condition naming an action the witness role doesn't hold: Azure refused it at S212's first foundation
+      // (InvalidRoleAssignmentCondition on blobs/write), so the policy says so first, by name.
+      expect(WITNESS_CONDITIONS.app).not.toContain('blobs/write');
+      expect(WITNESS_CONDITIONS.operator).not.toContain('blobs/write');
+      const naming = changed(API_WRITES, (found) => {
+        const properties = inside(found, 'properties');
+        properties.condition = `(${String(properties.condition)} AND !(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'}))`;
+      });
+      expect(policyProblems(naming, STAGING).map((one) => one.message)).toContainEqual(
+        expect.stringContaining("which the witness role doesn't hold"),
+      );
       // The operator's made an app's (which may add heads under heads/ alone), or dropped: refused.
       expect(
         brokenRules(

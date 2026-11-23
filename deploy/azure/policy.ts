@@ -2809,9 +2809,11 @@ const evidenceStore: Check = (snapshot, expected, add) => {
 /** A blob's path as a role assignment's condition names it (modules/evidence.bicep `blobPath`). */
 const BLOB_PATH = '@Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]';
 
-/** Any request that adds or writes a blob (modules/evidence.bicep `adds`): a condition's rule covers these alone. */
-const ADDS =
-  "!(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'}) AND !(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'})";
+/**
+ * Any request that adds a blob (modules/evidence.bicep `adds`), the witness role's one way to write: Azure refuses a
+ * condition naming an action the role doesn't hold, and WITNESS_ACTIONS keeps write out of the role.
+ */
+const ADDS = "!(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'})";
 
 /**
  * What the witness role may add on the witness container (TR-20), as modules/evidence.bicep writes each condition: an app
@@ -2822,6 +2824,17 @@ export const WITNESS_CONDITIONS = {
   app: `((${ADDS}) OR (${BLOB_PATH} StringLike 'e*/heads/*' AND ${BLOB_PATH} StringNotLike '*/set-aside/*' AND ${BLOB_PATH} StringNotLike '*/operator/*'))`,
   operator: `((${ADDS}) OR ((${BLOB_PATH} StringLike 'e*/operator/*' OR ${BLOB_PATH} StringLike 'e*/set-aside/*') AND ${BLOB_PATH} StringNotLike '*/heads/*'))`,
 } as const;
+
+/**
+ * The actions a witness assignment's condition names that its role doesn't hold. Azure refuses such a condition at
+ * deploy, never in a snapshot or a validate (InvalidRoleAssignmentCondition, S212's first foundation): caught here first.
+ */
+function actionsNotHeld(condition: unknown): string[] {
+  const text = typeof condition === 'string' ? condition : '';
+  return [...text.matchAll(/ActionMatches\{'([^']+)'\}/g)]
+    .map(([, action]) => action ?? '')
+    .filter((action) => !(WITNESS_ACTIONS as readonly string[]).includes(action));
+}
 
 /** Each witness role assignment on the witness container carries its workload's condition exactly (TR-20). */
 function witnessConditionProblems(
@@ -2836,6 +2849,12 @@ function witnessConditionProblems(
     const identity = principalOf(snapshot, assignment);
     const operator = identity !== undefined && workloadOf(identity.name) === 'operator';
     const wanted = operator ? WITNESS_CONDITIONS.operator : WITNESS_CONDITIONS.app;
+    for (const action of actionsNotHeld(at(assignment.properties, 'condition'))) {
+      problem(
+        assignment.name,
+        `names ${action} in its condition, which the witness role doesn't hold: Azure refuses it at deploy`,
+      );
+    }
     if (at(assignment.properties, 'condition') !== wanted || at(assignment.properties, 'conditionVersion') !== '2.0') {
       problem(
         assignment.name,
