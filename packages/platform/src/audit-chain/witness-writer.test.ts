@@ -287,7 +287,7 @@ describe('SEC-DB-20 TR-14 a file written in a process’s own name', () => {
 async function plant(
   store: Store,
   folder: string,
-  kind: { readonly label: string; readonly purpose: 'audit-anchor' },
+  kind: { readonly label: string; readonly purpose: 'audit-anchor' | 'witness-snapshot' },
   lines: readonly string[],
   at: number,
   writer?: string,
@@ -298,7 +298,7 @@ async function plant(
 }
 
 const HEADS = { label: 'audit-witness-file', purpose: 'audit-anchor' } as const;
-const SNAPSHOT = { label: 'audit-witness-snapshot', purpose: 'audit-anchor' } as const;
+const SNAPSHOT = { label: 'audit-witness-snapshot', purpose: 'witness-snapshot' } as const;
 const headLine = (seq: bigint, fill: number, at: number, w?: string) =>
   JSON.stringify({
     c: `organisation:${ORG}`,

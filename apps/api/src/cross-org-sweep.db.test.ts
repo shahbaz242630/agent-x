@@ -33,7 +33,7 @@ import { createOutbox } from '@agentx/core/modules/notifications';
 import { challengeOf, type OauthTables } from '@agentx/core/modules/oauth';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
-import { API_PURPOSES, PURPOSES } from '@agentx/platform/keys';
+import { PURPOSES, WEB_PURPOSES } from '@agentx/platform/keys';
 import type { Output } from '@agentx/platform/observability';
 import {
   createTestDatabase,
@@ -610,9 +610,10 @@ beforeAll(async () => {
     { ...database.connection('operator'), maxConnections: 2 },
     testLogger(),
   );
-  // The API's keys, each the same as the worlds' own (mandate-world's `keys`), so it believes what they sign.
+  // The API's keys, each the same as the worlds' own (mandate-world's `keys`), so it believes what they sign; a `web`
+  // copy's, without the jobs' own (TR-20).
   keyFolder = mkdtempSync(path.join(tmpdir(), 'agentx-sweep-keys-'));
-  for (const purpose of API_PURPOSES) {
+  for (const purpose of WEB_PURPOSES) {
     const material = Buffer.alloc(32, PURPOSES.indexOf(purpose) + 1).toString('base64url');
     writeFileSync(path.join(keyFolder, `key-${purpose}-v1`), `${material}\n`);
   }

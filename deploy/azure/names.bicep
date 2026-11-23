@@ -81,11 +81,30 @@ var restoreKeys = ['key-audit-mac-v']
 @export()
 func restoreHolds(key string) bool => length(filter(restoreKeys, prefix => startsWith(key, prefix))) > 0
 
-// Each operator-only key's public half, a secret of its own the API reads
+// The keys only the copy holding the jobs holds (TR-20): the witness
+// snapshots' signing key. A `web` copy reads its public half instead
+// (jobsHalves), so a copy broken into can't sign a snapshot.
+@export()
+var jobsOnlyKeys = ['key-witness-snapshot-v']
+
+// Whether only the copy holding the jobs holds this key.
+@export()
+func jobsOnly(key string) bool => length(filter(jobsOnlyKeys, prefix => startsWith(key, prefix))) > 0
+
+// Each operator-only and jobs-only key's public half, a secret of its own
 // (`public-<purpose>-v<version>`), made by the deploy tool from the same value
 // as its key and created once with it (deploy/azure/app-keys.ts).
 @export()
-var publicHalves = map(filter(appKeys, key => operatorOnly(key)), key => 'public-${substring(key, 4)}')
+var publicHalves = map(filter(appKeys, key => operatorOnly(key) || jobsOnly(key)), key => 'public-${substring(key, 4)}')
+
+// The operator-only keys' halves, which every copy of the API, its jobs and the
+// chain repair read (PL-57, E11).
+@export()
+var operatorHalves = map(filter(appKeys, key => operatorOnly(key)), key => 'public-${substring(key, 4)}')
+
+// The jobs-only keys' halves, which `web` copies alone read (TR-20).
+@export()
+var jobsHalves = map(filter(appKeys, key => jobsOnly(key)), key => 'public-${substring(key, 4)}')
 
 @export()
 @description('The environment\'s three letters, for the names Azure keeps short.')

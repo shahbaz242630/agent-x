@@ -1,4 +1,5 @@
 [
+  "key-witness-snapshot-v1",
   "key-session-mac-v1",
   "key-audit-rebase-v1",
   "key-operator-signing-v1",

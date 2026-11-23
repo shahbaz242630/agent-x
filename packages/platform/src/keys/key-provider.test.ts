@@ -403,7 +403,7 @@ describe('the keys stay inside the provider (ADR-011 §2)', () => {
       .filter((entry) => entry.versions.some((version) => version.publicKey !== undefined))
       .map((entry) => entry.purpose);
 
-    expect(withPublicKey).toEqual(['audit-anchor', 'operator-signing', 'audit-rebase']);
+    expect(withPublicKey).toEqual(['audit-anchor', 'operator-signing', 'audit-rebase', 'witness-snapshot']);
   });
 
   it("holds its own copy, so clearing the caller's bytes afterwards changes nothing", () => {

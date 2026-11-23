@@ -1,7 +1,8 @@
 // Where the witness log (TR-1, @agentx/platform/audit-chain's witness-log.ts) keeps every copy's chain heads, as the
 // config sets it up: the heads' write-once container on Azure as the process's own managed identity and the leader's
 // snapshots' apart, or local folders in development and test. Every copy of the API, a web copy too, adds its heads and
-// reads the others'; only the copy leading the jobs writes snapshots (and only it is given a role that may).
+// reads the others'; only the copy leading the jobs writes snapshots (and only it is given a role that may, and holds
+// the `witness-snapshot` key they are signed with: TR-20). A `web` copy is never given a way to write one.
 //
 // With no heads' store named, there is no witness log: every write and read goes on as before it. Production never
 // gets here (its config refuses to start); staging says so as the error line `audit.witness_store_not_set` (code can
@@ -111,7 +112,8 @@ export function witnessOf(
     logger: config.role === 'web' ? webCopyLogger(logger) : logger,
     now: () => clock.now(),
     epoch: config.audit.anchorEpoch,
-    writes: leading,
+    // A `web` copy holds no snapshot key (TR-20): it never tries to write one, whatever it is told.
+    writes: config.role === 'web' ? undefined : leading,
     // A web copy checks no chain: it lets a head go once the jobs copy, which confirms every head, anchored past it.
     dropsAtAnchor: config.role === 'web',
     // As the anchor check's own stale limit: what the store may fail before that is the alert.

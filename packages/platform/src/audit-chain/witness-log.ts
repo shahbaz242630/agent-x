@@ -12,10 +12,17 @@
 //   e<epoch>/operator/<inverted-ms>-<id>   the operator's command, signed with its own `operator-signing` key, which
 //                                         is all it holds (the anchors' key is the API's alone)
 //   e<epoch>/snapshots/<inverted-ms>-<id>  hourly, every head held, in a container of its own (`snapshots`) that only
-//                                         the jobs copy leading writes, and only while its reads are whole (TR-7 D2)
-// A file is taken only under the key its folder allows: a web copy holds the anchors' key, so a snapshot it could sign
-// would let it leave out a real head; snapshots are read from their own container alone, which no web copy can add to,
-// and a heads file can say only what was written, never what wasn't. A spoiled file is the alarm, and counts nothing.
+//                                         the jobs copy leading writes, and only while its reads are whole (TR-7 D2),
+//                                         signed with the `witness-snapshot` key, which only the copy holding the jobs
+//                                         holds (TR-20: a web copy checks with its public half alone)
+// A file is taken only under the key its folder allows: a snapshot any copy could sign would let it leave out a real
+// head, so a web copy holds neither a snapshot's key nor a role that may add one to their container, and beside the
+// heads it may add files under heads/ alone (deploy/azure/modules/evidence.bicep: its role's condition there, so never
+// in set-aside/ or operator/); a heads file can say only what was written, never what wasn't. A spoiled file is the
+// alarm, and counts nothing.
+// Snapshots written before TR-20 were signed with `audit-anchor`, every copy's key: one is still taken where the store
+// says it landed (its Creation-Time, never the writer's word) before LEGACY_SNAPSHOTS_BEFORE, so the first start of
+// the build that brings the new key reads the last snapshot its old build wrote; one landing after is spoiled.
 // A name dated past the clock is passed over, and the alarm once a pass with a count (TR-7 D1: a copy broken into can
 // name a million files in 2200; each a line would spend the logs' cap). Every list is bounded to the time it reads, by
 // name starts (signed-files.ts: namesIn), so names dated more than an hour past the clock (or as far as the read looks
@@ -290,7 +297,18 @@ export type WitnessSigner = 'app' | 'operator';
 
 const HEADS_FILE: FileKind = { label: 'audit-witness-file', purpose: 'audit-anchor' };
 const OPERATOR_FILE: FileKind = { label: 'audit-witness-file', purpose: 'operator-signing' };
-const SNAPSHOT_FILE: FileKind = { label: 'audit-witness-snapshot', purpose: 'audit-anchor' };
+const SNAPSHOT_FILE: FileKind = { label: 'audit-witness-snapshot', purpose: 'witness-snapshot' };
+
+/** A snapshot as builds before TR-20 signed it, with every copy's key: taken only where it landed before the cut-over. */
+const LEGACY_SNAPSHOT_FILE: FileKind = { label: 'audit-witness-snapshot', purpose: 'audit-anchor' };
+
+/**
+ * When snapshots signed with `audit-anchor` stop being taken (TR-20), by the store's own clock: well after the release
+ * that brings the `witness-snapshot` key, whose jobs copy writes a snapshot under it within the hour. Delete this and
+ * LEGACY_SNAPSHOT_FILE after it (Outstanding-Work TR-20).
+ */
+export const LEGACY_SNAPSHOTS_BEFORE = Date.UTC(2027, 0, 31);
+
 const SET_ASIDE_FILE: FileKind = { label: 'audit-witness-set-aside', purpose: 'operator-signing' };
 
 /** How long a `now` waiter waits for its Put: past it, WitnessUnconfirmed, the head still queued. */
@@ -1296,28 +1314,23 @@ export function createWitnessLog({
 
   // ---- reading ----
 
-  /** A heads file or snapshot taken in if it is sound under its kind's key: the chains it gave a new head, or false. */
+  /**
+   * A heads file or snapshot taken in if it is sound under its kind's key, or `legacy`'s where given: the chains it gave
+   * a new head, or false.
+   */
   const takeFile = async (
     from: WriteOnceStore,
     { name, at }: { readonly name: string; readonly at: number },
     kind: FileKind,
     gained: Set<string>,
+    legacy?: FileKind,
   ): Promise<boolean> => {
     const got = await from.getAtMost(name, MOST_FILE_BYTES);
     if (got === 'missing') throw new Error('a witness file listed and then not there');
-    if (
-      typeof got === 'string' ||
-      !(await isSoundFile(
-        keys,
-        kind,
-        got,
-        name,
-        epoch,
-        (f) => lineFrom(f, at, '', kind === SNAPSHOT_FILE) !== undefined,
-      ))
-    ) {
-      return false;
-    }
+    if (typeof got === 'string') return false;
+    const soundUnder = (under: FileKind): Promise<boolean> =>
+      isSoundFile(keys, under, got, name, epoch, (f) => lineFrom(f, at, '', kind === SNAPSHOT_FILE) !== undefined);
+    if (!(await soundUnder(kind)) && (legacy === undefined || !(await soundUnder(legacy)))) return false;
     // A snapshot's released heads gathered by chain, each chain's packed once at the end.
     const releasedRead = new Map<string, Compact[]>();
     const by = writerOfName(name);
@@ -1604,6 +1617,13 @@ export function createWitnessLog({
     at < began - SET_ASIDE_READ_BACK_MS || asideSoFar >= MOST_SET_ASIDE_SNAPSHOTS;
 
   /**
+   * The kind a snapshot written before TR-20 may be sound under too: `audit-anchor`'s, only where the store says it
+   * landed before LEGACY_SNAPSHOTS_BEFORE (its Creation-Time: a name is the writer's word, and any copy holds that key).
+   */
+  const legacySnapshot = ({ created }: { readonly created: number | undefined }): FileKind | undefined =>
+    created !== undefined && created < LEGACY_SNAPSHOTS_BEFORE ? LEGACY_SNAPSHOT_FILE : undefined;
+
+  /**
    * A snapshot as a start's walk meets it: `stop` where a set-aside back to it went unfetched (TR-7 review) or it is a
    * set-aside writer's past the walk's reach (pastSetAsideReach); else asideOf's word.
    */
@@ -1680,7 +1700,7 @@ export function createWitnessLog({
       }
       if (kind === 'late')
         alarm('set_aside_late', { writer: writerOfName(file.name), folder: 'snapshots', file: file.name });
-      if (await takeFile(snapshots, file, SNAPSHOT_FILE, gained)) {
+      if (await takeFile(snapshots, file, SNAPSHOT_FILE, gained, legacySnapshot(file))) {
         found = file.at;
         break;
       }

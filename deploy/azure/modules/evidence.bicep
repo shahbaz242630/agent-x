@@ -44,7 +44,11 @@
 //   apps that run the API (`witnessWriters`: the API, every copy of it, and the
 //   jobs app) and the operator's may add a new file to `audit-witness` and read
 //   and list what is there: every copy that writes a chain puts its head there,
-//   and reads the others'. The chain repair's may read and list it alone. Only
+//   and reads the others'. Each adds only under its own folder (TR-20: a
+//   condition on the assignment, so the store refuses the rest): the apps under
+//   `e<epoch>/heads/`, the operator under `e<epoch>/operator/` and the signed
+//   set-aside list, `e<epoch>/set-aside/`, which a copy broken into could
+//   otherwise flood until no start takes a snapshot. The chain repair's may read and list it alone. Only
 //   the app that holds the jobs (`anchorKeepers`, as for the anchors) may add a
 //   snapshot to `audit-witness-snapshots` and read them; production's API
 //   (`anchorReaders`) and the chain repair's may read and list them alone, and
@@ -373,6 +377,16 @@ resource witnessRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' existi
 // declared as the anchors' keepers or readers, and Azure refuses a template that declares one resource twice.
 func identityOf(name string) string => resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', name)
 
+// What the witness role may add where it is given (TR-20), as conditions on its assignments: a rule written on the
+// blob's path, which Azure checks on every Put. The apps add under heads/ alone, never in the operator's folder or the
+// set-aside list (policy.ts holds the same words: WITNESS_CONDITIONS).
+var blobPath = '@Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]'
+var adds = '!(ActionMatches{\'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action\'}) AND !(ActionMatches{\'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write\'})'
+// Each app adds a file under e<epoch>/heads/ alone.
+var witnessAppCondition = '((${adds}) OR (${blobPath} StringLike \'e*/heads/*\' AND ${blobPath} StringNotLike \'*/set-aside/*\' AND ${blobPath} StringNotLike \'*/operator/*\'))'
+// The operator adds its own heads and the set-aside list alone.
+var witnessOperatorCondition = '((${adds}) OR ((${blobPath} StringLike \'e*/operator/*\' OR ${blobPath} StringLike \'e*/set-aside/*\') AND ${blobPath} StringNotLike \'*/heads/*\'))'
+
 // Every copy of the API, `web` copies too, and the jobs app put the heads they wrote and read the others'.
 resource writesWitness 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
   for each in witnessWriters: {
@@ -383,6 +397,8 @@ resource writesWitness 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
       principalId: reference(identityOf(each.identity), '2024-11-30').principalId
       principalType: 'ServicePrincipal'
       description: '${each.workload} writes and reads audit witness heads (deploy/azure/modules/evidence.bicep)'
+      condition: witnessAppCondition
+      conditionVersion: '2.0'
     }
   }
 ]
@@ -396,6 +412,8 @@ resource operatorWritesWitness 'Microsoft.Authorization/roleAssignments@2022-04-
     principalId: writer.properties.principalId
     principalType: 'ServicePrincipal'
     description: 'operator writes and reads audit witness heads (deploy/azure/modules/evidence.bicep)'
+    condition: witnessOperatorCondition
+    conditionVersion: '2.0'
   }
 }
 
