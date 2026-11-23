@@ -344,10 +344,51 @@ describe('the organisation’s policy (6D3b)', () => {
     expect(await screen.findByRole('checkbox', { name: 'Creek Paper' })).toBeDefined();
   });
 
-  it('picks no choice for the admin, and sends nothing until each is made', async () => {
+  it('starts from the rules in force and the wait chosen, each to keep or change, and sends them as they are', async () => {
     as('admin');
+    answer(`POST ${ORG_AT}/change/preview`, ok(NO_WAITING));
     open('/more/policy');
     await press('Change the rules');
+    expect(screen.getByText(/^Each rule starts as the one in force now, to keep or change\./)).toBeDefined();
+    const checked = (name: string) => screen.getByRole<HTMLInputElement>('radio', { name }).checked;
+    expect(checked('A cap on each request')).toBe(true);
+    expect(checked('Refused')).toBe(true);
+    expect(checked('A cap each month')).toBe(true);
+    expect(checked('Yes, above an amount')).toBe(true);
+    expect(checked("Any supplier an agent's mandate allows")).toBe(true);
+    expect(checked('48 hours')).toBe(true);
+    await press('Check what this changes');
+    await screen.findByText(/No request waiting for approval would be rejected/);
+    expect(sentTo(`${ORG_AT}/change/preview`)[0]?.body).toStrictEqual({
+      currency: 'AED',
+      perOrderCap: { capMinor: 100_000, over: 'DENY' },
+      monthlyCapMinor: 500_000,
+      approvalThresholdMinor: 50_000,
+      supplierIds: null,
+      monthlyCapChoice: 'amount',
+      approvalWaitHours: 48,
+    });
+  });
+
+  it('leaves the monthly cap and the wait unchosen when no admin chose them yet', async () => {
+    as('admin');
+    answer(`GET ${ORG_AT}`, ok(orgPolicy({ monthlyCapChoice: null, approvalWaitHours: null })));
+    open('/more/policy');
+    await press('Change the rules');
+    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'A cap on each request' }).checked).toBe(true);
+    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'A cap each month' }).checked).toBe(false);
+    for (const hours of ['24 hours', '48 hours', '72 hours']) {
+      expect(screen.getByRole<HTMLInputElement>('radio', { name: hours }).checked).toBe(false);
+    }
+  });
+
+  it('picks no choice for the admin with no rules in force, and sends nothing until each is made', async () => {
+    as('admin');
+    answer(`GET ${ORG_AT}`, ok(orgPolicy({ current: null, monthlyCapChoice: null, approvalWaitHours: null })));
+    open('/more/policy');
+    await press('Change the rules');
+    expect(screen.getByText('Choose every rule: nothing is chosen for you. Amounts are in AED.')).toBeDefined();
+    expect(screen.queryByText(/in force now, to keep or change/)).toBeNull();
     for (const radio of screen.getAllByRole<HTMLInputElement>('radio')) expect(radio.checked).toBe(false);
     await press('Check what this changes');
     expect(screen.getByText('Choose whether each request has a cap.')).toBeDefined();
@@ -358,14 +399,14 @@ describe('the organisation’s policy (6D3b)', () => {
     expect(posts()).toHaveLength(0);
   });
 
-  it('fills the amounts with the rules in force to keep or change, never chosen', async () => {
+  it('fills the amounts with the rules in force to keep or change', async () => {
     as('admin');
     open('/more/policy');
     await press('Change the rules');
-    await pick('A cap on each request');
-    expect(screen.getByLabelText<HTMLInputElement>('Amount in AED').value).toBe('1000.00');
+    const amounts = screen.getAllByLabelText<HTMLInputElement>('Amount in AED').map((field) => field.value);
+    expect(amounts).toStrictEqual(['1000.00', '5000.00', '500.00']);
     // The rule for an amount, with an example in the currency's own decimals.
-    expect(screen.getByText('Digits only, with no more decimals than AED has, such as 2500.50.')).toBeDefined();
+    expect(screen.getAllByText('Digits only, with no more decimals than AED has, such as 2500.50.')).toHaveLength(3);
   });
 
   it('says amounts it can’t read and rules out of order in place, before anything is sent', async () => {
@@ -609,7 +650,9 @@ describe('the organisation’s policy (6D3b)', () => {
     expect(sentTo(`${ORG_AT}/change`)).toHaveLength(0);
     await press('Cancel');
     await press('Change the rules');
-    expect(screen.getByRole<HTMLInputElement>('radio', { name: '48 hours' }).checked).toBe(false);
+    // Back to the rules in force: the cap and wait picked are gone.
+    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'Refused' }).checked).toBe(true);
+    expect(screen.getAllByLabelText<HTMLInputElement>('Amount in AED')[0]?.value).toBe('1000.00');
   });
 
   it('holds the confirm while the API’s words can’t be read', { timeout: 15_000 }, async () => {
@@ -676,6 +719,27 @@ describe('a mandate’s own policy (6D3b)', () => {
     await press('Check what this changes');
     expect(screen.getByText(/can't be above the mandate's own limit per request/)).toBeDefined();
     expect(posts()).toHaveLength(0);
+  });
+
+  it('starts from its own rules in force, none set where none is, to keep or change', async () => {
+    as('admin');
+    answer(
+      `GET ${MANDATE_AT}`,
+      ok(
+        mandatePolicy({
+          current: { ...VERSION, perOrderCap: null, monthlyCapMinor: null, supplierIds: [SUPPLIER_A] },
+        }),
+      ),
+    );
+    open(page);
+    await press('Change the rules');
+    expect(screen.getByText(/^Each rule starts as the one in force now.*within the mandate's terms\.$/)).toBeDefined();
+    const checked = (name: string) => screen.getByRole<HTMLInputElement>('radio', { name }).checked;
+    expect(checked('No cap on each request')).toBe(true);
+    expect(checked("No cap of its own: the organisation's applies")).toBe(true);
+    expect(checked('Yes, above an amount')).toBe(true);
+    expect(checked('Only the suppliers I tick')).toBe(true);
+    expect((await screen.findByRole<HTMLInputElement>('checkbox', { name: 'Gulf Traders' })).checked).toBe(true);
   });
 
   it('changes it by passkey with its rules alone, no organisation choices', async () => {
