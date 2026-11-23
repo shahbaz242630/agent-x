@@ -647,14 +647,14 @@ describe(`BR-01..BR-17 SEC-HA-12 SEC-PAY-04 SEC-PTR-02 G1 the MVP journey over H
       ).json<Decided>();
       expect(unmandated).toMatchObject({ status: 'DENIED', decision: 'DENY' });
       expect(codesOf(unmandated)).toEqual(['MANDATE_NOT_IN_FORCE']);
-      // The agent suspended (the kill switch, no step-up): its key works no more.
+      // The agent suspended (the kill switch, no step-up): its key works no more, and is told why (E6-P7).
       const suspended = answered(
         await asAdmin('POST', `/v1/agents/${ready.agentId}/suspend`, { pendingRequests: 'cancel' }),
         200,
       ).json<{ agent: { status: string } }>();
       expect(suspended.agent.status).toBe('SUSPENDED');
       const refused = await askAs(ready.agentKey, askingFor(ready, 10_000, 'INV-2026-0045'));
-      expect(answered(refused, 401).json()).toMatchObject({ error: { code: 'UNAUTHENTICATED' } });
+      expect(answered(refused, 403).json()).toMatchObject({ error: { code: 'AGENT_SUSPENDED' } });
     },
     LONG,
   );
