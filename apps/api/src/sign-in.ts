@@ -514,7 +514,13 @@ export function registerSignIn(
       begun = await signIn.beginStepUp(session.sessionId, request.query.challenge, request.query.returnTo);
     } catch (thrown) {
       if (thrown instanceof StepUpFailed) {
-        return stepUpFailed(request, reply, new StepUpFailed(thrown.failure, thrown.message, session.userId));
+        // Out of time before it began (E6-P4): back to its page saying so, as on the way back. Its path was checked as
+        // ours before the challenge was looked at. Any other failure at the start stays the 403 it was.
+        const back =
+          thrown.failure === 'challenge_expired'
+            ? { returnTo: request.query.returnTo ?? HOME_PATH, challengeId: request.query.challenge }
+            : undefined;
+        return stepUpFailed(request, reply, new StepUpFailed(thrown.failure, thrown.message, session.userId, back));
       }
       if (thrown instanceof SignInFailed && thrown.failure === 'provider_unavailable') {
         return unavailable(request, reply, thrown.message);

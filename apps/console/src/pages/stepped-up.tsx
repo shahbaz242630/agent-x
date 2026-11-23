@@ -79,13 +79,13 @@ const refusedAs = (error: unknown): Sent => {
   return error.code === 'STATEMENT_CHANGED' ? 'wordsChanged' : 'refused';
 };
 
-/** Each end's words, with the change named. */
 /** A failed step-up's own words, by the why the API names (TR-7, E6-P2); the general words for any other. */
 const FAILED_WHY: ReadonlyMap<string, TextKey> = new Map([
   ['spent', 'stepUp.spent'],
   ['expired', 'stepUp.expired'],
 ]);
 
+/** Each end's words, with the change named. */
 const ENDED = { done: 'stepUp.done', refused: 'stepUp.refused', wordsChanged: 'stepUp.wordsChanged' } as const;
 
 /** The address without the step-up's query, the page's own kept (CO5). */

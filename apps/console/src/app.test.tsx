@@ -79,7 +79,7 @@ describe('the console’s frame (6A1)', () => {
     answers = { 'GET /v1/auth/session': { status: 401, body: { error: { code: 'UNAUTHENTICATED' } } } };
     window.history.pushState({}, '', '/?org=x&signInLate=1');
     open('/?org=x&signInLate=1');
-    expect(await screen.findByText(/took longer than 15 minutes.* so you weren't signed in/)).toBeDefined();
+    expect(await screen.findByText(/took too long.* so you weren't signed in/)).toBeDefined();
     await userEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     expect(goTo).toHaveBeenCalledWith(`/v1/auth/sign-in?${new URLSearchParams({ returnTo: '/?org=x' }).toString()}`);
     window.history.pushState({}, '', '/');
@@ -90,7 +90,7 @@ describe('the console’s frame (6A1)', () => {
     window.history.pushState({}, '', '/');
     open('/');
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeDefined();
-    expect(screen.queryByText(/took longer than 15 minutes/)).toBeNull();
+    expect(screen.queryByText(/took too long/)).toBeNull();
   });
 
   it('E6-P1 tells a signed-in person their late step-up didn’t count, and Close cleans the address', async () => {

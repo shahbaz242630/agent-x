@@ -960,6 +960,23 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     }
   });
 
+  it('fails a step-up whose challenge another way back verified meanwhile as challenge_missing, not out of time (E6-P4)', async () => {
+    const { done, challenge } = await signedInWithChallenge();
+    client.whileFinishing = async () => {
+      await challenges.recordEvidence(app, challenge.challengeId, done.sessionId, {
+        authTime: START,
+        amr: ['pwd', 'user', 'mfa'],
+        idpSessionId: 'another-way-back',
+        idTokenHash: Buffer.alloc(32, 7),
+      });
+    };
+
+    await expect(stepUp(done.sessionId, challenge.challengeId, done.cookie)).rejects.toMatchObject({
+      failure: 'challenge_missing',
+    });
+    client.whileFinishing = undefined;
+  });
+
   it('fails a step-up whose session signs out while the person is at the login service, recording nothing', async () => {
     const { done, challenge } = await signedInWithChallenge();
     client.whileFinishing = () => sessions.end(app, done.cookie);

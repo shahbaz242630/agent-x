@@ -50,7 +50,8 @@
 // any lookup, and the session is never read. On one that does, the key check
 // (the agents module's key-check.ts) finds the agent, its organisation and its
 // scopes; every refusal is the same 401 UNAUTHENTICATED with the Bearer
-// scheme's `invalid_token` challenge (RFC 6750 §3), the reason logged alone.
+// scheme's `invalid_token` challenge (RFC 6750 §3), the reason logged alone,
+// but a live key whose agent is suspended: 403 AGENT_SUSPENDED (E6-P7).
 // The organisation is the key's: an agent names none, so no header can point
 // it at another's (SEC-AG-02). A route naming agents names no one else: an
 // agent's answers are allowlisted apart from a member's (SEC-AG-05). A route names the scopes it needs in

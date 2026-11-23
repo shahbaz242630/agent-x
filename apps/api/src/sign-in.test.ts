@@ -1012,6 +1012,29 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     expect(standIn.steppedUp).toEqual([]);
   });
 
+  it('E6-P4 sends a step-up whose challenge ran out before it began back to its page, saying the time ran out', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    standIn.beginFailsWith = new StepUpFailed('challenge_expired', 'test');
+    const { app, capture, noted } = await server(standIn);
+
+    const response = await app.inject(starting(`?challenge=${CHALLENGE}&returnTo=/members/confirm`));
+    const home = await app.inject(starting(`?challenge=${CHALLENGE}`));
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe(`/members/confirm?stepUpFailed=${CHALLENGE}&stepUpWhy=expired`);
+    expect(home.headers.location).toBe(`/?stepUpFailed=${CHALLENGE}&stepUpWhy=expired`);
+    expect(noted).toContainEqual({
+      kind: 'sign_in_failed',
+      reason: 'step_up_challenge_expired',
+      ip: '127.0.0.1',
+      userId: USER_ID,
+    });
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'auth.step_up_failed', failure: 'challenge_expired', userId: USER_ID }),
+    );
+  });
+
   it("refuses a challenge that isn't the session's, or isn't pending, as STEP_UP_FAILED, noting it with the person", async () => {
     const standIn = new StandIn();
     standIn.live.set(SESSION_ID, LIVE);
