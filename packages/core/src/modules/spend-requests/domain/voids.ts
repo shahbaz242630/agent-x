@@ -181,15 +181,23 @@ export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly V
   if (stopped(source.status, 'ACTIVE', 'source') || (!heldPast && (bankEnded || source.consentPast))) {
     causes.push('SOURCE_NOT_USABLE');
   }
-  if (supplier === null || stopped(supplier.status, 'VERIFIED', 'supplier')) {
-    // Suspended now is named apart (E6-P5); unknown, unverified or reactivated after a cancelling stop is not verified.
-    causes.push(supplier?.status === 'SUSPENDED' ? 'SUPPLIER_SUSPENDED' : 'SUPPLIER_NOT_VERIFIED');
-  }
-  if (supplier !== null && supplier.currentVersionId !== decided.supplierVersionId) {
-    const carried = decided.supplierVersionId !== null && supplier.pausedFrom.includes(decided.supplierVersionId);
-    if (!carried) causes.push('SUPPLIER_CHANGED');
-  }
+  causes.push(...supplierCausesOf(decided, supplier, stopped(supplier?.status ?? '', 'VERIFIED', 'supplier')));
   causes.push(...lapsedOf(decided, now));
+  return causes;
+}
+
+/** The supplier's causes: none found or stopped (suspended named apart, E6-P5), then its details changed and not carried. */
+function supplierCausesOf(
+  { supplierVersionId }: DecidedUnder,
+  supplier: AuthorityNow['supplier'],
+  stopped: boolean,
+): readonly VoidCause[] {
+  if (supplier === null) return ['SUPPLIER_NOT_VERIFIED'];
+  const causes: VoidCause[] = [];
+  // Unverified, or reactivated after a cancelling stop, is not verified: only suspended now is named so.
+  if (stopped) causes.push(supplier.status === 'SUSPENDED' ? 'SUPPLIER_SUSPENDED' : 'SUPPLIER_NOT_VERIFIED');
+  const carried = supplierVersionId !== null && supplier.pausedFrom.includes(supplierVersionId);
+  if (supplier.currentVersionId !== supplierVersionId && !carried) causes.push('SUPPLIER_CHANGED');
   return causes;
 }
 

@@ -415,6 +415,13 @@ export function registerSignIn(
     return failedPage(reply, failed.back, failure === 'challenge_expired' ? 'expired' : undefined);
   };
 
+  /** A sign-in's way back refused: the login service away (503), no flow waiting (home, E6-P1), or failed. */
+  const signInRefused = (request: FastifyRequest, reply: FastifyReply, thrown: SignInFailed) => {
+    if (thrown.failure === 'provider_unavailable') return unavailable(request, reply, thrown.message);
+    if (thrown.failure === 'flow_missing') return cameBackLate(request, reply, thrown.message);
+    return failed(request, reply, thrown.failure, thrown.message);
+  };
+
   const startLimit = createAddressCounter(
     app,
     { most: shareOfCopies(SIGN_IN_STARTS.most, copies), windowMs: SIGN_IN_STARTS.windowMs },
@@ -486,9 +493,7 @@ export function registerSignIn(
         );
       }
       if (!(thrown instanceof SignInFailed)) throw thrown;
-      if (thrown.failure === 'provider_unavailable') return unavailable(request, reply, thrown.message);
-      if (thrown.failure === 'flow_missing') return cameBackLate(request, reply, thrown.message);
-      return failed(request, reply, thrown.failure, thrown.message);
+      return signInRefused(request, reply, thrown);
     }
     logger
       .child({ correlationId: request.id })
