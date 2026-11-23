@@ -31,7 +31,9 @@
 // agent and supplier by ID and name, and only the full one carries the
 // agent's own words, apart and labelled as its (SEC-AG-08, -10), and, for
 // one rejected, the reject: who, when and why; for one voided, the void:
-// when, and its causes (C2b).
+// when, and its causes (C2b); for one handed off, its payment's ID and
+// status (S212 G2). The agent's own read (below) stays as it was: its
+// answer, here and over MCP, is the agents' contract.
 //
 // Rejecting one waiting for approval (Phase 3 B4a; partner decisions 1, 3, 6;
 // spend-request-rejects.ts): an admin or finance approver asks at
@@ -67,6 +69,7 @@ import {
   SpendAskRefused,
   type SpendRequestRecord,
 } from '@agentx/core/modules/spend-requests';
+import { TRANSACTION } from '@agentx/core/modules/transactions';
 import { moneyFromJson } from '@agentx/core/shared-kernel';
 import { type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
@@ -291,6 +294,17 @@ const SPEND_REQUEST_DETAILS = SPEND_REQUEST_LISTED.extend({
     .nullable()
     .describe(
       'For one voided, its holdings released, because what it was decided under stopped before it was paid: when and why. Otherwise null.',
+    ),
+  payment: z
+    .object({
+      id: z.uuid().describe('The payment, by its ID: GET /v1/payments/{id} shows it in full.'),
+      status: z
+        .enum(TRANSACTION.states)
+        .describe('Where the payment stands, as GET /v1/payments/{id} says: SUCCEEDED is paid.'),
+    })
+    .nullable()
+    .describe(
+      'For one HANDED_OFF, its payment: the request ends there, and the payment carries how it came out. Otherwise null.',
     ),
 }).register(API_SCHEMAS, { id: 'SpendRequestDetails', description: 'A spend request in full, as the team sees it.' });
 
@@ -577,9 +591,10 @@ export function registerSpendRequests(
       const found = await need(reads).show(orgId, request.params.id, request.id);
       if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       const { purpose, orderReference } = found.shown.request;
-      const { rejection, voiding } = found;
+      const { rejection, voiding, payment } = found;
       return {
         ...listed(found.shown),
+        payment,
         agentWrote: { purpose, orderReference },
         rejection: rejection === null ? null : { ...rejection, at: rejection.at.toISOString() },
         voiding: voiding === null ? null : { at: voiding.at.toISOString(), reasons: reasonsOf(voiding.causes) },

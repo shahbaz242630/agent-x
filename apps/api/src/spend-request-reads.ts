@@ -35,6 +35,12 @@
 // that a person rejected it (APPROVAL_REJECTED). A void it learns with its
 // causes (REQUEST_VOIDED, then each cause), so it knows what to wait for
 // before asking again.
+//
+// One handed off is shown with its payment (S212 G2): its ID and status, as
+// the request's own story ends at HANDED_OFF and the payment carries how it
+// came out. Read in the same transaction, after the request (ADR-006: payment
+// 10), and only for one handed off: the instruction and its transaction are
+// made with that move, in one transaction (hand-off's Tx A).
 import { agentOf, agentsNamed, type AgentShown, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
 import type { PageAsked, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import {
@@ -53,6 +59,7 @@ import {
   type VoidingShown,
 } from '@agentx/core/modules/spend-requests';
 import { supplierOf, suppliersNamed, type SuppliersTables, versionOf } from '@agentx/core/modules/suppliers';
+import { paymentsOfRequests, type PaymentsTables, type TransactionStatus } from '@agentx/core/modules/transactions';
 import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -104,7 +111,20 @@ interface Denial {
   readonly voiding: VoidingShown | null;
 }
 
-export type RequestFound = ({ readonly outcome: 'found'; readonly shown: RequestShown } & Denial) | Refused;
+/** A handed-off request's payment, as the team follows it: its ID (the payments page's) and its status. */
+export interface RequestPayment {
+  readonly id: string;
+  readonly status: TransactionStatus;
+}
+
+export type RequestFound =
+  | ({
+      readonly outcome: 'found';
+      readonly shown: RequestShown;
+      /** Null for one not handed off: no payment yet. */
+      readonly payment: RequestPayment | null;
+    } & Denial)
+  | Refused;
 
 export type OwnRequestFound =
   | {
@@ -247,6 +267,25 @@ async function denialIn(tx: ReadTx, states: SignedStates, orgId: string, request
   };
 }
 
+/**
+ * The payment of a request read as HANDED_OFF, through its instruction's and
+ * transaction's signed states, in the caller's transaction; null for any
+ * other status. One changed past the app refuses the read (its alarm raised).
+ */
+async function paymentIn(
+  tx: DatabaseTransaction<RequestReadTables & PaymentsTables>,
+  states: SignedStates,
+  orgId: string,
+  request: SpendRequestRecord,
+): Promise<RequestPayment | null> {
+  if (request.status !== 'HANDED_OFF') return null;
+  const payment = (await paymentsOfRequests(tx, states, orgId, [request.id])).get(request.id.toLowerCase());
+  // None at all, as the evidence reads it: the holdings check, which reads both by the request, judges that.
+  if (payment === undefined) return null;
+  if (payment.outcome === 'tampered') throw integrityFailed();
+  return { id: payment.transactionId, status: payment.status };
+}
+
 /** What the agent is told of a denial: a reject alone, never why; a void with its causes. */
 const toldToAgent = ({ rejection, voiding }: Denial): readonly ReasonCode[] | null => {
   if (rejection !== null) return ['APPROVAL_REJECTED'];
@@ -291,7 +330,7 @@ export function createSpendRequestReads({
   ids,
   logger,
 }: {
-  readonly database: Database<RequestReadTables>;
+  readonly database: Database<RequestReadTables & PaymentsTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
@@ -372,7 +411,14 @@ export function createSpendRequestReads({
         const read = await requestInOrder(tx, states, orgId, requestId);
         if (read.outcome === 'none') throw new RequestReadRefused(404, 'NOT_FOUND');
         if (read.outcome === 'unbelieved') throw integrityFailed();
-        return { outcome: read.outcome, shown: read.shown, ...(await denialIn(tx, states, orgId, read.shown.request)) };
+        const { request } = read.shown;
+        const denial = await denialIn(tx, states, orgId, request);
+        return {
+          outcome: read.outcome,
+          shown: read.shown,
+          payment: await paymentIn(tx, states, orgId, request),
+          ...denial,
+        };
       }),
 
     ofAgent: (orgId, agentId, requestId, correlationId) =>

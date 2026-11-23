@@ -73,6 +73,8 @@
   "request.agent": "AI agent",
   "request.why": "Why",
   "request.expires": "Expires",
+  "request.payment": "Payment",
+  "request.seePayment": "See the payment",
   "request.changed": "Last change",
   "request.bankReference": "Bank reference",
   "request.id": "Request ID",
