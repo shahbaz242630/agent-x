@@ -201,7 +201,7 @@ const WALK: Readonly<Record<string, Walked>> = {
     ],
   },
   'funding-sources.reactivate': {
-    confirmed: NOTHING,
+    confirmed: { body: { pendingRequests: 'pause' } },
     proof: [
       `${API}funding-source-suspension.db.test.ts`,
       'SEC-HA-02 refuses a step-up asked for another source, or before the admin signed in again',

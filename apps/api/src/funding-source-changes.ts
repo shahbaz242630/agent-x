@@ -33,12 +33,18 @@
 //   nobody on the team chose it, and the bank puts it right.
 // - `reactivate` (`funding-sources.reactivate`, D2-4b): gives the source its
 //   authority back, so an admin's, with step-up (a passkey, ADR-003 §8,
-//   SEC-HA-12). The ask: the key claimed first; the admin read again; the
-//   source, SUSPENDED (SOURCE_NOT_SUSPENDED otherwise); a challenge bound to
-//   the event that suspended the source, so it
-//   reactivates exactly that suspension and not a later one. The confirm,
-//   with the challenge: the same reads, the source for change; the challenge
-//   consumed; then SUSPENDED > ACTIVE, with the step-up's evidence on its
+//   SEC-HA-12), and the admin's choice for its held requests (E6-P6, Rule
+//   Book §1.9, suspensions.ts): a fresh start (cancel) or an un-pause
+//   (pause), the latter refused (PENDING_REQUESTS_CANCELLED) when the
+//   suspension in force cancelled them. The ask: the key claimed first; the
+//   admin read again; the source, SUSPENDED (SOURCE_NOT_SUSPENDED otherwise);
+//   a challenge bound to the event that suspended the source and to the
+//   choice, so it reactivates exactly that suspension that way and not a
+//   later one. The confirm, with the challenge and the same choice: the same
+//   reads, the source for change; the challenge consumed; on a fresh start
+//   every pending request DENIED up to a brake's batch, the request-voids job
+//   the rest by the reactivation's event (decision 32a, F1 G1); then
+//   SUSPENDED > ACTIVE, with the step-up's evidence and the choice on its
 //   event. The partner's own word still decides whether it may fund.
 //
 // Each change takes the source's brake first (1c, tenant.ts), so the decisions naming
@@ -89,7 +95,15 @@ import {
   PARTNER_UNAVAILABLE,
 } from './funding-source-work.ts';
 import type { Refused, StepUpAsked } from './refused.ts';
-import { cancelledInForce, choiceDetails, chosenAgain, LAPSED_CONSENT_KEY, SUSPENDS } from './suspensions.ts';
+import {
+  cancelledInForce,
+  choiceDetails,
+  chosenAgain,
+  LAPSED_CONSENT_KEY,
+  SOURCE_REACTIVATED,
+  sourceReactivationChoiceDetails,
+  SUSPENDS,
+} from './suspensions.ts';
 import { createStepUps, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** Asking the partner how a source stands now. */
@@ -154,25 +168,27 @@ export interface FundingSourceChanges {
     member: SessionMember,
     idempotent: IdempotentRequest,
     sourceId: string,
+    pendingRequests: PendingChoice,
     correlationId: string,
   ): Promise<SourceChangeWrite>;
   reactivateConfirm(
     member: SessionMember,
     idempotent: IdempotentRequest,
     sourceId: string,
-    stepUpChallengeId: string,
+    confirmed: { readonly stepUpChallengeId: string; readonly pendingRequests: PendingChoice },
     correlationId: string,
   ): Promise<SourceChangeWrite>;
 }
 
 /**
  * The pending change's SHA-256: the event that suspended the source, its ID in
- * lower case. That event is the source's own, read from its signed state
- * inside the organisation's walls, so it names the organisation, the source
- * and exactly this suspension.
+ * lower case, and the admin's choice. That event is the source's own, read
+ * from its signed state inside the organisation's walls, so it names the
+ * organisation, the source and exactly this suspension; another choice makes
+ * the step-up another change's (E6-P6).
  */
-const reactivationHash = (suspendedBy: string): Buffer =>
-  changeHashOf([REACTIVATE_OPERATION, suspendedBy.toLowerCase()]);
+const reactivationHash = (suspendedBy: string, choice: PendingChoice): Buffer =>
+  changeHashOf([REACTIVATE_OPERATION, suspendedBy.toLowerCase(), choice]);
 
 export function createFundingSourceChanges({
   database,
@@ -195,11 +211,23 @@ export function createFundingSourceChanges({
   const work = createFundingSourceWork({ database, keys, ids, logger });
   const stepUps = createStepUps({ challenges, Refusal: FundingSourceRefused });
 
-  /** A suspended source, and the event that suspended it: SOURCE_NOT_SUSPENDED for one active or ended. */
-  const suspendedSource = async (tx: FundingSourceTx, states: SignedStates, orgId: string, sourceId: string) => {
+  /**
+   * A suspended source, and the event that suspended it: SOURCE_NOT_SUSPENDED for one active or ended;
+   * PENDING_REQUESTS_CANCELLED for an un-pause when its suspension in force cancelled them (E6-P6).
+   */
+  const suspendedSource = async (
+    tx: FundingSourceTx,
+    states: SignedStates,
+    orgId: string,
+    sourceId: string,
+    choice: PendingChoice,
+  ) => {
     const read = await work.sourceIn(tx, states, { orgId, id: sourceId }, 'change');
     if (read.source.status !== 'SUSPENDED') throw new FundingSourceRefused(409, 'SOURCE_NOT_SUSPENDED');
-    return { id: read.source.id, suspendedBy: read.state.eventId, state: read.state };
+    if (choice === 'pause' && (await cancelledInForce(tx, states, orgId, 'source', read.source.id, read.state))) {
+      throw new FundingSourceRefused(409, 'PENDING_REQUESTS_CANCELLED');
+    }
+    return { id: read.source.id, suspendedBy: read.state.eventId };
   };
 
   /**
@@ -387,44 +415,45 @@ export function createFundingSourceChanges({
       return answer(member.orgId, correlationId, done);
     },
 
-    async reactivate(member, idempotent, sourceId, correlationId) {
+    async reactivate(member, idempotent, sourceId, pendingRequests, correlationId) {
       const hold = (tx: FundingSourceTx) => holdBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
       const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
-        const source = await suspendedSource(tx, states, member.orgId, sourceId);
+        const source = await suspendedSource(tx, states, member.orgId, sourceId, pendingRequests);
         return stepUps.ask(tx, member, {
           action: REACTIVATE_OPERATION,
-          changeHash: reactivationHash(source.suspendedBy),
+          changeHash: reactivationHash(source.suspendedBy, pendingRequests),
         });
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
-    async reactivateConfirm(member, idempotent, sourceId, stepUpChallengeId, correlationId) {
+    async reactivateConfirm(member, idempotent, sourceId, { stepUpChallengeId, pendingRequests }, correlationId) {
       const hold = (tx: FundingSourceTx) => holdBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
       const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
-        const source = await suspendedSource(tx, states, member.orgId, sourceId);
+        const source = await suspendedSource(tx, states, member.orgId, sourceId, pendingRequests);
         const consumed = await stepUps.consumed(
           tx,
           member,
           held,
           stepUpChallengeId,
-          { action: REACTIVATE_OPERATION, changeHash: reactivationHash(source.suspendedBy) },
+          { action: REACTIVATE_OPERATION, changeHash: reactivationHash(source.suspendedBy, pendingRequests) },
           { passkeyRequired: true },
         );
-        // Its suspension cancelled them: those its brake left are voided first, the job any past this batch (F1 G1).
-        if (await cancelledInForce(tx, states, member.orgId, 'source', source.id, source.state)) {
+        // A fresh start (the only choice once its suspension cancelled them): a brake's batch voided now, the
+        // request-voids job the rest, by this reactivation's event (F1 G1).
+        if (pendingRequests === 'cancel') {
           const braked = { fundingSourceId: source.id };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
         }
         movedAsRead(
           await states.changeStatus(tx, SOURCES, { orgId: member.orgId, id: source.id }, 'reactivate', {
             actor: { type: 'user', id: member.userId },
-            action: 'funding_source.reactivated',
-            details: stepUpDetails(consumed),
+            action: SOURCE_REACTIVATED,
+            details: { ...stepUpDetails(consumed), ...sourceReactivationChoiceDetails(pendingRequests) },
           }),
           "a source read as SUSPENDED didn't reactivate",
         );

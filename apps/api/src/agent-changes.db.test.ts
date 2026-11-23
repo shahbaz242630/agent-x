@@ -266,7 +266,7 @@ describe(`suspending an agent: the kill switch (C1-3, Postgres ${server.version}
       ]);
       expect(JSON.parse((await eventsAbout(org, agent)).at(-1)?.details ?? '{}')).toMatchObject({
         pendingRequests: choice,
-        pendingStatementVersion: 5,
+        pendingStatementVersion: 6,
         // The request's own, so its activity log row and this event link (ADR-011 §7).
         correlationId: CORRELATION,
       });

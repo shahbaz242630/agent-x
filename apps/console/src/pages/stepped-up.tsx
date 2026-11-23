@@ -79,8 +79,11 @@ const refusedAs = (error: unknown): Sent => {
   return error.code === 'STATEMENT_CHANGED' ? 'wordsChanged' : 'refused';
 };
 
-/** Each end's words, with the change named. */
-const ENDED = { done: 'stepUp.done', refused: 'stepUp.refused', wordsChanged: 'stepUp.wordsChanged' } as const;
+/** Each unmade end's words, with the change named. */
+const ENDED = { refused: 'stepUp.refused', wordsChanged: 'stepUp.wordsChanged' } as const;
+
+/** What a confirmed change says: its own words where it has them, else "Done" and its label. */
+const doneText = (pending: PendingChange): string => pending.done ?? t('stepUp.done', { change: pending.label });
 
 /** The address without the step-up's query, the page's own kept (CO5). */
 function useClose() {
@@ -90,6 +93,25 @@ function useClose() {
   return () => {
     const rest = ownQuery(query).toString();
     void navigate({ href: rest === '' ? pathname : `${pathname}?${rest}`, replace: true });
+  };
+}
+
+/**
+ * Clears what the step-up says on this page once its subject is gone (E6-P11:
+ * a factor reset cancelled): a change that ended, or the one waiting to be
+ * confirmed at `confirmPath` (forgotten, as it can no longer be made). Any
+ * other change still waiting to be confirmed is kept.
+ */
+export function useEndStepped(): (confirmPath: string) => void {
+  const query = useRouterState({ select: ({ location }) => location.searchStr });
+  const close = useClose();
+  return (confirmPath) => {
+    const challenge = new URLSearchParams(query).get(STEPPED);
+    if (challenge === null) return;
+    const pending = pendingFor(challenge);
+    if (pending !== undefined && pending.confirmPath !== confirmPath) return;
+    forget(challenge);
+    close();
   };
 }
 
@@ -169,7 +191,7 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
   if (sent === 'done' && answered !== undefined) {
     return (
       <section className="stepped">
-        <p role="status">{t('stepUp.done', { change: pending.label })}</p>
+        <p role="status">{doneText(pending)}</p>
         <KeyOnce secret={answered.key} kind={'kind' in answered ? answered.kind : 'key'} onDone={close} />
       </section>
     );
@@ -185,7 +207,7 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
   if (sent === 'done' || sent === 'refused' || sent === 'wordsChanged') {
     return (
       <section className={sent === 'done' ? 'stepped' : 'notice stepped'} role="status">
-        <p>{t(ENDED[sent], { change: pending.label })}</p>
+        <p>{sent === 'done' ? doneText(pending) : t(ENDED[sent], { change: pending.label })}</p>
         <button type="button" className="secondary" onClick={close}>
           {t('stepUp.close')}
         </button>

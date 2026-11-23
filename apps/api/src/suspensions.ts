@@ -35,6 +35,13 @@
 // until it is verified again. One reactivated before the choice names none
 // and cancels.
 //
+// Reactivating a suspended bank account asks the admin the same (E6-P6, Rule
+// Book §1.9), in its own words (SOURCE_REACTIVATE_STATEMENTS): a fresh start
+// or an un-pause, kept on its `funding_source.reactivated` event, an un-pause
+// refused when the suspension in force cancelled them. One reactivated
+// before the choice names none, and cancelled nothing then: its requests
+// stood again, or its suspension had cancelled them already.
+//
 // A supplier's details change (decision 15, E3) asks the admin too, in its
 // own words (DETAILS_STATEMENTS): cancel, whatever the supplier's status, or
 // pause, kept on the change's event (and on the unverify it makes of a
@@ -78,8 +85,8 @@ export const STATEMENTS = {
     'This can’t be undone: the agent asks again once it is resumed.',
   pause:
     'Its requests are held as they are: none can be approved or paid while it is suspended, and they stand again ' +
-    'once it is resumed, unless the admin reactivating a supplier chooses a fresh start. Requests waiting for ' +
-    'approval still expire when their wait ends. Requests an earlier stop has already cancelled (a supplier unverified ' +
+    'once it is resumed, unless the admin reactivating a supplier or a bank account chooses a fresh start. ' +
+    'Requests waiting for approval still expire when their wait ends. Requests an earlier stop has already cancelled (a supplier unverified ' +
     'with them cancelled) stay cancelled. Approved requests waiting more than 7 days in total since their approval, paused time included, are cancelled ' +
     'and must be asked for again.',
 } as const satisfies Record<PendingChoice, string>;
@@ -87,9 +94,9 @@ export const STATEMENTS = {
 /**
  * The version of STATEMENTS each event names: raised with any change to their
  * words (2: an earlier stop's cancel; 3: a supplier's fresh start; S113; 5: the
- * approval horizon counts paused time, AT13d).
+ * approval horizon counts paused time, AT13d; 6: a bank account's fresh start, E6-P6).
  */
-export const STATEMENT_VERSION = 5;
+export const STATEMENT_VERSION = 6;
 
 /** A suspend's choice, as its body names it. */
 const PENDING_REQUESTS = z
@@ -140,6 +147,43 @@ export const REACTIVATE_BODY = z
 /** The choice as a reactivation's event keeps it, with the statement confirmed: read for an UNVERIFIED one's pause. */
 export const reactivationChoiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: REACTIVATE_STATEMENT_VERSION }) as const;
+
+/**
+ * The words a bank account's reactivation is confirmed with (E6-P6), by
+ * version, as REACTIVATE_STATEMENTS: a fresh start cancels, an un-pause keeps them.
+ */
+export const SOURCE_REACTIVATE_STATEMENTS = {
+  cancel:
+    'A fresh start: every request drawing on this bank account waiting for approval, approved or ready is ' +
+    'cancelled now and the money held for it freed. This can’t be undone: the agent asks again.',
+  pause:
+    'Un-pause: its held requests stand again at once, unless something else still stops them; the bank’s own word ' +
+    'still decides whether the account may fund them. Requests waiting for approval still expire when their wait ' +
+    'ends. Not offered when its suspension cancelled them. Approved requests waiting more than 7 days in total ' +
+    'since their approval, paused time included, are cancelled and must be asked for again.',
+} as const satisfies Record<PendingChoice, string>;
+
+/** The version of SOURCE_REACTIVATE_STATEMENTS each event names: raised with any change to their words. */
+export const SOURCE_REACTIVATE_STATEMENT_VERSION = 1;
+
+/** A bank account's reactivation: the reactivator's choice alone (E6-P6). */
+export const SOURCE_REACTIVATE_BODY = z
+  .strictObject({
+    pendingRequests: z
+      .enum(PENDING_CHOICES)
+      .describe(
+        'What happens to the bank account’s held spend requests, confirmed by the admin reactivating; there is no ' +
+          `default. \`cancel\`: ${SOURCE_REACTIVATE_STATEMENTS.cancel} \`pause\`: ${SOURCE_REACTIVATE_STATEMENTS.pause}`,
+      ),
+  })
+  .describe('The reactivator’s choice.');
+
+/** The choice as a bank account's reactivation event keeps it, with the statement confirmed (CANCEL_BRAKES). */
+export const sourceReactivationChoiceDetails = (choice: PendingChoice) =>
+  ({ pendingRequests: choice, pendingStatementVersion: SOURCE_REACTIVATE_STATEMENT_VERSION }) as const;
+
+/** A bank account's reactivation in the log: a fresh start chosen on it cancels (CANCEL_BRAKES). */
+export const SOURCE_REACTIVATED = 'funding_source.reactivated';
 
 /**
  * The words an organisation's freeze is confirmed with (decision 10, D1), by
@@ -477,7 +521,7 @@ export const CANCEL_BRAKES: Readonly<
   source: {
     type: SOURCES.subject,
     cancels: [SUSPENDS.source.action],
-    cancelsIfChosen: [CONSENT_LAPSED],
+    cancelsIfChosen: [CONSENT_LAPSED, SOURCE_REACTIVATED],
     cancelsPastEnd: [CONSENT_EXPIRY_CHOSEN],
   },
   supplier: {

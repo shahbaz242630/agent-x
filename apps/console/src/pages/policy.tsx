@@ -23,7 +23,7 @@ import {
   CHANGING,
   PILOT_CURRENCY,
   type Draft,
-  draftFrom,
+  draftInForce,
   type MandateTerms,
   type Policy,
   policyAt,
@@ -241,7 +241,7 @@ function PolicyChange({
   const { organization } = useActing();
   const org = target.kind === 'organization';
   const digits = minorDigits(currency);
-  const start = () => draftFrom(policy.current, digits, org ? policy.suggestedMonthlyCapMinor : undefined);
+  const start = () => draftInForce(policy, digits);
   const { listed, names, more } = useSupplierNames(organization.id);
   const { busy, said, run } = useChange(policyRefusal);
   const [open, setOpen] = useState(false);
@@ -342,7 +342,9 @@ function PolicyChange({
   return (
     <section className="stack" aria-labelledby="change-title">
       <h2 id="change-title">{t('policies.change')}</h2>
-      <p className="muted">{t(`policies.edit.intro.${target.kind}`, { currency })}</p>
+      <p className="muted">
+        {t(`policies.edit.${policy.current === null ? 'intro' : 'introInForce'}.${target.kind}`, { currency })}
+      </p>
       <RuleEditor
         draft={draft}
         onChange={change}

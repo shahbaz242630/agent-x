@@ -24,10 +24,13 @@
 //   with no step-up, with `pendingRequests`, `cancel` or `pause`, required
 //   (Phase 3 decision 7): 200 with the source, SUSPENDED; one suspended or
 //   ended already is answered as it is. Admins and finance approvers.
-// - `POST /v1/funding-sources/:id/reactivate`, then `…/reactivate/confirm`
-//   with the step-up's ID once signed in again (a passkey) (D2-4b): 202 with
-//   the step-up, then 200 with the source, ACTIVE. 409 SOURCE_NOT_SUSPENDED
-//   for one that isn't suspended. Admins.
+// - `POST /v1/funding-sources/:id/reactivate` with `pendingRequests`,
+//   `cancel` (a fresh start) or `pause` (un-pause), required (E6-P6), then
+//   `…/reactivate/confirm` with the same choice and the step-up's ID once
+//   signed in again (a passkey) (D2-4b): 202 with the step-up, then 200 with
+//   the source, ACTIVE. 409 SOURCE_NOT_SUSPENDED for one that isn't
+//   suspended; 409 PENDING_REQUESTS_CANCELLED for an un-pause its suspension
+//   cancelled. Admins.
 // Refusals: 503 PARTNER_UNAVAILABLE when the partner didn't answer (nothing
 // was done; send it again) or none is set up; 409 LINK_STARTS_SPENT past the
 // day's budget; 404 NOT_FOUND for a link or source not the organisation's;
@@ -75,7 +78,7 @@ import {
   stepUpAsked,
 } from './route-schemas.ts';
 import { confirmedWith, statementVersion } from './statements.ts';
-import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
+import { SOURCE_REACTIVATE_BODY, SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 import { CONSENT_EXPIRY } from './consent-expiry-choice.ts';
 
 const LINK = z
@@ -260,16 +263,19 @@ const REACTIVATION_ASKED = stepUpAsked(
 );
 
 const REACTIVATE_SCHEMA = {
-  summary: 'Ask to reactivate a suspended bank account',
+  summary: 'Ask to reactivate a suspended bank account, its held requests cancelled or un-paused',
   params: SOURCE_ID,
-  body: NOTHING,
+  body: SOURCE_REACTIVATE_BODY,
   response: { 202: REACTIVATION_ASKED },
 };
 
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the bank account, once signed in again for it',
   params: SOURCE_ID,
-  body: STEP_UP_CONFIRM,
+  body: STEP_UP_CONFIRM.extend({
+    ...SOURCE_REACTIVATE_BODY.shape,
+    statementVersion: statementVersion('source_reactivate'),
+  }).describe('The step-up signed in again for, the choice it was asked with, and its words’ version.'),
   response: { 200: SOURCE_CHANGED },
 };
 
@@ -434,7 +440,7 @@ export function registerFundingSources(
     '/v1/funding-sources/:id/reactivate',
     {
       schema: REACTIVATE_SCHEMA,
-      bodyLimit: NOTHING_BODY_LIMIT,
+      bodyLimit: CHOICE_BODY_LIMIT,
       config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_OPERATION },
     },
     async (request, reply) => {
@@ -443,6 +449,7 @@ export function registerFundingSources(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.body.pendingRequests,
         request.id,
       );
       return answerChange(written, request, reply);
@@ -454,7 +461,11 @@ export function registerFundingSources(
     {
       schema: REACTIVATE_CONFIRM_SCHEMA,
       bodyLimit: CHALLENGE_BODY_LIMIT,
-      config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_CONFIRM_OPERATION },
+      config: {
+        access: [...REACTIVATING_ROLES],
+        operation: REACTIVATE_CONFIRM_OPERATION,
+        statements: confirmedWith('source_reactivate'),
+      },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
@@ -462,7 +473,7 @@ export function registerFundingSources(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
-        request.body.stepUpChallengeId,
+        request.body,
         request.id,
       );
       return answerChange(written, request, reply);

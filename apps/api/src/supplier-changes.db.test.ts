@@ -304,7 +304,7 @@ describe(`suspending a supplier: the brake, with no step-up (E1-2, Postgres ${se
     });
     expect(JSON.parse(String((await eventsAbout(org, id)).at(-1)?.details))).toMatchObject({
       pendingRequests: 'pause',
-      pendingStatementVersion: 5,
+      pendingStatementVersion: 6,
     });
     expect(await noticesOf(org)).toEqual([
       { kind: 'supplier_suspended', to_contacts: false, about_id: id },

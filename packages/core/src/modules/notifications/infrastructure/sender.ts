@@ -351,9 +351,16 @@ export function createNoticeSender({
         await failed(notice, 'request_unavailable', false);
         return undefined;
       }
-      // Decided, expired or cancelled before its email went: nothing waits for anyone now.
+      // Decided, expired or cancelled before its email went: nothing waits for anyone now. An expected end, not a
+      // failure (E6-P9): given up at once like one, but logged as info so warn counts and alerts mean failures alone.
       if (request === undefined) {
-        await failed(notice, 'request_not_waiting', true);
+        const became = await outbox.failed(db, notice.id, 'request_not_waiting', true);
+        logger.info('notification.skipped', {
+          noticeId: notice.id,
+          kind: notice.kind,
+          reason: 'request_not_waiting',
+          outcome: became,
+        });
         return undefined;
       }
       return { request };

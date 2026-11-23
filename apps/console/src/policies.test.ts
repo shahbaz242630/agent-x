@@ -9,6 +9,7 @@ import { amountMinor, amountTyped } from './mandates.ts';
 import {
   type Draft,
   draftFrom,
+  draftInForce,
   type MandateTerms,
   policyRefusal,
   rulesFrom,
@@ -140,6 +141,39 @@ describe('a draft of a policy’s rules (6D3b)', () => {
       supplierIds: [],
       wait: null,
     });
+  });
+
+  it('starts a change from the choices in force; none made with no rules in force, nor a wait it can’t name', () => {
+    const policy = {
+      scope: 'organization' as const,
+      current: {
+        id: '0199a0f0-0000-7000-8000-0000000000aa',
+        version: 1,
+        madeBy: '0199a0f0-0000-7000-8000-0000000000bb',
+        madeAt: '2026-01-01T00:00:00Z',
+        currency: 'AED',
+        perOrderCap: null,
+        monthlyCapMinor: null,
+        approvalThresholdMinor: null,
+        supplierIds: null,
+      },
+      monthlyCapChoice: 'none' as const,
+      approvalWaitHours: 36,
+      approvalWaitInForceHours: 36,
+      suggestedMonthlyCapMinor: 2_000_000,
+    };
+    expect(draftInForce(policy, 2)).toMatchObject({
+      perOrder: 'none',
+      over: null,
+      monthly: 'none',
+      monthlyAmount: '20000.00',
+      threshold: 'none',
+      suppliers: 'any',
+      wait: null,
+    });
+    expect(draftInForce({ ...policy, current: null, approvalWaitHours: 24 }, 2)).toStrictEqual(
+      draftFrom(null, 2, 2_000_000),
+    );
   });
 
   it('makes no rules until every choice is made: each one not made is said', () => {

@@ -21,6 +21,7 @@ import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
 import { MemberName, Moved, movedSince } from './people-parts.tsx';
+import { useEndStepped } from './stepped-up.tsx';
 
 /** Where a reset stands, and until when where it matters. */
 function standing(reset: Reset): string {
@@ -86,6 +87,7 @@ export function ResetList({ person }: { readonly person?: string }) {
   const members = useMembers(organization.id);
   const { busy, said, run } = useChange(resetRefusal);
   const [seen, setSeen] = useState<Reset | null>(null);
+  const endStepped = useEndStepped();
   const me = session.userId.toLowerCase();
   if (resets.isPending) return <Loading />;
   if (resets.isError) return <Retry onRetry={() => void resets.refetch()} />;
@@ -97,11 +99,12 @@ export function ResetList({ person }: { readonly person?: string }) {
   const moved = seen !== null && movedSince(seen, now, stateOf);
   const cancel = (reset: Reset) =>
     run(
-      () =>
-        api.post(`/v1/factor-resets/${encodeURIComponent(reset.id)}/cancel`, {
-          organization: organization.id,
-          body: {},
-        }),
+      async () => {
+        const at = `/v1/factor-resets/${encodeURIComponent(reset.id)}`;
+        await api.post(`${at}/cancel`, { organization: organization.id, body: {} });
+        // What asking the reset said (its draft's confirm, or "asked") is stale now: the cancel's words replace it.
+        endStepped(`${at}/confirm`);
+      },
       { after: close, done: t('resets.cancelled') },
     );
   return (

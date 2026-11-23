@@ -157,10 +157,17 @@ async function linked(admin: SessionMember, accountId = ACCOUNT): Promise<Source
 
 const suspend = (who: SessionMember, sourceId: string, key?: string, choice: PendingChoice = 'cancel') =>
   changes.suspend(who, keyed(who, SUSPEND_OPERATION, key), sourceId, choice, CORRELATION);
-const reactivate = (who: SessionMember, sourceId: string) =>
-  changes.reactivate(who, keyed(who, REACTIVATE_OPERATION), sourceId, CORRELATION);
-const confirm = (who: SessionMember, sourceId: string, challengeId: string) =>
-  changes.reactivateConfirm(who, keyed(who, REACTIVATE_CONFIRM_OPERATION), sourceId, challengeId, CORRELATION);
+// The suspends here cancel unless named: a fresh start is the lift they allow (E6-P6).
+const reactivate = (who: SessionMember, sourceId: string, choice: PendingChoice = 'cancel') =>
+  changes.reactivate(who, keyed(who, REACTIVATE_OPERATION), sourceId, choice, CORRELATION);
+const confirm = (who: SessionMember, sourceId: string, challengeId: string, choice: PendingChoice = 'cancel') =>
+  changes.reactivateConfirm(
+    who,
+    keyed(who, REACTIVATE_CONFIRM_OPERATION),
+    sourceId,
+    { stepUpChallengeId: challengeId, pendingRequests: choice },
+    CORRELATION,
+  );
 
 /** The member signs in again for the challenge: its evidence recorded, as the step-up's return does. */
 const stepUp = (who: SessionMember, challengeId: string, amr: readonly string[] = PASSKEY) =>
@@ -239,7 +246,7 @@ describe(`suspending a source: the brake, with no step-up (D2-4b, Postgres ${ser
       });
       expect(JSON.parse(String((await eventsAbout(org, source.id)).at(-1)?.details))).toMatchObject({
         pendingRequests: choice,
-        pendingStatementVersion: 5,
+        pendingStatementVersion: 6,
       });
     },
   );
@@ -340,7 +347,50 @@ describe(`reactivating a suspended source, with an admin’s passkey step-up (D2
     expect(JSON.parse(String(events[2]?.details))).toMatchObject({
       stepUpChallengeId: challengeId,
       methods: PASSKEY.join(' '),
+      pendingRequests: 'cancel',
+      pendingStatementVersion: 1,
     });
+  });
+
+  it('un-pauses a source suspended with its requests paused, the choice kept on its event (E6-P6)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const source = await linked(admin);
+    changedOf(await suspend(admin, source.id, undefined, 'pause'));
+    const challengeId = askedFor(await reactivate(admin, source.id, 'pause'));
+    await stepUp(admin, challengeId);
+
+    expect(changedOf(await confirm(admin, source.id, challengeId, 'pause'))).toMatchObject({ status: 'ACTIVE' });
+    expect(JSON.parse(String((await eventsAbout(org, source.id)).at(-1)?.details))).toMatchObject({
+      pendingRequests: 'pause',
+      pendingStatementVersion: 1,
+    });
+  });
+
+  it('refuses an un-pause its suspension cancelled: PENDING_REQUESTS_CANCELLED, asking or confirming (E6-P6)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const source = await linked(admin);
+    changedOf(await suspend(admin, source.id, undefined, 'cancel'));
+    const challengeId = askedFor(await reactivate(admin, source.id, 'cancel'));
+    await stepUp(admin, challengeId);
+
+    const refused = { outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_CANCELLED' };
+    expect(await reactivate(admin, source.id, 'pause')).toEqual(refused);
+    expect(await confirm(admin, source.id, challengeId, 'pause')).toEqual(refused);
+    expect(await actions(org, source.id)).toEqual(['funding_source.linked', 'funding_source.suspended']);
+  });
+
+  it('SEC-HA-02 refuses a confirm with another choice than the step-up was asked for: STEP_UP_FAILED (E6-P6)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const source = await linked(admin);
+    changedOf(await suspend(admin, source.id, undefined, 'pause'));
+    const challengeId = askedFor(await reactivate(admin, source.id, 'pause'));
+    await stepUp(admin, challengeId);
+
+    expect(await confirm(admin, source.id, challengeId, 'cancel')).toMatchObject({ code: 'STEP_UP_FAILED' });
+    expect(await actions(org, source.id)).toEqual(['funding_source.linked', 'funding_source.suspended']);
   });
 
   it('refuses an admin who signed in again without a passkey: STEP_UP_FAILED, the source left SUSPENDED', async () => {

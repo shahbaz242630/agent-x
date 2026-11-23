@@ -4,9 +4,10 @@
 // (GET /v1/statements, `suspend`), chooses what happens to pending requests
 // (none chosen for them, decisions 8 and 11) and confirms. An agent's suspend
 // is the kill switch, so it never waits on a passkey. Reactivating asks for
-// a passkey (the shared step-up, step-up.ts): straight there for an agent or a
-// bank account, after choosing what happens to the held requests for a
-// supplier (decision 9, the `reactivate` words). The buttons show by role only;
+// a passkey (the shared step-up, step-up.ts): straight there for an agent,
+// after choosing what happens to the held requests for a supplier (decision
+// 9, the `reactivate` words) or a bank account (E6-P6, the
+// `source_reactivate` words). The buttons show by role only;
 // the API checks again whatever is pressed. Look A "Statement": nothing shouts.
 import { Link } from '@tanstack/react-router';
 import { type ReactNode, useState } from 'react';
@@ -20,10 +21,13 @@ import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
 import { Tag } from './tag.tsx';
 
-interface Opened {
+/** A row's button pressed: what for, on what. */
+interface Pressed {
   readonly kind: 'suspend' | 'reactivate';
   readonly thing: Braked;
 }
+/** Its pop-up open, with the API's words it is confirmed with. */
+type Opened = Pressed & { readonly statement: string };
 type Open = { readonly kind: 'none' } | Opened;
 const NONE: Open = { kind: 'none' };
 
@@ -43,9 +47,9 @@ function Row({
   readonly canSuspend: boolean;
   readonly canReactivate: boolean;
   readonly busy: boolean;
-  readonly onOpen: (open: Opened) => void;
+  readonly onOpen: (pressed: Pressed) => void;
 }) {
-  let action: Opened['kind'] | null = null;
+  let action: Pressed['kind'] | null = null;
   if (thing.ended) action = null;
   else if (thing.suspended) action = canReactivate ? 'reactivate' : null;
   else if (canSuspend) action = 'suspend';
@@ -84,7 +88,7 @@ export function BrakeList({ kind, children }: { readonly kind: Kind; readonly ch
   const listed = useBrakeList(kind, organization.id);
   const { busy, said, run } = useChange(brakeRefusal);
   const [open, setOpen] = useState<Open>(NONE);
-  const { path, suspending, reactivateChooses } = KINDS[kind];
+  const { path, suspending, reactivateStatement } = KINDS[kind];
   const canSuspend = suspending.includes(organization.role);
   const canReactivate = REACTIVATING.includes(organization.role);
   const pages = listed.data?.pages ?? [];
@@ -104,9 +108,10 @@ export function BrakeList({ kind, children }: { readonly kind: Kind; readonly ch
   const reactivateChange = (thing: Braked, body: Readonly<Record<string, unknown>>) =>
     changeAt(`${at(thing)}/reactivate`, t('brakes.reactivateLabel', { name: thing.name }), body, organization.id);
   const done = (thing: Braked) => ({ done: t('brakes.reactivatedDone', { name: thing.name }), after: close });
-  // An agent or a bank account: nothing to choose, so straight to the passkey.
+  // An agent: nothing to choose, so straight to the passkey.
   const reactivate = (thing: Braked) => run(() => ask(reactivateChange(thing, {})), done(thing));
-  // A supplier: the choice is asked with, and the version of the words shown is sent with the confirm (CO3).
+  // A supplier or a bank account: the choice is asked with, and the version of the words shown is sent with the
+  // confirm (CO3).
   const reactivateChoosing = (thing: Braked, pendingRequests: string, statementVersion?: number) =>
     run(() => ask(reactivateChange(thing, { pendingRequests }), { statementVersion }), done(thing));
 
@@ -130,8 +135,9 @@ export function BrakeList({ kind, children }: { readonly kind: Kind; readonly ch
               canReactivate={canReactivate}
               busy={busy}
               onOpen={(next) => {
-                if (next.kind === 'reactivate' && !reactivateChooses) void reactivate(next.thing);
-                else setOpen(next);
+                if (next.kind === 'suspend') setOpen({ ...next, statement: 'suspend' });
+                else if (reactivateStatement === null) void reactivate(next.thing);
+                else setOpen({ ...next, statement: reactivateStatement });
               }}
             />
           ))}
@@ -155,7 +161,7 @@ export function BrakeList({ kind, children }: { readonly kind: Kind; readonly ch
       <Said said={said} />
       {open.kind !== 'none' && (
         <Confirm
-          statement={open.kind}
+          statement={open.statement}
           title={t(`brakes.${open.kind}Title`, { name: open.thing.name })}
           confirmLabel={t(open.kind === 'suspend' ? 'brakes.suspendConfirm' : 'brakes.passkeyConfirm')}
           busy={busy}
