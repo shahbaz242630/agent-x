@@ -148,7 +148,7 @@ describe('a request read in full carries its payment once handed off (S212 G2, B
     });
   });
 
-  it('SEC-TEN-01 never shows another organisation’s request, nor its payment: each reads its own alone', async () => {
+  it('SEC-TEN-01 never shows another organisation’s request (so never its payment): each reads its own alone', async () => {
     const mine = await paid();
     const theirs = await paid();
 

@@ -280,7 +280,8 @@ async function paymentIn(
 ): Promise<RequestPayment | null> {
   if (request.status !== 'HANDED_OFF') return null;
   const payment = (await paymentsOfRequests(tx, states, orgId, [request.id])).get(request.id.toLowerCase());
-  // None at all, as the evidence reads it: the holdings check, which reads both by the request, judges that.
+  // None at all (rows gone under a HANDED_OFF request): shown as none here, a display read; the holdings sweep
+  // and the evidence read, which judge a request's payment whole, raise it.
   if (payment === undefined) return null;
   if (payment.outcome === 'tampered') throw integrityFailed();
   return { id: payment.transactionId, status: payment.status };

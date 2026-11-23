@@ -2,10 +2,12 @@
 // 1 to 10 in order, for one organisation, through the real routes on the
 // real migrated schema as the app role (the INJ+DB pattern): every use case
 // the API builds, on one test clock, with the fake partner over its own
-// records in the app's database, as staging runs it. The step-up's sign-in
-// and the hand-off and bank-check jobs are the only steps taken past HTTP:
-// the first is the login service's (recorded as its return records it), the
-// jobs have no route by design (they run on the API's job role).
+// records in the app's database, as staging runs it. Taken past HTTP, each
+// commented where it happens: the organisation and its cap made as sign-up
+// would (no route makes one yet), sessions and the step-up's sign-in (the
+// login service's return), the hand-off and bank-check jobs (no route by
+// design: the API's job role), and admin reads of the partner-side IDs and the
+// inbox (what the partner knows and our API never gives out).
 //
 // 1 a bank account linked through the partner's flow; 2 an agent registered
 // (suspended at the end); 3 a supplier made payable to a partner-issued
