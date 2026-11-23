@@ -26,6 +26,8 @@ export interface PendingChange {
   readonly idempotencyKey: string;
   /** A draft's confirm (6D4b): the draft names its own step-up, so the confirm sends its body alone. */
   readonly drafted?: true;
+  /** What to say once confirmed, where "Done" would claim too much (a reset waits for a contact); else "Done" and the label. */
+  readonly done?: string;
 }
 
 /** What the person asks: the ask's address and body, its confirm's address, and the organisation it acts in. */
@@ -74,7 +76,8 @@ const isPending = (value: unknown): value is PendingChange =>
   typeof value.idempotencyKey === 'string' &&
   'body' in value &&
   typeof value.body === 'object' &&
-  value.body !== null;
+  value.body !== null &&
+  (!('done' in value) || typeof value.done === 'string');
 
 function keep(pending: PendingChange): void {
   try {
@@ -235,7 +238,8 @@ export const isUndecided = (error: unknown): boolean => error instanceof ApiErro
  * factor reset; 6D4b), which must go by passkey: the ask answers the draft and
  * its step-up, and the draft's own confirm address, named by `confirmPathOf`
  * from that answer, takes nothing (the draft names its step-up). Answered with
- * no step-up, or no draft to name, it is refused as mustStepUp's.
+ * no step-up, or no draft to name, it is refused as mustStepUp's. `done`: what
+ * to say once confirmed, where "Done" would claim too much.
  */
 export async function byPasskeyDraft(
   at: string,
@@ -243,12 +247,22 @@ export async function byPasskeyDraft(
   body: Readonly<Record<string, unknown>>,
   organization: string,
   confirmPathOf: (answer: unknown) => string | undefined,
+  done?: string,
 ): Promise<'stepping'> {
   const answered = await api.write<unknown>(at, { organization, body });
   const challenge = challengeIn(answered.status, answered.body);
   const confirmPath = confirmPathOf(answered.body);
   if (challenge === undefined || confirmPath === undefined) throw new ApiError(200, 'STEP_UP_NOT_ASKED');
-  keep({ challenge, label, confirmPath, body: {}, organization, idempotencyKey: crypto.randomUUID(), drafted: true });
+  keep({
+    challenge,
+    label,
+    confirmPath,
+    body: {},
+    organization,
+    idempotencyKey: crypto.randomUUID(),
+    drafted: true,
+    ...(done !== undefined && { done }),
+  });
   goTo(stepUpAddress(challenge, window.location.pathname, window.location.search));
   return 'stepping';
 }

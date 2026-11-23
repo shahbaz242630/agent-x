@@ -24,7 +24,7 @@ import { timeText } from '../requests.ts';
 import { type Role, useActing } from '../session.tsx';
 import { byPasskey, byPasskeyDraft } from '../step-up.ts';
 import { t } from '../text.ts';
-import { memberText } from './agent.tsx';
+import { memberText, namedText } from './agent.tsx';
 import { Said, useChange } from './change.tsx';
 import { Choices } from './choices.tsx';
 import { Loading, NotShown } from './failed.tsx';
@@ -38,6 +38,10 @@ type Opened =
 const stateOf = (member: Member): string => [member.role, member.status].join('/');
 
 const memberAt = (id: string): string => `/v1/members/${encodeURIComponent(id)}`;
+
+/** A member named in a change's words: by name for an admin's list (decision 27), else by role and membership ID. */
+const namedForChange = (member: Member): string =>
+  namedText(member) ?? `${t(`choose.role.${member.role}`)} ${member.id}`;
 
 /** What an admin can do with another active member: each opens its dialog. */
 function Actions({
@@ -156,14 +160,17 @@ function MemberShown({ member, now }: { readonly member: Member; readonly now: r
         { after: close },
       );
     }
+    const named = namedForChange(opened.seen);
     return run(
       () =>
         byPasskeyDraft(
           `${at}/factor-reset`,
-          t('members.reset.label', { id: opened.seen.id }),
+          t('members.reset.label', { member: named }),
           {},
           organization.id,
           draftConfirm('reset', '/v1/factor-resets'),
+          // Asked, not done: nothing is removed until a registered contact confirms it.
+          t('members.reset.asked', { member: named }),
         ),
       // A reset's refusals are its own (one under way, no contact to confirm it…).
       { after: close, refusal: resetRefusal },
