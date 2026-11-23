@@ -112,7 +112,7 @@ interface Denial {
 }
 
 /** A handed-off request's payment, as the team follows it: its ID (the payments page's) and its status. */
-export interface RequestPayment {
+interface RequestPayment {
   readonly id: string;
   readonly status: TransactionStatus;
 }

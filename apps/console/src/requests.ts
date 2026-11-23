@@ -8,8 +8,11 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 
 import { api, isUuid } from './api.ts';
-import type { PaymentStatus } from './payments.ts';
 import { t } from './text.ts';
+
+/** A payment's status as the API sends it: here, not in payments.ts, which reads requests.ts (no import cycle). */
+export type PaymentStatus =
+  'SUBMISSION_PENDING' | 'SUBMITTED' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN' | 'REVERSED';
 
 export type Status =
   | 'VALIDATING'
