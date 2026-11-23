@@ -351,6 +351,8 @@
   "logs.filter.subjectType": "Object kind (such as spend_request)",
   "logs.filter.subjectId": "Object ID",
   "logs.apply": "Show",
+  "logs.halfPair.actor": "To see one person's or agent's records, give their Agent X ID too. Or choose Anyone to see everyone's.",
+  "logs.halfPair.subject": "To see one object's records, give both its kind and its ID. Or leave both empty to see every object's.",
   "logs.adminsOnly": "Only an admin can see this organisation's logs. Ask an admin.",
   "logs.none": "Nothing in this range matches these filters.",
   "logs.older": "Show older",

@@ -290,6 +290,30 @@ describe('the audit log (6C2, CO7)', () => {
     });
   });
 
+  it('says on the page, and asks nothing, when a kind is chosen without its ID or an ID without its kind (E2E6 S212)', async () => {
+    signedIn();
+    answer('GET /v1/audit-log', events([]));
+    const router = open('/more/audit-log');
+    await screen.findByText('Nothing in this range matches these filters.');
+    const asked = sent.length;
+    await userEvent.selectOptions(screen.getByLabelText('Who'), 'user');
+    await userEvent.click(screen.getByRole('button', { name: 'Show' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/give their Agent X ID too/);
+    await userEvent.selectOptions(screen.getByLabelText('Who'), '');
+    await userEvent.type(screen.getByLabelText('Object ID'), REQUEST);
+    await userEvent.click(screen.getByRole('button', { name: 'Show' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/both its kind and its ID/);
+    expect(sent.length).toBe(asked);
+    expect(router.state.location.searchStr).toBe('');
+    // Both halves given: the notice goes and the log is asked.
+    await userEvent.type(screen.getByLabelText(/^Object kind/), 'spend_request');
+    await userEvent.click(screen.getByRole('button', { name: 'Show' }));
+    await waitFor(() => {
+      expect(router.state.location.searchStr).toContain(`subjectType=spend_request&subjectId=${REQUEST}`);
+    });
+    expect(screen.queryByText(/both its kind and its ID/)).toBeNull();
+  });
+
   it('narrows the log to an event’s object, or to its actor, in one press', async () => {
     signedIn();
     answer('GET /v1/audit-log', events([logEvent('42')]));
