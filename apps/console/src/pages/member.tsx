@@ -41,7 +41,7 @@ const memberAt = (id: string): string => `/v1/members/${encodeURIComponent(id)}`
 
 /** A member named in a change's words: by name for an admin's list (decision 27), else by role and membership ID. */
 const namedForChange = (member: Member): string =>
-  namedText(member) ?? `${t(`choose.role.${member.role}`)} ${member.id}`;
+  namedText(member) ?? [t(`choose.role.${member.role}`), member.id].join(' ');
 
 /** What an admin can do with another active member: each opens its dialog. */
 function Actions({
