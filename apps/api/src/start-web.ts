@@ -18,7 +18,6 @@ import {
   createRemovalRestriction,
   registeredContactsFor,
   type LoginFlows,
-  membersFor,
   membershipFor,
   type Sessions,
   type StepUpChallenges,
@@ -78,6 +77,7 @@ import { activitySinkOf } from './activity-recorder.ts';
 import { loadPlaces } from './client-clues.ts';
 import { loadConsoleFiles } from './console-files.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
+import { createMembersList } from './members.ts';
 import { createMyActivity } from './my-activity.ts';
 import { createMyOrganizations } from './my-organizations.ts';
 import { createLogSample } from './log-sample.ts';
@@ -218,8 +218,7 @@ export async function startWeb(
       ),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
     myOrganizations: createMyOrganizations({ database, keys, ids: uuidV7Ids, logger }),
-    listMembers: (orgId, correlationId) =>
-      membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }), correlationId }, orgId),
+    listMembers: createMembersList({ database, keys, ids: uuidV7Ids, logger, directory }),
     acceptanceConfirmations: createAcceptanceConfirmations({
       database,
       keys,

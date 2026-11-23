@@ -2,22 +2,25 @@
 // access hook's (access-roles.test.ts, role-matrix.test.ts); here, what it
 // answers a member with each outcome of the list. The list's own reading and
 // verifying is the identity module's (memberships.db.test.ts).
-import type { MembersList, MembershipCheck } from '@agentx/core/modules/identity';
+import type { ActorName } from '@agentx/core/modules/evidence';
+import type { MembersList, MembershipCheck, Role } from '@agentx/core/modules/identity';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import { errorBody } from './errors.ts';
-import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
-import type { ListMembers } from './members.ts';
+import { liveSession, ONE_TIME_CODE, PASSKEY } from './live-session.helper.test.ts';
+import type { ListMembers, MembersAnswer } from './members.ts';
 import { closeServers, COOKIE, ORG, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 
 const LIVE = liveSession('2026-09-24T09:00:00.000Z', { amr: ONE_TIME_CODE });
+/** The same person signed in with a passkey: an admin's full powers (access.ts: actsAsAdmin). */
+const LIVE_PASSKEY = liveSession('2026-09-24T09:00:00.000Z', { amr: PASSKEY });
 
-const ACTIVE_VIEWER: MembershipCheck = {
+const ACTIVE_VIEWER: Extract<MembershipCheck, { outcome: 'active' }> = {
   outcome: 'active',
   id: '0199a0f0-0000-7000-8000-000000000033',
   role: 'viewer',
@@ -45,16 +48,28 @@ const LISTED: MembersList = {
 
 afterEach(closeServers);
 
-async function withMembers(list: MembersList | Error, options: { listed?: boolean } = {}) {
-  const asked: [orgId: string, correlationId: string][] = [];
-  const listMembers: ListMembers = (orgId, correlationId) => {
-    asked.push([orgId, correlationId]);
-    return list instanceof Error ? Promise.reject(list) : Promise.resolve(list);
+/** A server whose list answers `list` (`named` when asked to name them), for a member in `role`. */
+async function withMembers(
+  list: MembersList | Error,
+  options: {
+    listed?: boolean;
+    role?: Role;
+    restricted?: Date;
+    named?: MembersAnswer;
+    live?: typeof LIVE;
+  } = {},
+) {
+  const asked: [orgId: string, correlationId: string, named: boolean][] = [];
+  const listMembers: ListMembers = (orgId, correlationId, named) => {
+    asked.push([orgId, correlationId, named]);
+    if (list instanceof Error) return Promise.reject(list);
+    return Promise.resolve(named && options.named !== undefined ? options.named : list);
   };
   const app = await routeServer({
-    live: LIVE,
-    member: ACTIVE_VIEWER,
+    live: options.live ?? LIVE,
+    member: { ...ACTIVE_VIEWER, role: options.role ?? 'viewer' },
     ...((options.listed ?? true) && { listMembers }),
+    ...(options.restricted !== undefined && { restrictedUntil: () => Promise.resolve(options.restricted) }),
   });
   return { app, asked };
 }
@@ -90,7 +105,7 @@ describe('GET /v1/members answers a member with their organisation’s members',
         },
       ],
     });
-    expect(asked).toEqual([[ORG, FIRST_ID]]);
+    expect(asked).toEqual([[ORG, FIRST_ID, false]]);
   });
 
   it('withholds the whole list as 503 INTEGRITY_FAILED when a membership in it was tampered with', async () => {
@@ -121,5 +136,71 @@ describe('GET /v1/members answers a member with their organisation’s members',
 
     expect(response.statusCode).toBe(403);
     expect(asked).toEqual([]);
+  });
+});
+
+const SARA: ActorName = { name: 'Sara Khan', email: 'sara@example.com', shownFrom: 'login_service' };
+// The second member is named nowhere: their ID alone, nulls beside it.
+const NAMED: MembersAnswer = { ...LISTED, names: new Map([[`user:${LIVE.userId}`, SARA]]) };
+
+const membersIn = (body: unknown) => (body as { members: Record<string, unknown>[] }).members;
+
+describe('SEC-TEN-01 GET /v1/members names each member for an admin alone (S212 F3, decision 27)', () => {
+  it('asks an admin’s list to be named, and answers each member with their name, email and where it was found', async () => {
+    const { app, asked } = await withMembers(LISTED, { role: 'admin', named: NAMED, live: LIVE_PASSKEY });
+
+    const response = await app.inject(request());
+
+    expect(response.statusCode).toBe(200);
+    const [first, second] = membersIn(response.json());
+    expect(first).toEqual(expect.objectContaining({ userId: LIVE.userId, ...SARA }));
+    expect(second).toEqual(
+      expect.objectContaining({
+        userId: '0199a0f0-0000-7000-8000-000000000055',
+        name: null,
+        email: null,
+        shownFrom: null,
+      }),
+    );
+    expect(asked).toEqual([[ORG, FIRST_ID, true]]);
+  });
+
+  it.each(['approver', 'developer', 'viewer'] as const)(
+    'never asks for names for an %s, and answers no name, email or source',
+    async (role) => {
+      const { app, asked } = await withMembers(LISTED, { role, named: NAMED });
+
+      const response = await app.inject(request());
+
+      expect(response.statusCode).toBe(200);
+      for (const member of membersIn(response.json())) {
+        expect(Object.keys(member).sort()).toEqual(['id', 'joinedAt', 'role', 'status', 'userId']);
+      }
+      expect(asked).toEqual([[ORG, FIRST_ID, false]]);
+    },
+  );
+
+  it('shows no names to an admin signed in with a one-time code alone, as the access log refuses them (S212 review)', async () => {
+    const { app, asked } = await withMembers(LISTED, { role: 'admin', named: NAMED, live: LIVE });
+
+    const response = await app.inject(request());
+
+    expect(response.statusCode).toBe(200);
+    for (const member of membersIn(response.json())) expect(member).not.toHaveProperty('name');
+    expect(asked).toEqual([[ORG, FIRST_ID, false]]);
+  });
+
+  it('SEC-OPS-04 shows no names to an admin kept without an admin’s powers after a second factor was removed', async () => {
+    const { app, asked } = await withMembers(LISTED, {
+      role: 'admin',
+      named: NAMED,
+      live: LIVE_PASSKEY,
+      restricted: new Date('2026-09-30T09:00:00.000Z'),
+    });
+
+    const response = await app.inject(request());
+
+    expect(response.statusCode).toBe(200);
+    expect(asked).toEqual([[ORG, FIRST_ID, false]]);
   });
 });

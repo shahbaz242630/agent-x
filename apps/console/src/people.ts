@@ -1,5 +1,5 @@
 // The organisation's people and who vouches for them (6D4b; BR-01, BR-02):
-// its members and their roles (GET /v1/members: by Agent X IDs, never names),
+// its members and their roles (GET /v1/members: by Agent X IDs; named for an admin alone),
 // invitations to join, its registered contacts (GET /v1/registered-contacts:
 // the trust anchor told of the changes that matter) and resets of a member's
 // lost second factor (GET /v1/factor-resets). What each reads, the API's own

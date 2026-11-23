@@ -1,6 +1,6 @@
 // 6D4b: the members, a member's page, invitations, registered contacts and
-// factor resets, against a stand-in API. Members show by role and IDs, never
-// names; an admin changes another member's role (none picked), deactivates
+// factor resets, against a stand-in API. Members show by role and IDs, and by
+// name for an admin, whose list names them (S212 F3); an admin changes another member's role (none picked), deactivates
 // them or asks a reset of their second factor, each by passkey; invites (an
 // email and a role, none picked), confirms or declines who accepted by the
 // invitation's ID; adds and removes registered contacts; cancels a reset at
@@ -138,7 +138,7 @@ const confirmButton = async (name = 'Continue with passkey') =>
   within(await dialog()).getByRole<HTMLButtonElement>('button', { name });
 
 describe('the members (6D4b)', () => {
-  it('lists every member by role and IDs, never a name, from the More page', async () => {
+  it('lists every member by role and IDs where the API names no one, from the More page', async () => {
     as('admin');
     const { history } = open('/more');
     await userEvent.click(await screen.findByRole('link', { name: 'Members' }));
@@ -175,6 +175,51 @@ describe('the members (6D4b)', () => {
     await press('Try again');
     expect(await screen.findByRole('link', { name: 'Approver' })).toBeDefined();
   }, 15_000);
+});
+
+describe('an admin sees their members by name (S212 F3, decision 27)', () => {
+  const NAMED = [
+    { ...member(MINE, ME, 'admin'), name: 'Omar Ali', email: 'omar@example.com' },
+    {
+      ...member(OTHER, '0199a0f0-0000-7000-8000-000000000033', 'approver'),
+      name: 'Sara Khan',
+      email: 'sara@example.com',
+    },
+    { ...member(GONE, '0199a0f0-0000-7000-8000-000000000044', 'viewer', 'DEACTIVATED'), name: null, email: null },
+  ];
+
+  it('lists each by "Name (email)", their role and ID beside it, and says so', async () => {
+    as('admin');
+    answer('GET /v1/members', { status: 200, body: { members: NAMED } });
+    open('/more/members');
+    expect(await screen.findByRole('link', { name: 'Omar Ali (omar@example.com) (you)' })).toBeDefined();
+    expect(screen.getByRole('link', { name: 'Sara Khan (sara@example.com)' })).toBeDefined();
+    // Named nowhere: by role, as before.
+    expect(screen.getByRole('link', { name: 'Viewer' })).toBeDefined();
+    expect(screen.getByText('Approver')).toBeDefined();
+    expect(screen.getByText(OTHER)).toBeDefined();
+    expect(
+      screen.getByText(
+        /^Everyone in this organisation, by name, role and Agent X ID. Names and email addresses show when you sign in with your passkey.$/,
+      ),
+    ).toBeDefined();
+  });
+
+  it('heads a named member’s page by their name, their role among the facts', async () => {
+    as('admin');
+    answer('GET /v1/members', { status: 200, body: { members: NAMED } });
+    open(`/more/members/${OTHER}`);
+    expect(await screen.findByRole('heading', { name: 'Sara Khan (sara@example.com)' })).toBeDefined();
+    expect(screen.getByText('Approver')).toBeDefined();
+  });
+
+  it('keeps the old words for anyone but an admin, whose list names no one', async () => {
+    as('viewer');
+    open('/more/members');
+    expect(await screen.findByRole('link', { name: 'Approver' })).toBeDefined();
+    expect(screen.getByText(/Names and email addresses are shown to admins only/)).toBeDefined();
+    expect(screen.queryByText(/by name, role and Agent X ID/)).toBeNull();
+  });
 });
 
 describe('a member’s page (6D4b)', () => {

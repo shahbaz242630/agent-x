@@ -158,6 +158,8 @@ export {
   changeMembershipRole,
   deactivateMembership,
   type MembershipChangeRead,
+  keptMembersFor,
+  type KeptMembersList,
   lockMemberships,
   type MemberCheck,
   memberOf,

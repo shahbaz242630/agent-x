@@ -46,6 +46,9 @@ export interface Member {
   readonly status: 'ACTIVE' | 'DEACTIVATED';
   /** When they joined the organisation (6D4b). */
   readonly joinedAt: string;
+  /** Their name and verified email: given to an admin alone (S212 F3, decision 27); null when none is known. */
+  readonly name?: string | null;
+  readonly email?: string | null;
 }
 
 /** Who may register an agent (REGISTERING_ROLES). */
