@@ -6,7 +6,7 @@ import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { t } from '../text.ts';
 
 /** The query a sign-in that found nothing waiting at its way back comes home with (sign-in.ts, E6-P1). */
-export const SIGN_IN_LATE = 'signInLate';
+const SIGN_IN_LATE = 'signInLate';
 
 /** Whether the address says a sign-in came back late. */
 export const cameBackLate = (search: string): boolean => new URLSearchParams(search).has(SIGN_IN_LATE);
