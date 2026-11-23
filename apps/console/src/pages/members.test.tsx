@@ -198,7 +198,11 @@ describe('an admin sees their members by name (S212 F3, decision 27)', () => {
     expect(screen.getByRole('link', { name: 'Viewer' })).toBeDefined();
     expect(screen.getByText('Approver')).toBeDefined();
     expect(screen.getByText(OTHER)).toBeDefined();
-    expect(screen.getByText('Everyone in this organisation, by name, role and Agent X ID.')).toBeDefined();
+    expect(
+      screen.getByText(
+        /^Everyone in this organisation, by name, role and Agent X ID. Names and email addresses show when you sign in with your passkey.$/,
+      ),
+    ).toBeDefined();
   });
 
   it('heads a named member’s page by their name, their role among the facts', async () => {

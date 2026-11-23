@@ -809,7 +809,7 @@
   "members.people": "People",
   "members.title": "Members",
   "members.intro": "Everyone in this organisation, by role and Agent X ID. Names and email addresses are shown to admins only.",
-  "members.introNamed": "Everyone in this organisation, by name, role and Agent X ID.",
+  "members.introNamed": "Everyone in this organisation, by name, role and Agent X ID. Names and email addresses show when you sign in with your passkey.",
   "members.backToMore": "Back to More",
   "members.back": "Back to members",
   "members.trust": "Who vouches for your organisation",
