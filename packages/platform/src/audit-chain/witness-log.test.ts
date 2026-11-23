@@ -918,6 +918,19 @@ describe('SEC-DB-20 TR-20 only the jobs copy signs a snapshot', () => {
     expect(integrity(capture)).toEqual([]);
   });
 
+  it('the cut-over is 31 January 2027 by the store’s clock: one landing on 1 February is spoiled, on 30 January taken', async () => {
+    for (const [landed, taken] of [
+      [Date.UTC(2027, 1, 1), false],
+      [Date.UTC(2027, 0, 30), true],
+    ] as const) {
+      const snapshots = createFakeWriteOnceStore();
+      await plantSnapshot(snapshots, LEGACY_SNAPSHOT, 7n, { landed });
+      const { log } = witnessOn(createFakeWriteOnceStore(), { snapshots });
+      await log.refresh();
+      expect({ landed, held: seqs(log.pending(CHAIN)) }).toEqual({ landed, held: taken ? [7n] : [] });
+    }
+  });
+
   it('one signed with the heads’ key where the store says nothing of when it landed is spoiled: a name is the writer’s word', async () => {
     const snapshots = createFakeWriteOnceStore();
     await plantSnapshot(snapshots, LEGACY_SNAPSHOT, 7n);
