@@ -1,12 +1,13 @@
 import { createFakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it, vi } from 'vitest';
 
-import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
-import { byPurpose, PURPOSES } from '../keys/purposes.ts';
+import { createKeyProvider, type KeyMaterial, type KeyProvider } from '../keys/key-provider.ts';
+import { byPurpose, PURPOSES, WEB_CHECKS, WEB_PURPOSES } from '../keys/purposes.ts';
 import type { Chain } from './chain.ts';
 import { fileName, type FileKind, signedFile, writerOfName } from './signed-files.ts';
 import {
   createWitnessLog,
+  LEGACY_SNAPSHOTS_BEFORE,
   WITNESS_HEAD_BYTES,
   type WitnessAnchors,
   type WitnessSigner,
@@ -21,6 +22,20 @@ const keyMaterial = (fill: number): KeyMaterial =>
 const keys = createKeyProvider(keyMaterial(1));
 /** Someone else's keys: their files read as ours, signed wrongly. */
 const otherKeys = createKeyProvider(keyMaterial(50));
+/**
+ * A `web` copy's keys (TR-20): the same keys but the jobs' own, whose snapshots it checks with the public half alone, as
+ * the operator's (WEB_CHECKS).
+ */
+const webKeys = createKeyProvider(
+  Object.fromEntries(WEB_PURPOSES.map((purpose) => [purpose, keyMaterial(1)[purpose]])),
+  WEB_PURPOSES,
+  Object.fromEntries(
+    WEB_CHECKS.map((purpose) => {
+      const half = keys.describe().find((entry) => entry.purpose === purpose)?.versions[0]?.publicKey ?? '';
+      return [purpose, new Map([[1, Buffer.from(half, 'base64url')]])];
+    }),
+  ),
+);
 
 const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';
@@ -71,6 +86,8 @@ interface WitnessOptions {
   readonly waitMs?: number;
   /** A web copy's: heads at or below the anchor let go as such. */
   readonly dropsAtAnchor?: boolean;
+  /** The copy's keys: the jobs copy's, all of the API's, unless a test says (a `web` copy's, TR-20). */
+  readonly keyring?: KeyProvider;
 }
 
 function witnessOn(
@@ -85,12 +102,13 @@ function witnessOn(
     mostBytes = 1024 * 1024,
     waitMs = 200,
     dropsAtAnchor,
+    keyring = keys,
   }: WitnessOptions = {},
 ) {
   const log = createWitnessLog({
     store: heads.store,
     snapshots: withSnapshots ? snapshots.store : undefined,
-    keys,
+    keys: keyring,
     logger: testLogger(capture),
     now: time.now,
     epoch: 1,
@@ -126,7 +144,9 @@ async function planted(
 
 const HEADS: FileKind = { label: 'audit-witness-file', purpose: 'audit-anchor' };
 const OPERATOR: FileKind = { label: 'audit-witness-file', purpose: 'operator-signing' };
-const SNAPSHOT: FileKind = { label: 'audit-witness-snapshot', purpose: 'audit-anchor' };
+const SNAPSHOT: FileKind = { label: 'audit-witness-snapshot', purpose: 'witness-snapshot' };
+/** A snapshot as builds before TR-20 signed it: with the heads' key, which every copy holds. */
+const LEGACY_SNAPSHOT: FileKind = { label: 'audit-witness-snapshot', purpose: 'audit-anchor' };
 
 const integrity = (capture: LogCapture) =>
   capture.lines().filter((one) => one.event === 'audit.integrity_failed' && one.check === 'witness_store');
@@ -848,6 +868,112 @@ describe('SEC-DB-20 the witness log: reading', () => {
     expect(await log.refreshWhole()).toBe(false);
     delete store.instead.list;
     expect(await log.refreshWhole()).toBe(true);
+  });
+});
+
+describe('SEC-DB-20 TR-20 only the jobs copy signs a snapshot', () => {
+  /** A snapshot of `kind` holding ORG's head `seq`, planted an hour back, landing when `landed` says (or unsaid). */
+  const plantSnapshot = async (
+    snapshots: ReturnType<typeof createFakeWriteOnceStore>,
+    kind: FileKind,
+    seq: bigint,
+    {
+      landed,
+      at = START.getTime() - HOUR,
+      signing = keys,
+    }: { landed?: number; at?: number; signing?: KeyProvider } = {},
+  ): Promise<string> => {
+    const name = await planted(
+      snapshots.files,
+      'snapshots',
+      kind,
+      [line(`organisation:${ORG}`, seq, 1, new Date(at))],
+      {
+        at,
+        signing,
+      },
+    );
+    if (landed !== undefined) snapshots.created.set(name, landed);
+    return name;
+  };
+
+  it('a snapshot signed with the heads’ key (any copy’s) landing at the cut-over is spoiled; the older sound one is taken', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    // The jobs copy's, under its own key, two hours back; then one a copy broken into signed with the key every copy
+    // holds, landing at the cut-over (the store's word), as an empty-handed newer snapshot would.
+    await plantSnapshot(snapshots, SNAPSHOT, 4n, { at: START.getTime() - 2 * HOUR });
+    await plantSnapshot(snapshots, LEGACY_SNAPSHOT, 9n, { landed: LEGACY_SNAPSHOTS_BEFORE });
+    const { log, capture } = witnessOn(createFakeWriteOnceStore(), { snapshots });
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([4n]);
+    expect(integrity(capture).map(({ reason, folder }) => [reason, folder])).toEqual([['spoiled', 'snapshots']]);
+  });
+
+  it('one signed with the heads’ key that the store says landed before the cut-over is taken (written by the build before)', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    await plantSnapshot(snapshots, LEGACY_SNAPSHOT, 7n, { landed: LEGACY_SNAPSHOTS_BEFORE - 1 });
+    const { log, capture } = witnessOn(createFakeWriteOnceStore(), { snapshots });
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([7n]);
+    expect(integrity(capture)).toEqual([]);
+  });
+
+  it('the cut-over is 31 January 2027 by the store’s clock: one landing on 1 February is spoiled, on 30 January taken', async () => {
+    for (const [landed, taken] of [
+      [Date.UTC(2027, 1, 1), false],
+      [Date.UTC(2027, 0, 30), true],
+    ] as const) {
+      const snapshots = createFakeWriteOnceStore();
+      await plantSnapshot(snapshots, LEGACY_SNAPSHOT, 7n, { landed });
+      const { log } = witnessOn(createFakeWriteOnceStore(), { snapshots });
+      await log.refresh();
+      expect({ landed, held: seqs(log.pending(CHAIN)) }).toEqual({ landed, held: taken ? [7n] : [] });
+    }
+  });
+
+  it('one signed with the heads’ key where the store says nothing of when it landed is spoiled: a name is the writer’s word', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    await plantSnapshot(snapshots, LEGACY_SNAPSHOT, 7n);
+    const { log, capture } = witnessOn(createFakeWriteOnceStore(), { snapshots });
+    await log.refresh();
+    expect(log.pending(CHAIN)).toEqual([]);
+    expect(integrity(capture).map(({ reason }) => reason)).toEqual(['spoiled']);
+  });
+
+  it('a snapshot is taken under the snapshot key alone: one under another key, or the operator’s, is spoiled', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    await plantSnapshot(snapshots, SNAPSHOT, 7n, { landed: START.getTime(), signing: otherKeys });
+    await plantSnapshot(snapshots, { label: 'audit-witness-snapshot', purpose: 'operator-signing' }, 8n, {
+      at: START.getTime() - 2 * HOUR,
+      landed: START.getTime(),
+    });
+    const { log, capture } = witnessOn(createFakeWriteOnceStore(), { snapshots });
+    await log.refresh();
+    expect(log.pending(CHAIN)).toEqual([]);
+    expect(integrity(capture).map(({ reason }) => reason)).toEqual(['spoiled', 'spoiled']);
+  });
+
+  it('a web copy reads the jobs copy’s snapshot with the public half, and never writes one, even told it leads', async () => {
+    const store = createFakeWriteOnceStore();
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const leader = witnessOn(store, { snapshots, leads: true, time });
+    leader.log.soon(CHAIN, head(5n, 1));
+    await leader.log.refresh();
+    await leader.log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    // A web copy starting from it holds what the leader held.
+    const web = witnessOn(createFakeWriteOnceStore(), { snapshots, time, keyring: webKeys, leads: true });
+    await web.log.refresh();
+    expect(seqs(web.log.pending(CHAIN))).toEqual([5n]);
+    expect(integrity(web.capture)).toEqual([]);
+    // Told it leads (it never is: witness-store.ts gives a web copy no `writes`), it can't sign one: nothing lands.
+    web.log.soon(OTHER, head(2n, 1));
+    time.held.at += HOUR;
+    await web.log.refresh();
+    await web.log.flush();
+    expect(namesUnder(snapshots.files, 'snapshots')).toHaveLength(1);
+    expect(snapshots.calls.puts).toBe(1);
   });
 });
 

@@ -75,6 +75,21 @@ describe('SEC-DB-20 TR-1 the witness log as the config names it', () => {
     expect(readdirSync(join(snapshots, 'e1', 'snapshots'))).toHaveLength(1);
   });
 
+  it('TR-20: a web copy never writes a snapshot, even told it leads, and its heads still go out', async () => {
+    const heads = folder();
+    const snapshots = folder();
+    const witness = witnessOf(configWith(heads, { role: 'web', snapshots }), {
+      ...services(),
+      leading: () => true,
+    });
+    if (witness === undefined) throw new Error('a folder is named');
+    await witness.now(CHAIN, { seq: 3n, hash: Buffer.alloc(32, 3) });
+    await witness.refresh();
+    await witness.flush();
+    expect(readdirSync(join(heads, 'e1', 'heads'))).toHaveLength(1);
+    expect(readdirSync(snapshots)).toEqual([]);
+  });
+
   it('a web copy’s failed read is said under its own name; its writes keep theirs', async () => {
     const capture = new LogCapture();
     const missing = join(folder(), 'a-file-not-a-folder');

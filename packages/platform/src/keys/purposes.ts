@@ -50,6 +50,13 @@ export const KEY_PURPOSES = {
    * lives at most a day, so an old version can go once its rows have ended.
    */
   'session-mac': { kind: 'mac', rotates: true },
+  /**
+   * TR-20 (R-12): signs the witness log's snapshots, held by the copy that
+   * holds the jobs alone. A `web` copy checks them with the public half: one
+   * broken into can't sign a snapshot that leaves a witnessed head out, as it
+   * could while snapshots were signed with `audit-anchor`, which every copy holds.
+   */
+  'witness-snapshot': { kind: 'signing', rotates: true },
 } as const satisfies Readonly<Record<string, { readonly kind: KeyKind; readonly rotates: boolean }>>;
 
 export type KeyPurpose = keyof typeof KEY_PURPOSES;
@@ -72,6 +79,17 @@ export const OPERATOR_ONLY: readonly SigningPurpose[] = ['operator-signing', 'au
 export const API_PURPOSES: readonly KeyPurpose[] = PURPOSES.filter(
   (purpose) => !(OPERATOR_ONLY as readonly KeyPurpose[]).includes(purpose),
 );
+
+/** The keys only the copy that holds the jobs holds (TR-20): a `web` copy checks with their public halves. */
+export const JOBS_ONLY: readonly SigningPurpose[] = ['witness-snapshot'];
+
+/** Every purpose a `web` copy of the API holds: the API's, but the jobs' own. */
+export const WEB_PURPOSES: readonly KeyPurpose[] = API_PURPOSES.filter(
+  (purpose) => !(JOBS_ONLY as readonly KeyPurpose[]).includes(purpose),
+);
+
+/** What a `web` copy checks with public halves alone: the operator's keys and the jobs' own. */
+export const WEB_CHECKS: readonly SigningPurpose[] = [...OPERATOR_ONLY, ...JOBS_ONLY];
 
 export const isKeyPurpose = (name: string): name is KeyPurpose => Object.hasOwn(KEY_PURPOSES, name);
 

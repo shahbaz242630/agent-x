@@ -32,7 +32,7 @@
 //   Key Vault still serves a secret past its date (Microsoft): a date marks
 //   the end of a use period and takes nothing down. A secret not written keeps
 //   the date it has
-import { appKeys, operatorHolds, operatorOnly, publicHalves, resourceNames, restoreHolds, uniqueSuffix } from 'names.bicep'
+import { appKeys, jobsHalves, jobsOnly, operatorHalves, operatorHolds, operatorOnly, publicHalves, resourceNames, restoreHolds, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -261,18 +261,27 @@ var access = concat(
   // The API and its jobs read every key but the operator's own, whose public
   // half they read instead (PL-57); the operator's command the audit chains'
   // MAC, the field encryption and its own keys alone, each version of them
-  // (ADR-011 §3, B4-6b); the chain repair the MAC alone and the public halves
-  // (4D2e E10).
+  // (ADR-011 §3, B4-6b); the chain repair the MAC alone and the operator's
+  // public halves (4D2e E10). The jobs' own key (TR-20) only the app that may
+  // hold the jobs reads: production's `jobs` alone, as its API is only ever
+  // `web` copies, which read the key's public half; staging's API too, which
+  // holds the jobs out of a load run.
   map(appKeys, key => {
     name: key
     readers: concat(
-      operatorOnly(key) ? ['operator'] : operatorHolds(key) ? ['api', 'jobs', 'operator'] : ['api', 'jobs'],
+      operatorOnly(key)
+        ? ['operator']
+        : jobsOnly(key) ? (environment == 'production' ? ['jobs'] : ['api', 'jobs']) : operatorHolds(key) ? ['api', 'jobs', 'operator'] : ['api', 'jobs'],
       restoreHolds(key) ? ['chain-restore'] : []
     )
   }),
-  map(publicHalves, half => {
+  map(operatorHalves, half => {
     name: half
     readers: ['api', 'jobs', 'chain-restore']
+  }),
+  map(jobsHalves, half => {
+    name: half
+    readers: ['api']
   })
 )
 
@@ -340,8 +349,8 @@ resource keys 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
   }
 ]
 
-// Each operator-only key's public half, created once with its key, from the
-// same run's value (PL-57).
+// Each operator-only and jobs-only key's public half, created once with its
+// key, from the same run's value (PL-57, TR-20).
 @onlyIfNotExists()
 resource halves 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
   for half in publicHalves: {

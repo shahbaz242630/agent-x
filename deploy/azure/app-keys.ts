@@ -11,11 +11,13 @@
 // The operator's own key (PL-57) is mounted into the operator's job alone; the
 // API is given its public half instead, a secret of its own,
 // `public-<purpose>-v<version>`, made from the same value in the same run and
-// created once, as the key is (PUBLIC_HALVES).
+// created once, as the key is (PUBLIC_HALVES). So has the jobs' own key
+// (TR-20, the witness snapshots'), mounted only where the jobs run: a `web`
+// copy reads its public half alone.
 import { createPrivateKey, createPublicKey, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-import { KEY_PURPOSES, OPERATOR_ONLY, PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
+import { JOBS_ONLY, KEY_PURPOSES, OPERATOR_ONLY, PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 
 const KEY_NAME = /^key-([a-z-]+)-v([1-9][0-9]{0,5})$/;
 
@@ -61,9 +63,21 @@ export const APP_KEYS: readonly string[] = readAppKeys();
 export const operatorOnly = (key: string): boolean =>
   OPERATOR_ONLY.some((purpose) => key.startsWith(`key-${purpose}-v`));
 
-/** Each operator-only key's public half, a vault secret the API reads (PL-57), by the key's name. */
+/** Whether a key is one only the copy holding the jobs holds (TR-20): a `web` copy reads its public half. */
+export const jobsOnly = (key: string): boolean => JOBS_ONLY.some((purpose) => key.startsWith(`key-${purpose}-v`));
+
+/** A key's public half's secret name. */
+const halfOf = (key: string): string => `public-${key.slice('key-'.length)}`;
+
+/** Each operator-only key's public half, a vault secret the API, its jobs and the chain repair read (PL-57). */
+export const OPERATOR_HALVES: readonly string[] = APP_KEYS.filter(operatorOnly).map(halfOf);
+
+/** Each jobs-only key's public half, a vault secret a `web` copy alone reads (TR-20). */
+export const JOBS_HALVES: readonly string[] = APP_KEYS.filter(jobsOnly).map(halfOf);
+
+/** Every public half, by its key's name: each created once with its key. */
 export const PUBLIC_HALVES: ReadonlyMap<string, string> = new Map(
-  APP_KEYS.filter(operatorOnly).map((key) => [key, `public-${key.slice('key-'.length)}`]),
+  APP_KEYS.filter((key) => operatorOnly(key) || jobsOnly(key)).map((key) => [key, halfOf(key)]),
 );
 
 /** Ed25519's PKCS #8 wrapping of a 32-byte seed (RFC 8410), as the app's key provider reads one. */
@@ -77,8 +91,8 @@ function publicHalf(seed: Buffer): string {
 
 /**
  * A fresh value for every key, as the one JSON value secrets.bicep takes them
- * in: 32 random bytes each, as base64url, and each operator-only key's public
- * half beside it. Only a key the vault lacks is written.
+ * in: 32 random bytes each, as base64url, and each operator-only or jobs-only
+ * key's public half beside it. Only a key the vault lacks is written.
  */
 export function newAppKeys(random: (bytes: number) => Buffer = randomBytes): string {
   return JSON.stringify(

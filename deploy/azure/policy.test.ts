@@ -34,7 +34,9 @@ import {
   LOAD_RUN,
   LOGIN_COPIES,
   MCP_ALERTS,
+  PRODUCTION_LEAVES_OUT,
   SECURITY_SEAL_SHORTFALL_LINES,
+  WITNESS_CONDITIONS,
   ZITADEL_COPIES,
 } from './policy.ts';
 import {
@@ -258,7 +260,11 @@ function splitTheApi(from: Snapshot): Snapshot {
     'api keeps audit anchors (deploy/azure/modules/evidence.bicep)',
     'api writes and reads audit witness snapshots (deploy/azure/modules/evidence.bicep)',
   ]);
-  const kept = [...resources, jobs, apiReads, apiReadsSnapshots].filter(
+  // TR-20: the `web` copies mount the jobs' own key's public half, never the key; the jobs app holds the key.
+  const web = JSON.parse(
+    JSON.stringify(api).replaceAll('key-witness-snapshot-v1', 'public-witness-snapshot-v1'),
+  ) as Mutable;
+  const kept = [...resources.filter((resource) => resource !== api), web, jobs, apiReads, apiReadsSnapshots].filter(
     (resource) => !dropped.has(String(at(resource, 'properties', 'description'))),
   );
   return { ...from, predictedResources: kept as unknown as PredictedResource[] };
@@ -305,12 +311,20 @@ function withoutMcpClients(resource: Mutable): void {
  * wants it left) CI's GitHub subject. Its API runs split, as production's must (4D2e D13).
  */
 function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
-  const copy = splitTheApi(
+  const split = splitTheApi(
     changed(
       (resource) => resource.tags !== undefined,
       (resource) => (inside(resource, 'tags').environment = 'production'),
     ),
   );
+  // TR-20: production's API never reads the jobs' own key (secrets.bicep), as it is only ever `web` copies.
+  const copy = {
+    ...split,
+    predictedResources: split.predictedResources.filter(
+      (resource) =>
+        at(resource, 'properties', 'description') !== 'api reads key-witness-snapshot-v1 (deploy/azure/secrets.bicep)',
+    ),
+  };
   twoSignInCopies(copy);
   for (const resource of copy.predictedResources as unknown as Mutable[]) {
     // CI's identity and the job-start watch's (S175), both named by the environment.
@@ -996,7 +1010,9 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
       ...APP_KEYS.map((key) => `${key} once`),
-      // PL-57, E11: the operator's keys' public halves, each created once with its key, in the keys' order.
+      // PL-57, E11, TR-20: the operator's and the jobs' keys' public halves, each created once with its key, in the
+      // keys' order.
+      'public-witness-snapshot-v1 once',
       'public-audit-rebase-v1 once',
       'public-operator-signing-v1 once',
       ...[
@@ -1043,6 +1059,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         // version; its own signing key and the rebase key it alone reads, and the API their public halves (PL-57, E11).
         // The chain repair (4D2e E10) the MAC alone, to check with, and the public half: never the operator's key.
         // The API's jobs apart from it read what the API reads (4D2e D13).
+        // TR-20: the jobs' own key the jobs app and, in staging, the API that holds the jobs out of a load run.
         ...APP_KEYS.flatMap((key) => {
           if (key.startsWith('key-operator-signing-v') || key.startsWith('key-audit-rebase-v')) {
             return [`operator reads ${key}`];
@@ -1060,6 +1077,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'api reads public-operator-signing-v1',
         'jobs reads public-operator-signing-v1',
         'chain-restore reads public-operator-signing-v1',
+        // TR-20: the jobs' own key's public half, which the API's `web` copies alone read.
+        'api reads public-witness-snapshot-v1',
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
   });
@@ -1082,9 +1101,9 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
       // Seventeen written when given (our login lists and the login pages' cookie key among them, SA2b, SA5), each
-      // key, and the operator's keys' public halves (PL-57, E11).
+      // key, and the operator's and the jobs' keys' public halves (PL-57, E11, TR-20).
       // And Zitadel's machine-ID config, created once like the master key (AG10).
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(18 + APP_KEYS.length + 2);
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(18 + APP_KEYS.length + 3);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
@@ -3225,6 +3244,53 @@ describe('SEC-OPS-09 each rule can fail', () => {
           }),
         ).toEqual(expect.arrayContaining(['evidence-store the deployment', 'evidence-store ca-agentx-stg-api']));
       });
+    });
+
+    it('TR-20: each copy adds under heads/ alone and the operator under its own folder and the set-aside list alone', () => {
+      for (const grant of [API_WRITES, JOBS_WRITE]) {
+        const found = staging.predictedResources.find(grant) as unknown as Mutable;
+        expect(at(found, 'properties', 'condition')).toBe(WITNESS_CONDITIONS.app);
+        expect(at(found, 'properties', 'conditionVersion')).toBe('2.0');
+      }
+      const operator = staging.predictedResources.find(OPERATOR_WRITES) as unknown as Mutable;
+      expect(at(operator, 'properties', 'condition')).toBe(WITNESS_CONDITIONS.operator);
+      // The words the store checks: an app's own folder, never the operator's or the set-aside list.
+      expect(WITNESS_CONDITIONS.app).toContain("StringLike 'e*/heads/*'");
+      expect(WITNESS_CONDITIONS.app).toContain("StringNotLike '*/set-aside/*'");
+      expect(WITNESS_CONDITIONS.app).toContain("StringNotLike '*/operator/*'");
+      expect(WITNESS_CONDITIONS.operator).toContain("StringLike 'e*/set-aside/*'");
+      expect(WITNESS_CONDITIONS.operator).toContain("StringNotLike '*/heads/*'");
+      // Its condition dropped, or made the operator's (which may add to the set-aside list), on either app's: refused.
+      for (const grant of [API_WRITES, JOBS_WRITE]) {
+        expect(brokenRules(changed(grant, (found) => delete inside(found, 'properties').condition))).toEqual([
+          'evidence-store',
+        ]);
+        expect(
+          brokenRules(changed(grant, (found) => (inside(found, 'properties').condition = WITNESS_CONDITIONS.operator))),
+        ).toEqual(['evidence-store']);
+        expect(brokenRules(changed(grant, (found) => (inside(found, 'properties').conditionVersion = '1.0')))).toEqual([
+          'evidence-store',
+        ]);
+      }
+      // The operator's made an app's (which may add heads under heads/ alone), or dropped: refused.
+      expect(
+        brokenRules(
+          changed(OPERATOR_WRITES, (found) => (inside(found, 'properties').condition = WITNESS_CONDITIONS.app)),
+        ),
+      ).toEqual(['evidence-store']);
+      expect(brokenRules(changed(OPERATOR_WRITES, (found) => delete inside(found, 'properties').condition))).toEqual([
+        'evidence-store',
+      ]);
+      // And in production too, where the API is only ever web copies.
+      expect(
+        productionStoreRules(
+          changed(
+            API_WRITES,
+            (found) => delete inside(found, 'properties').condition,
+            productionLike({ subject: true }),
+          ),
+        ),
+      ).not.toEqual([]);
     });
 
     it("in production the API's web copies write it as the API's identity, beside the jobs app (WITNESS_WRITERS)", () => {
@@ -7775,6 +7841,70 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
     ).toEqual([
       "job-agentx-stg-chain-restore [workload-secrets] is given db-app-password, which GRANTS doesn't let chain-restore read",
+    ]);
+  });
+
+  it("TR-20: the jobs' own key reaches only the copy holding the jobs; a web copy its public half alone", () => {
+    const KEY = 'key-witness-snapshot-v1';
+    const HALF = 'public-witness-snapshot-v1';
+    const mounted = (app: PredictedResource | undefined): string[] =>
+      list(at(app, 'properties', 'configuration', 'secrets')).map((secret) => String(at(secret, 'name')));
+    // Staging's one API holds the jobs: the key, never the half.
+    expect(mounted(staging.predictedResources.find(APP('api')))).toContain(KEY);
+    expect(mounted(staging.predictedResources.find(APP('api')))).not.toContain(HALF);
+    // Split, the web copies the half alone and the jobs app the key alone; nothing said of either.
+    const split = splitTheApi(structuredClone(staging));
+    expect(mounted(split.predictedResources.find(APP('api')))).toEqual(expect.arrayContaining([HALF]));
+    expect(mounted(split.predictedResources.find(APP('api')))).not.toContain(KEY);
+    expect(mounted(split.predictedResources.find(APP('jobs')))).toContain(KEY);
+    expect(mounted(split.predictedResources.find(APP('jobs')))).not.toContain(HALF);
+    const secretsSaid = (snapshotted: Snapshot, expected: Expectations = STAGING): string[] =>
+      policyProblems(snapshotted, expected)
+        .filter(({ rule }) => rule === 'workload-secrets' || rule === 'secret-access')
+        .map(describeProblem);
+    expect(secretsSaid(split)).toEqual([]);
+    // A web copy given the key back (its half swapped out): it could sign a snapshot leaving a head out.
+    const webHoldsKey = changed(
+      APP('api'),
+      (app) => {
+        Object.assign(app, JSON.parse(JSON.stringify(app).replaceAll(HALF, KEY)));
+      },
+      split,
+    );
+    expect(secretsSaid(webHoldsKey)).toEqual([
+      `ca-agentx-stg-api [workload-secrets] is given ${KEY}, which GRANTS doesn't let api read`,
+      `ca-agentx-stg-api [workload-secrets] must be given ${HALF}, which api reads (GRANTS)`,
+    ]);
+    // The jobs app given the half instead of its key: it couldn't sign one, and every start would read none sound.
+    const jobsHoldsHalf = changed(
+      APP('jobs'),
+      (app) => {
+        Object.assign(app, JSON.parse(JSON.stringify(app).replaceAll(KEY, HALF)));
+      },
+      split,
+    );
+    expect(secretsSaid(jobsHoldsHalf)).toEqual([
+      `ca-agentx-stg-jobs [workload-secrets] is given ${HALF}, which GRANTS doesn't let jobs read`,
+      `ca-agentx-stg-jobs [workload-secrets] must be given ${KEY}, which jobs reads (GRANTS)`,
+    ]);
+    // Production's vault never lets the API read the key, which staging's does for its one API.
+    expect([...PRODUCTION_LEAVES_OUT]).toEqual([`api reads ${KEY}`]);
+    expect(GRANTS.has(`api reads ${KEY}`)).toBe(true);
+    expect(GRANTS.has(`jobs reads ${KEY}`)).toBe(true);
+    expect(GRANTS.has(`api reads ${HALF}`)).toBe(true);
+    expect(GRANTS.has(`jobs reads ${HALF}`)).toBe(false);
+    const production = productionLike({ subject: true });
+    const PRODUCTION: Expectations = { region: 'uaenorth', environment: 'production' };
+    expect(secretsSaid(production, PRODUCTION)).toEqual([]);
+    const apiReadsKey = structuredClone(
+      staging.predictedResources.find(
+        (resource) => at(resource, 'properties', 'description') === `api reads ${KEY} (deploy/azure/secrets.bicep)`,
+      ),
+    ) as unknown as PredictedResource;
+    expect(
+      secretsSaid({ ...production, predictedResources: [...production.predictedResources, apiReadsKey] }, PRODUCTION),
+    ).toEqual([
+      expect.stringContaining(`[secret-access] lets api read ${KEY}, which isn't one of its secrets (GRANTS)`),
     ]);
   });
 

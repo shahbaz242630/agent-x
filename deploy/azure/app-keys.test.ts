@@ -2,7 +2,15 @@ import { describe, expect, it } from 'vitest';
 
 import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 import { createKeyProvider } from '../../packages/platform/src/keys/key-provider.ts';
-import { APP_KEYS, appKeysProblems, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
+import {
+  APP_KEYS,
+  appKeysProblems,
+  JOBS_HALVES,
+  jobsOnly,
+  newAppKeys,
+  OPERATOR_HALVES,
+  PUBLIC_HALVES,
+} from './app-keys.ts';
 
 const EVERY_V1 = PURPOSES.map((purpose) => `key-${purpose}-v1`);
 
@@ -49,17 +57,21 @@ describe("ADR-011 §2: the app's keys on Azure are the ones the API starts with"
   });
 });
 
-describe("the operator's keys' public halves (PL-57, E11)", () => {
-  it('names one for each operator-only key, and makes it from the same bytes in the same run', () => {
+describe("the operator's and the jobs' keys' public halves (PL-57, E11, TR-20)", () => {
+  it('names one for each operator-only and jobs-only key, and makes it from the same bytes in the same run', () => {
     expect([...PUBLIC_HALVES].sort()).toEqual([
       ['key-audit-rebase-v1', 'public-audit-rebase-v1'],
       ['key-operator-signing-v1', 'public-operator-signing-v1'],
+      ['key-witness-snapshot-v1', 'public-witness-snapshot-v1'],
     ]);
+    expect(OPERATOR_HALVES).toEqual(['public-audit-rebase-v1', 'public-operator-signing-v1']);
+    expect(JOBS_HALVES).toEqual(['public-witness-snapshot-v1']);
+    expect(APP_KEYS.filter(jobsOnly)).toEqual(['key-witness-snapshot-v1']);
     const values = JSON.parse(newAppKeys()) as Record<string, string>;
     expect(Object.keys(values).sort()).toEqual(
-      [...APP_KEYS, 'public-operator-signing-v1', 'public-audit-rebase-v1'].sort(),
+      [...APP_KEYS, 'public-operator-signing-v1', 'public-audit-rebase-v1', 'public-witness-snapshot-v1'].sort(),
     );
-    for (const purpose of ['operator-signing', 'audit-rebase'] as const) {
+    for (const purpose of ['operator-signing', 'audit-rebase', 'witness-snapshot'] as const) {
       const seed = Buffer.from(values[`key-${purpose}-v1`] ?? '', 'base64url');
       const own = createKeyProvider({ [purpose]: { current: 1, versions: new Map([[1, seed]]) } }, [purpose]);
       expect(own.describe()[0]?.versions[0]?.publicKey).toBe(values[`public-${purpose}-v1`]);

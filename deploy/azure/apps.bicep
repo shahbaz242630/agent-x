@@ -49,10 +49,12 @@ import {
   doorName
   identityName
   jobName
+  jobsHalves
+  jobsOnly
   networkAddressSpace
+  operatorHalves
   operatorHolds
   operatorOnly
-  publicHalves
   releaseRoleName
   resourceNames
   resourceTags
@@ -1098,7 +1100,7 @@ var jobs = concat([
         reads: key
         setting: ''
       }),
-      map(publicHalves, half => {
+      map(operatorHalves, half => {
         reads: half
         setting: ''
       })
@@ -1151,7 +1153,7 @@ var loadRequestSetting = {
 }
 
 // What a load job that sends traffic reads: the app's login, every key but the
-// operator's own, and its public half instead (PL-57).
+// operator's own, and its public half instead (PL-57), as the jobs copy does.
 var loadFiles = concat(
   [
     {
@@ -1159,14 +1161,7 @@ var loadFiles = concat(
       setting: 'AGENTX_DB_PASSWORD_FILE'
     }
   ],
-  map(filter(appKeys, key => !operatorOnly(key)), key => {
-    reads: key
-    setting: ''
-  }),
-  map(publicHalves, half => {
-    reads: half
-    setting: ''
-  })
+  jobsKeyFiles
 )
 
 // The load test's three jobs (D2c, PL-38; tooling/load/job.ts), only with
@@ -1407,13 +1402,31 @@ var apiFiles = concat(
           reads: 'zitadel-directory-token'
           setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
         }
-      ],
-  // Every key but the operator's own, and their public halves instead (PL-57, E11).
+      ]
+)
+
+// The keys of the copy that holds the jobs (`jobs`, or the API out of a split):
+// every key but the operator's own, and their public halves instead (PL-57, E11).
+var jobsKeyFiles = concat(
   map(filter(appKeys, key => !operatorOnly(key)), key => {
     reads: key
     setting: ''
   }),
-  map(publicHalves, half => {
+  map(operatorHalves, half => {
+    reads: half
+    setting: ''
+  })
+)
+
+// A `web` copy's keys (TR-20): the jobs copy's but the jobs' own, the witness
+// snapshots' signing key, whose public half it reads instead, so a copy broken
+// into can't sign a snapshot that leaves a witnessed head out.
+var webKeyFiles = concat(
+  map(filter(appKeys, key => !operatorOnly(key) && !jobsOnly(key)), key => {
+    reads: key
+    setting: ''
+  }),
+  map(concat(operatorHalves, jobsHalves), half => {
     reads: half
     setting: ''
   })
@@ -1539,7 +1552,7 @@ var jobsApp = {
   // Its jobs share no traffic's pace: half the API's load-run size is room enough.
   cpu: loadRun ? '1' : '0.5'
   memory: loadRun ? '2Gi' : '1Gi'
-  files: apiFiles
+  files: concat(apiFiles, jobsKeyFiles)
   settings: concat(
     appOurSettings,
     [
@@ -1680,7 +1693,8 @@ var apps = concat([
     memory: apiSize.memory
     probes: apiProbes
     // And the config whose header it checks Zitadel's asks for machine IDs against (AG10).
-    files: concat(apiFiles, [
+    // Split, its `web` copies' keys; else it holds the jobs, and their keys.
+    files: concat(apiFiles, split ? webKeyFiles : jobsKeyFiles, [
       {
         reads: machineConfig
         setting: 'AGENTX_MACHINE_IDS_CONFIG_FILE'

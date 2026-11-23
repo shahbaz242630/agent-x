@@ -11,7 +11,7 @@ import { type DirectoryTables, registerOrganization } from '@agentx/core/modules
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, withTenant } from '@agentx/platform/db';
-import { API_PURPOSES, loadKeys } from '@agentx/platform/keys';
+import { API_PURPOSES, loadKeys, WEB_PURPOSES } from '@agentx/platform/keys';
 import { createLogger, type Output } from '@agentx/platform/observability';
 import {
   createTestDatabase,
@@ -31,6 +31,8 @@ import { recordStart } from './start-record.ts';
 
 const server = inject('postgres');
 const keys = writeTestKeys(API_PURPOSES);
+/** A `web` copy's keys: all but the jobs' own (TR-20). */
+const webKeys = writeTestKeys(WEB_PURPOSES);
 let database: TestDatabase;
 
 beforeAll(async () => {
@@ -57,6 +59,7 @@ async function startedBefore0105(): Promise<void> {
 afterAll(async () => {
   await database.drop();
   keys.remove();
+  webKeys.remove();
 });
 
 class FakeProcess extends EventEmitter implements ApiProcess {
@@ -176,7 +179,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
   });
 
   it('4D2e D: `web` answers and runs no job: nothing anchors, nothing is swept', async () => {
-    const run = await start(envFor('app', { AGENTX_ROLE: 'web' }));
+    const run = await start(envFor('app', { AGENTX_ROLE: 'web', AGENTX_KEYS_DIR: webKeys.directory }));
     expect(run.events()).toEqual([
       'api.starting',
       'api.partner',
@@ -206,6 +209,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const run = await start(
       envFor('app', {
         AGENTX_ROLE: 'web',
+        AGENTX_KEYS_DIR: webKeys.directory,
         AGENTX_MACHINE_IDS_HOST: 'agentx-api.internal',
         AGENTX_MACHINE_IDS_CONFIG: zitadelConfig,
       }),
@@ -275,12 +279,12 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
   it('4D2e D: `web` reads the heartbeat for /health, and a heartbeat gone stale makes it unavailable', async () => {
     const admin = database.as('admin');
     await admin.query('update platform_controls.job_lease set beating_at = pg_catalog.now()');
-    const fresh = await start(envFor('app', { AGENTX_ROLE: 'web' }));
+    const fresh = await start(envFor('app', { AGENTX_ROLE: 'web', AGENTX_KEYS_DIR: webKeys.directory }));
     expect((await fresh.api?.inject('/health'))?.statusCode).toBe(200);
     await stop(fresh);
 
     await admin.query("update platform_controls.job_lease set beating_at = pg_catalog.now() - interval '6 minutes'");
-    const stale = await start(envFor('app', { AGENTX_ROLE: 'web' }));
+    const stale = await start(envFor('app', { AGENTX_ROLE: 'web', AGENTX_KEYS_DIR: webKeys.directory }));
     expect((await stale.api?.inject('/health'))?.statusCode).toBe(503);
     expect(stale.capture.lines().find((line) => line.event === 'health.check_failed')).toEqual(
       expect.objectContaining({ level: 'warn', check: 'jobs_heartbeat' }),

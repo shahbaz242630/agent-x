@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { MCP_PATH, PROTOCOLS } from '../../apps/api/src/mcp-protocols.ts';
 import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
 import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observability/login-service-alert.ts';
-import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
+import { APP_KEYS, JOBS_HALVES, jobsOnly, OPERATOR_HALVES, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
 import { authRoutes, type DoorRoute } from './auth-door.ts';
 import { readRanges } from './github-ranges.ts';
 import { mcpNames, mcpPrefixes, readMcpClients } from './mcp-clients.ts';
@@ -551,11 +551,15 @@ const MACHINE_CONFIG_PATH = `/mnt/secrets/${MACHINE_CONFIG}`;
  * The API's jobs, where they run apart from it (`jobs`, 4D2e D13), read what
  * the API reads: the same process at another role, its sign-in's three
  * settings and email's four taken together, whose jobs send the notices and
- * carry out the factor resets.
+ * carry out the factor resets. The jobs' own key (TR-20, the witness
+ * snapshots') the jobs read, and the API where it holds them (staging's, out of
+ * a load run; never production's: PRODUCTION_LEAVES_OUT); its public half the
+ * API's `web` copies alone.
  */
 export const GRANTS: ReadonlySet<string> = new Set([
   ...APP_KEYS.filter((key) => !operatorOnly(key)).flatMap((key) => [`api reads ${key}`, `jobs reads ${key}`]),
-  ...[...PUBLIC_HALVES.values()].flatMap((half) => [`api reads ${half}`, `jobs reads ${half}`]),
+  ...OPERATOR_HALVES.flatMap((half) => [`api reads ${half}`, `jobs reads ${half}`]),
+  ...JOBS_HALVES.map((half) => `api reads ${half}`),
   'jobs reads db-app-password',
   'jobs reads api-oidc-client-secret',
   'jobs reads acs-access-key',
@@ -589,7 +593,7 @@ export const GRANTS: ReadonlySet<string> = new Set([
   // with the MAC key and the operator's signatures with their public halves, and holds no other key.
   'chain-restore reads db-owner-password',
   ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')).map((key) => `chain-restore reads ${key}`),
-  ...[...PUBLIC_HALVES.values()].map((half) => `chain-restore reads ${half}`),
+  ...OPERATOR_HALVES.map((half) => `chain-restore reads ${half}`),
   'zitadel reads db-zitadel-password',
   'zitadel reads zitadel-masterkey',
   'zitadel reads login-client-public-key',
@@ -618,6 +622,18 @@ export const STAGE_G_RUN_READS: ReadonlySet<string> = new Set([
 ]);
 
 const GRANT = / reads /;
+
+/**
+ * The grants production leaves out of GRANTS (TR-20): its API is only ever `web` copies beside the `jobs` app, so it
+ * never reads the jobs' own key, which a copy broken into could otherwise fetch from the vault and sign snapshots with.
+ */
+export const PRODUCTION_LEAVES_OUT: ReadonlySet<string> = new Set(
+  APP_KEYS.filter(jobsOnly).map((key) => `api reads ${key}`),
+);
+
+/** The grants an environment's deployment gives: GRANTS, less what production leaves out there. */
+const grantsIn = (environment: Expectations['environment']): ReadonlySet<string> =>
+  environment === 'production' ? new Set([...GRANTS].filter((grant) => !PRODUCTION_LEAVES_OUT.has(grant))) : GRANTS;
 
 /** Every secret an app or job reads: the vault holds these and no other. */
 const VAULT_SECRETS: ReadonlySet<string> = new Set([...GRANTS].map((grant) => grant.split(GRANT)[1] ?? ''));
@@ -727,7 +743,7 @@ export const LOAD_RUN = {
   jobs: LOAD_PARTS.map((part) => `load-${part}`),
   runsAs: 'api',
   image: 'ghcr.io/shahbaz242630/agent-x-load@',
-  reads: new Set(['db-app-password', ...APP_KEYS.filter((key) => !operatorOnly(key)), ...PUBLIC_HALVES.values()]),
+  reads: new Set(['db-app-password', ...APP_KEYS.filter((key) => !operatorOnly(key)), ...OPERATOR_HALVES]),
   apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
   apiSize: { cpu: 2, memory: '4Gi' },
   // Three `web` copies of twelve connections, and the jobs' six, on the larger server `foundation --load-size` gives,
@@ -2790,6 +2806,47 @@ const evidenceStore: Check = (snapshot, expected, add) => {
   witnessProblems(snapshot, { environment: expected.environment, accounts, copy }, problem);
 };
 
+/** A blob's path as a role assignment's condition names it (modules/evidence.bicep `blobPath`). */
+const BLOB_PATH = '@Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]';
+
+/** Any request that adds or writes a blob (modules/evidence.bicep `adds`): a condition's rule covers these alone. */
+const ADDS =
+  "!(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'}) AND !(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'})";
+
+/**
+ * What the witness role may add on the witness container (TR-20), as modules/evidence.bicep writes each condition: an app
+ * under `e<epoch>/heads/` alone, never in the operator's folder or the set-aside list (a copy broken into could flood
+ * it until no start takes a snapshot); the operator under its own folder and the set-aside list alone.
+ */
+export const WITNESS_CONDITIONS = {
+  app: `((${ADDS}) OR (${BLOB_PATH} StringLike 'e*/heads/*' AND ${BLOB_PATH} StringNotLike '*/set-aside/*' AND ${BLOB_PATH} StringNotLike '*/operator/*'))`,
+  operator: `((${ADDS}) OR ((${BLOB_PATH} StringLike 'e*/operator/*' OR ${BLOB_PATH} StringLike 'e*/set-aside/*') AND ${BLOB_PATH} StringNotLike '*/heads/*'))`,
+} as const;
+
+/** Each witness role assignment on the witness container carries its workload's condition exactly (TR-20). */
+function witnessConditionProblems(
+  snapshot: Snapshot,
+  containers: readonly PredictedResource[],
+  problem: (resource: string, message: string) => void,
+): void {
+  const role = customRoleId(groupOf(snapshot), witnessRoleName(groupOf(snapshot)));
+  const scopes = new Set(containers.map((container) => container.id));
+  for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
+    if (roleOf(assignment) !== role || !scopes.has(scopeOf(assignment))) continue;
+    const identity = principalOf(snapshot, assignment);
+    const operator = identity !== undefined && workloadOf(identity.name) === 'operator';
+    const wanted = operator ? WITNESS_CONDITIONS.operator : WITNESS_CONDITIONS.app;
+    if (at(assignment.properties, 'condition') !== wanted || at(assignment.properties, 'conditionVersion') !== '2.0') {
+      problem(
+        assignment.name,
+        operator
+          ? "must carry TR-20's condition (version 2.0): the operator adds files under e<epoch>/operator/ and the set-aside list alone (modules/evidence.bicep)"
+          : "must carry TR-20's condition (version 2.0): an app adds files under e<epoch>/heads/ alone, never in the operator's folder or the set-aside list (modules/evidence.bicep)",
+      );
+    }
+  }
+}
+
 /**
  * The witness log's part of `evidence-store` (TR-1): its role given on its container once to each app that runs the API
  * (`WITNESS_WRITERS`) and to the operator's identity, the anchors' read-only role there to the chain repair's alone, and
@@ -2826,6 +2883,7 @@ function witnessProblems(
     },
     problem,
   );
+  witnessConditionProblems(snapshot, containers, problem);
   const readers = storeRoleProblems(
     snapshot,
     {
@@ -4895,7 +4953,8 @@ const deleteLock = (resource: PredictedResource): boolean =>
   resource.properties !== null &&
   (resource.properties as { level?: unknown }).level === 'CanNotDelete';
 
-const secretAccess: Check = (snapshot, _expected, add) => {
+const secretAccess: Check = (snapshot, expected, add) => {
+  const grants = grantsIn(expected.environment);
   for (const resource of snapshot.predictedResources) {
     if (
       ACCESS_TYPE.test(resource.type) &&
@@ -4953,7 +5012,7 @@ const secretAccess: Check = (snapshot, _expected, add) => {
     }
     const grant = `${workloadOf(identity.name)} reads ${secret}`;
     granted.add(grant);
-    if (!GRANTS.has(grant)) {
+    if (!grants.has(grant)) {
       add({
         rule: 'secret-access',
         resource: assignment.name,
@@ -4961,7 +5020,7 @@ const secretAccess: Check = (snapshot, _expected, add) => {
       });
     }
   }
-  for (const grant of [...GRANTS].filter((needed) => !granted.has(needed))) {
+  for (const grant of [...grants].filter((needed) => !granted.has(needed))) {
     add({
       rule: 'secret-access',
       resource: 'the deployment',
@@ -6837,7 +6896,9 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
     if (held !== undefined) heldProblems(job, held, holding, problem);
     const declared = all.filter((secret) => !holding.includes(secret));
     const given = all.map((secret) => text(at(secret, 'name')));
-    const needed = secretsNeeded(workload, loadRun, copy);
+    const settings = apiSettingsOf(job);
+    const web = settings !== undefined && roleIn(settings) === 'web';
+    const needed = secretsNeeded(workload, { loadRun, copy, web });
     for (const name of declared.map((secret) => text(at(secret, 'name'))).filter((secret) => !needed.has(secret))) {
       problem(`is given ${name}, which GRANTS doesn't let ${workload} read`);
     }
@@ -6852,15 +6913,22 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
 /**
  * What a workload is given (GRANTS), but a load job's (`LOAD_RUN.reads`, Stage G's `STAGE_G_JOBS`) and the API's and
  * its jobs' in a load run; on Stage G's copy they go without the reset token too, as the copy holds staging's resets.
+ * The API's keys as the copies it runs (TR-20): at AGENTX_ROLE web (`web`), given the jobs' own key's public half and
+ * never the key; else it holds the jobs, given the key and never the half.
  */
-function secretsNeeded(workload: string, loadRun: boolean, copy: boolean): ReadonlySet<string> {
+function secretsNeeded(
+  workload: string,
+  { loadRun, copy, web }: { readonly loadRun: boolean; readonly copy: boolean; readonly web: boolean },
+): ReadonlySet<string> {
   const stageG = STAGE_G_JOBS[workload];
   if (stageG !== undefined) return stageG.reads;
   if (isLoadJob(workload)) return LOAD_RUN.reads;
-  const read = secretsRead(workload);
-  if (!loadRun || !API_APPS.includes(workload)) return read;
+  const read = [...secretsRead(workload)].filter(
+    (secret) => workload !== 'api' || !(web ? APP_KEYS.filter(jobsOnly) : JOBS_HALVES).includes(secret),
+  );
+  if (!loadRun || !API_APPS.includes(workload)) return new Set(read);
   return new Set(
-    [...read].filter((secret) => !LOAD_RUN.apiLeavesOut.has(secret) && !(copy && secret === 'zitadel-reset-token')),
+    read.filter((secret) => !LOAD_RUN.apiLeavesOut.has(secret) && !(copy && secret === 'zitadel-reset-token')),
   );
 }
 

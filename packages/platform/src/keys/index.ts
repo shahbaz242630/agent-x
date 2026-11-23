@@ -16,10 +16,13 @@ export type { Message, MessagePart } from './message.ts';
 export {
   type AeadPurpose,
   API_PURPOSES,
+  JOBS_ONLY,
   KEY_PURPOSES,
   type KeyPurpose,
   type MacPurpose,
   OPERATOR_ONLY,
   PURPOSES,
   type SigningPurpose,
+  WEB_CHECKS,
+  WEB_PURPOSES,
 } from './purposes.ts';

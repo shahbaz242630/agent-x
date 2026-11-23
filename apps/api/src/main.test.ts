@@ -7,7 +7,7 @@ import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import { checkStatesWith, statesDigest } from '@agentx/core/modules/audit';
 import { type CheckedDeclaration, declarePartner, startedLive } from '@agentx/platform/config';
 import type { DatabaseConnectionOptions } from '@agentx/platform/db';
-import { API_PURPOSES } from '@agentx/platform/keys';
+import { API_PURPOSES, WEB_PURPOSES } from '@agentx/platform/keys';
 import { type Output, withLogContext } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, writeTestKeys } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
@@ -359,8 +359,11 @@ const DB_LOGIN = 'stand-in login for these tests';
 
 /** Stand-in keys, one per purpose, as the platform mounts real ones. */
 const KEYS = writeTestKeys(API_PURPOSES);
+/** A `web` copy's: all but the jobs' own (TR-20), whose public half it would check with. */
+const WEB_KEYS = writeTestKeys(WEB_PURPOSES);
 afterAll(() => {
   KEYS.remove();
+  WEB_KEYS.remove();
 });
 
 /** A test run: any free port, on this machine only. */
@@ -558,6 +561,20 @@ describe('SEC-AV-03 the API refuses to start on a bad config', () => {
     expect(fake.created).toEqual([]);
   });
 
+  it('TR-20: a web copy refuses the jobs’ own snapshot key mounted for it, before it opens the database', async () => {
+    const { server, capture } = await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_KEYS_DIR: KEYS.directory });
+    expect(server).toBeUndefined();
+    expect(capture.lines()).toEqual([
+      expect.objectContaining({
+        event: 'api.start_refused',
+        problems: [
+          `key-witness-snapshot-v1 is a key this process doesn't hold: only ${WEB_PURPOSES.join(', ')} may be mounted for it`,
+        ],
+      }),
+    ]);
+    expect(fake.created).toEqual([]);
+  });
+
   it('refuses a key file that holds no key, without showing what it holds', async () => {
     const good = Object.fromEntries(
       API_PURPOSES.map((purpose, index) => [`key-${purpose}-v1`, Buffer.alloc(32, index + 100).toString('base64url')]),
@@ -608,7 +625,12 @@ describe('SEC-AV-03 the API refuses to start on a bad config', () => {
 
 describe('APP-02 the API opens its database as its own role, and checks that role before it listens', () => {
   it('builds no hand-off in `web`, so a pool too small for its gate starts all the same', async () => {
-    const { server } = await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_DB_POOL_MAX: '3' });
+    const { server } = await start({
+      ...ENV,
+      AGENTX_ROLE: 'web',
+      AGENTX_KEYS_DIR: WEB_KEYS.directory,
+      AGENTX_DB_POOL_MAX: '3',
+    });
     expect(server).toBeDefined();
   });
 
@@ -980,6 +1002,7 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     ...ENV,
     AGENTX_ENV: 'production',
     AGENTX_ROLE: 'web',
+    AGENTX_KEYS_DIR: WEB_KEYS.directory,
     AGENTX_PARTNER_MODE: 'live',
     AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
     AGENTX_RELEASE: 'r-live',
@@ -1170,7 +1193,7 @@ describe('4D2e D: the role says which side of the work a process does', () => {
       AGENTX_DIRECTORY_TOKEN: ['stand', 'in', 'reader', 'words'].join('-'),
       AGENTX_FACTOR_RESET_TOKEN: ['stand', 'in', 'reset', 'words'].join('-'),
     };
-    const { server } = await start({ ...CONFIGURED, AGENTX_ROLE: 'web' });
+    const { server } = await start({ ...CONFIGURED, AGENTX_ROLE: 'web', AGENTX_KEYS_DIR: WEB_KEYS.directory });
     expect(server?.hasRoute({ method: 'GET', url: '/v1/auth/callback' })).toBe(true);
 
     const { host, capture } = await start({ ...CONFIGURED, AGENTX_ROLE: 'jobs' });
@@ -1186,7 +1209,7 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     const pulses = (capture: LogCapture) => capture.lines().filter((line) => line.event === 'jobs.pulse');
     const { capture: all } = await start();
     const { capture: jobs } = await start({ ...ENV, AGENTX_ROLE: 'jobs' });
-    const { capture: web } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    const { capture: web } = await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_KEYS_DIR: WEB_KEYS.directory });
     expect(pulses(all)).toHaveLength(1);
     expect(pulses(jobs)).toHaveLength(1);
     expect(pulses(web)).toEqual([]);
@@ -1195,7 +1218,7 @@ describe('4D2e D: the role says which side of the work a process does', () => {
   it('names the role on the first line, `all` where none is set', async () => {
     const { capture } = await start();
     expect(capture.lines()[0]).toEqual(expect.objectContaining({ event: 'api.starting', role: 'all' }));
-    const { capture: web } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    const { capture: web } = await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_KEYS_DIR: WEB_KEYS.directory });
     expect(web.lines()[0]).toEqual(expect.objectContaining({ event: 'api.starting', role: 'web' }));
   });
 
@@ -1210,7 +1233,11 @@ describe('4D2e D: the role says which side of the work a process does', () => {
   });
 
   it('`web` runs the server and no job the `jobs` side keeps: no anchor check, sweep, hand-off or heartbeat of them', async () => {
-    const { host, server, events, capture } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    const { host, server, events, capture } = await start({
+      ...ENV,
+      AGENTX_ROLE: 'web',
+      AGENTX_KEYS_DIR: WEB_KEYS.directory,
+    });
     expect(server?.server.listening).toBe(true);
     expect(events()).toEqual([
       'api.starting',
@@ -1235,7 +1262,12 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     checkStatesWith(undefined);
     const anchors = mkdtempSync(path.join(tmpdir(), 'agentx-api-anchors-'));
     folders.push(anchors);
-    const { host, server } = await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_AUDIT_ANCHORS_DIR: anchors });
+    const { host, server } = await start({
+      ...ENV,
+      AGENTX_ROLE: 'web',
+      AGENTX_KEYS_DIR: WEB_KEYS.directory,
+      AGENTX_AUDIT_ANCHORS_DIR: anchors,
+    });
     expect(server?.server.listening).toBe(true);
     expect(phase2Jobs.scheduled).toEqual([['anchors_read', 60_000], ...EACH_PROCESS]);
     expect(statesDigest()).toBeDefined();
@@ -1296,7 +1328,7 @@ describe('4D2e D: the first try at the lease', () => {
   });
 
   it('`web` has no lease to try', async () => {
-    await start({ ...ENV, AGENTX_ROLE: 'web' });
+    await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_KEYS_DIR: WEB_KEYS.directory });
     expect(fake.steps).not.toContain('lease taken');
   });
 

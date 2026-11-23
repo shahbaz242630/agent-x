@@ -56,7 +56,14 @@ import {
   organisationShareOf,
   UnsafeDatabaseRole,
 } from '@agentx/platform/db';
-import { API_PURPOSES, type KeyProvider, loadKeys, OPERATOR_ONLY } from '@agentx/platform/keys';
+import {
+  API_PURPOSES,
+  type KeyProvider,
+  loadKeys,
+  OPERATOR_ONLY,
+  WEB_CHECKS,
+  WEB_PURPOSES,
+} from '@agentx/platform/keys';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 import {
   asNoWork,
@@ -251,8 +258,12 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
   let keys: KeyProvider;
   try {
     config = loadConfig(options.env, options.partner);
-    // Every key but the operator's own, which it checks the operator's events with the public half of (PL-57).
-    keys = loadKeys(config.keys, API_PURPOSES, OPERATOR_ONLY);
+    // Every key but the operator's own, which it checks the operator's events with the public half of (PL-57); a `web`
+    // copy not the jobs' own either, whose witness snapshots it checks with the public half alone (TR-20).
+    keys =
+      config.role === 'web'
+        ? loadKeys(config.keys, WEB_PURPOSES, WEB_CHECKS)
+        : loadKeys(config.keys, API_PURPOSES, OPERATOR_ONLY);
   } catch (error) {
     // A ConfigError's problems name each variable, key file and rule, never a value.
     const startup = createStartupLogger({ service: SERVICE, destination });
