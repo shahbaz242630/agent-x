@@ -152,7 +152,8 @@ const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld, ours?: OurL
   });
 
 /** The platform chain's copies of the event, by organisation. */
-const platformCopies = async (key: string) =>
+/** Every copied event on the platform chain, oldest first, in one read. */
+const everyCopy = async () =>
   (
     await app
       .selectFrom('platform_controls.audit_events')
@@ -160,12 +161,21 @@ const platformCopies = async (key: string) =>
       .where('action', '=', IDP_EVENT_COPIED)
       .orderBy('seq')
       .execute()
-  )
-    .map((row): Record<string, unknown> => ({
-      actor: row.actor_id,
-      ...(JSON.parse(row.details) as Record<string, unknown>),
-    }))
-    .filter((details) => details.event === key);
+  ).map((row): Record<string, unknown> => ({
+    actor: row.actor_id,
+    ...(JSON.parse(row.details) as Record<string, unknown>),
+  }));
+
+const platformCopies = async (key: string) => (await everyCopy()).filter((details) => details.event === key);
+
+/**
+ * Each key's copies, in one read for them all: a read a key at once (1,600 for a flood) emptied the pool on a busy
+ * runner and failed twice (S212, RW5).
+ */
+const copiesOf = async (keys: readonly string[]) => {
+  const all = await everyCopy();
+  return keys.map((key) => all.filter((details) => details.event === key));
+};
 
 const orgRecords = (org: string) =>
   withTenant(app, org, (tx) =>
@@ -996,7 +1006,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     expect(await sessionsOf(who.userId)).toBe(0);
     const endedAt = clock.now().toISOString();
     expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
-    const copies = await Promise.all(burst.map((one) => platformCopies(`user:${who.subject}:${one.sequence}`)));
+    const copies = await copiesOf(burst.map((one) => `user:${who.subject}:${one.sequence}`));
     expect(copies.flat().filter((copy) => 'signInsEnded' in copy)).toEqual([
       expect.objectContaining({ signInsEnded: 1 }),
     ]);
@@ -1076,7 +1086,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await copierWith(feedOf(() => [...flood, removed]).feed).run();
 
     // The flood is one copy, its latest, counting the 59 before it; the factor removed is copied in the same run.
-    const copied = await Promise.all(flood.map((one) => platformCopies(`user:${who.subject}:${one.sequence}`)));
+    const copied = await copiesOf(flood.map((one) => `user:${who.subject}:${one.sequence}`));
     expect(copied.flat()).toEqual([expect.objectContaining({ type: 'user.human.password.code.added', alsoAsked: 59 })]);
     expect(copied.at(-1)).toHaveLength(1);
     expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toHaveLength(1);
@@ -1118,7 +1128,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       expect(asked).toHaveLength(1);
       // The resets on their own pages, five a run, still recorded: once a page, the others counted on it.
       expect(askedResets).toHaveLength(5);
-      const resets = await Promise.all(flood.map((one) => platformCopies(`user:${who.subject}:${one.sequence}`)));
+      const resets = await copiesOf(flood.map((one) => `user:${who.subject}:${one.sequence}`));
       expect(resets.flat().map((copy) => [copy.type, copy.alsoAsked])).toEqual(
         Array.from({ length: 5 }, () => ['user.human.password.code.added', 99]),
       );
