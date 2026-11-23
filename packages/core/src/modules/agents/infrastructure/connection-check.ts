@@ -41,7 +41,7 @@ import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
 import { scopesOf } from '../domain/agent.ts';
 import { parseConnectionToken, type PresentedToken } from '../domain/connection.ts';
 import { tokenProven, tokenRowFound, tokenRowRead, type TokenProof } from './connection-tokens.ts';
-import { credentialAt, type KeyAtCheck, type KeyChecked, type KeyRefusal } from './key-check.ts';
+import { answeredAs, credentialAt, type KeyAtCheck, type KeyChecked, type KeyRefusal } from './key-check.ts';
 import type { AgentsTables } from './tables.ts';
 
 type Tables = AgentsTables & DirectoryTables & AuditTables;
@@ -100,7 +100,7 @@ export function createConnectionTokenCheck({
         if (checked.reason === 'key_not_held')
           log.error('connection_token.refused', { reason: checked.reason, ...named });
         else log.info('connection_token.refused', { reason: checked.reason, ...named });
-        return { outcome: 'refused' };
+        return answeredAs(checked.reason);
       };
       const presented = parseConnectionToken(text, 'access');
       if (presented === undefined) return answer(refused('malformed'), { keyId: null, tokenId: null });

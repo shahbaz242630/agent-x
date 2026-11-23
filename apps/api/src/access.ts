@@ -450,7 +450,10 @@ export function registerAccess(
         void keyRefused(request, reply, resourceMetadata);
       } else {
         checkKey(bearerToken(authorization), request.id, toolCalls).then((checked) => {
-          if (checked.outcome !== 'accepted') {
+          if (checked.outcome === 'suspended') {
+            // A live key whose agent is suspended (E6-P7): named, so the agent tells its people, not retries.
+            void sendErrorBody(reply, 403, 'AGENT_SUSPENDED', request.id);
+          } else if (checked.outcome !== 'accepted') {
             void keyRefused(request, reply, resourceMetadata);
           } else if (!agentScopes.every((scope) => checked.key.scopes.includes(scope))) {
             // Known, and refused: counted as the agent (its line names it too, request-log.ts).

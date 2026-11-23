@@ -40,12 +40,17 @@
 //    MAC in constant time (the KeyProvider's verifyMac: two 32-byte MACs,
 //    timingSafeEqual). Checked before anything else about the key, so a
 //    caller without the secret is refused as one, whatever state the key is in.
-// 5. The agent ACTIVE; the key ACTIVE and not yet expired (a key rotated out
-//    is one whose expiry has come).
+// 5. The key ACTIVE and not yet expired (a key rotated out is one whose
+//    expiry has come); then the agent ACTIVE.
 //
 // Every refusal is the same answer, `refused`: a caller learns nothing of
 // whether the key exists, whose it is, or why. The reason goes to the log
 // alone, with the key's ID, which is public (ADR-011 §1), never its secret.
+// One exception (E6-P7, S214): a live key, its secret proven, whose agent is
+// suspended is answered `suspended`, so the agent tells its people rather than
+// retrying or asking for a new key. Only the key's holder learns it, as an
+// organisation frozen is told to a live key (ORG_FROZEN), and nothing they can
+// do with it: the suspension is the admin's to lift.
 // A key or agent tampered with is refused too, and its organisation held, as
 // every signed state's read does (with-signed-states.ts).
 //
@@ -116,8 +121,15 @@ export type KeyAtCheck =
   | { readonly outcome: 'accepted'; readonly key: AcceptedKey }
   | { readonly outcome: 'refused'; readonly reason: KeyRefusal };
 
-/** What the check answers a caller: the same `refused` for every reason. */
-export type KeyChecked = { readonly outcome: 'accepted'; readonly key: AcceptedKey } | { readonly outcome: 'refused' };
+/** What the check answers a caller: the same `refused` for every reason but a live key's agent suspended (E6-P7). */
+export type KeyChecked =
+  | { readonly outcome: 'accepted'; readonly key: AcceptedKey }
+  | { readonly outcome: 'refused' }
+  | { readonly outcome: 'suspended' };
+
+/** The answer for a refusal: `suspended` only when the key was live and proven, its agent suspended (step 5). */
+export const answeredAs = (reason: KeyRefusal): KeyChecked =>
+  reason === 'agent_suspended' ? { outcome: 'suspended' } : { outcome: 'refused' };
 
 const refused = (reason: KeyRefusal): KeyAtCheck => ({ outcome: 'refused', reason });
 
@@ -191,9 +203,10 @@ export async function credentialAt(
   }
   const unproven = prove(key);
   if (unproven !== undefined) return refused(unproven);
-  if (agent.status !== 'ACTIVE') return refused('agent_suspended');
+  // The key's own state first: a revoked or expired key is refused as any other, never told its agent is suspended.
   if (key.status !== 'ACTIVE') return refused('revoked');
   if (key.expiresAt.getTime() <= now.getTime()) return refused('expired');
+  if (agent.status !== 'ACTIVE') return refused('agent_suspended');
   return {
     outcome: 'accepted',
     key: {
@@ -338,7 +351,7 @@ export function createAgentKeyCheck({
         // A pepper version this process doesn't hold is ours to fix, not the caller's doing.
         if (checked.reason === 'key_not_held') log.error('agent_key.refused', { reason: checked.reason, keyId });
         else log.info('agent_key.refused', { reason: checked.reason, keyId });
-        return { outcome: 'refused' };
+        return answeredAs(checked.reason);
       };
       const presented = parseAgentKey(text);
       if (presented === undefined) return answer(refused('malformed'), null);

@@ -167,7 +167,7 @@ Each operation's \`security\` shows who may call it, as does its \`x-access\`:
 - **AI agents** send their key as \`Authorization: Bearer ${KEY_FORM}\` (scheme \`${AGENT_KEY_SCHEME}\`). A key expires ${String(KEY_DAYS)} days after it is made. An operation names the scopes the key must hold; an agent may call only operations naming agents.
 - **The licensed partner** signs each message it sends over its raw body (scheme \`${PARTNER_SIGNATURE_SCHEME}\`).
 
-A missing or refused credential is 401 ${code('UNAUTHENTICATED')}; a caller the operation doesn't name is 403 ${code('FORBIDDEN')}; a key without every scope the operation needs is 403 ${code('INSUFFICIENT_SCOPE')}. An admin's or approver's powers need a session signed in with a passkey (403 ${code('PASSKEY_REQUIRED')}), and for a while after a second factor is removed a person keeps only what a developer or viewer may do (403 ${code('SECOND_FACTOR_REMOVED')}).
+A missing or refused credential is 401 ${code('UNAUTHENTICATED')}; a caller the operation doesn't name is 403 ${code('FORBIDDEN')}; a key without every scope the operation needs is 403 ${code('INSUFFICIENT_SCOPE')}; a live key whose agent an admin has suspended is 403 ${code('AGENT_SUSPENDED')} until the suspension is lifted. An admin's or approver's powers need a session signed in with a passkey (403 ${code('PASSKEY_REQUIRED')}), and for a while after a second factor is removed a person keeps only what a developer or viewer may do (403 ${code('SECOND_FACTOR_REMOVED')}).
 
 ## Organisation header
 
