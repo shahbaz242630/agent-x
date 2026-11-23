@@ -167,6 +167,18 @@ export function memberOf(request: Pick<FastifyRequest, 'member' | 'person'>) {
 }
 
 /** A route's use case: without it the route is still documented, and no one reaches it, as no one holds a role. */
+/**
+ * Whether the request acts with an admin's full powers, as an admin-only route (`access: ['admin']`) would let it:
+ * an admin, not kept to lesser powers (SEC-OPS-04), signed in with a passkey. A route open to every member that
+ * shows an admin's extra (decision 27's names, S212 F3) asks this, so it never shows more than those routes would.
+ */
+export function actsAsAdmin(request: Pick<FastifyRequest, 'member' | 'person'>): boolean {
+  const { member, person } = request;
+  return (
+    member?.role === 'admin' && member.withoutPowers === undefined && person?.amr.includes(PASSKEY_METHOD) === true
+  );
+}
+
 export function need<T>(useCase: T | undefined): T {
   if (useCase === undefined) throw new Error('a route ran without its use case');
   return useCase;

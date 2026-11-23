@@ -33,7 +33,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { EVERY_MEMBER } from './access.ts';
+import { actsAsAdmin, EVERY_MEMBER } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 
@@ -146,8 +146,8 @@ export function registerMembers(app: FastifyInstance, listMembers: ListMembers |
       const member = request.member;
       // The access hook lets no one else through; a route that runs without a member is a bug.
       if (member === null || listMembers === undefined) throw new Error('the members route ran without a member');
-      // The role they act in: an admin kept to a developer's or viewer's powers (SEC-OPS-04) is shown no names.
-      const list = await listMembers(member.orgId, request.id, member.role === 'admin');
+      // Names only for an admin with an admin's full powers, passkey included, as the access log asks (S212 F3).
+      const list = await listMembers(member.orgId, request.id, actsAsAdmin(request));
       if (list.outcome === 'tampered') return sendErrorBody(reply, 503, 'INTEGRITY_FAILED', request.id);
       const { names } = list;
       return {

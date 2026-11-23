@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import { errorBody } from './errors.ts';
-import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
+import { liveSession, ONE_TIME_CODE, PASSKEY } from './live-session.helper.test.ts';
 import type { ListMembers, MembersAnswer } from './members.ts';
 import { closeServers, COOKIE, ORG, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
@@ -17,6 +17,8 @@ import { SESSION_COOKIE } from './sign-in.ts';
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 
 const LIVE = liveSession('2026-09-24T09:00:00.000Z', { amr: ONE_TIME_CODE });
+/** The same person signed in with a passkey: an admin's full powers (access.ts: actsAsAdmin). */
+const LIVE_PASSKEY = liveSession('2026-09-24T09:00:00.000Z', { amr: PASSKEY });
 
 const ACTIVE_VIEWER: Extract<MembershipCheck, { outcome: 'active' }> = {
   outcome: 'active',
@@ -49,7 +51,13 @@ afterEach(closeServers);
 /** A server whose list answers `list` (`named` when asked to name them), for a member in `role`. */
 async function withMembers(
   list: MembersList | Error,
-  options: { listed?: boolean; role?: Role; restricted?: Date; named?: MembersAnswer } = {},
+  options: {
+    listed?: boolean;
+    role?: Role;
+    restricted?: Date;
+    named?: MembersAnswer;
+    live?: typeof LIVE;
+  } = {},
 ) {
   const asked: [orgId: string, correlationId: string, named: boolean][] = [];
   const listMembers: ListMembers = (orgId, correlationId, named) => {
@@ -58,7 +66,7 @@ async function withMembers(
     return Promise.resolve(named && options.named !== undefined ? options.named : list);
   };
   const app = await routeServer({
-    live: LIVE,
+    live: options.live ?? LIVE,
     member: { ...ACTIVE_VIEWER, role: options.role ?? 'viewer' },
     ...((options.listed ?? true) && { listMembers }),
     ...(options.restricted !== undefined && { restrictedUntil: () => Promise.resolve(options.restricted) }),
@@ -139,7 +147,7 @@ const membersIn = (body: unknown) => (body as { members: Record<string, unknown>
 
 describe('SEC-TEN-01 GET /v1/members names each member for an admin alone (S212 F3, decision 27)', () => {
   it('asks an admin’s list to be named, and answers each member with their name, email and where it was found', async () => {
-    const { app, asked } = await withMembers(LISTED, { role: 'admin', named: NAMED });
+    const { app, asked } = await withMembers(LISTED, { role: 'admin', named: NAMED, live: LIVE_PASSKEY });
 
     const response = await app.inject(request());
 
@@ -172,10 +180,21 @@ describe('SEC-TEN-01 GET /v1/members names each member for an admin alone (S212 
     },
   );
 
+  it('shows no names to an admin signed in with a one-time code alone, as the access log refuses them (S212 review)', async () => {
+    const { app, asked } = await withMembers(LISTED, { role: 'admin', named: NAMED, live: LIVE });
+
+    const response = await app.inject(request());
+
+    expect(response.statusCode).toBe(200);
+    for (const member of membersIn(response.json())) expect(member).not.toHaveProperty('name');
+    expect(asked).toEqual([[ORG, FIRST_ID, false]]);
+  });
+
   it('SEC-OPS-04 shows no names to an admin kept without an admin’s powers after a second factor was removed', async () => {
     const { app, asked } = await withMembers(LISTED, {
       role: 'admin',
       named: NAMED,
+      live: LIVE_PASSKEY,
       restricted: new Date('2026-09-30T09:00:00.000Z'),
     });
 
