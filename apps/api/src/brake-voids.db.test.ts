@@ -502,7 +502,7 @@ const BRAKES = {
     ready: (w: World) => Promise.resolve<Press>(refreshed(w, () => ({ kind: 'not_found' }))),
   },
   'the supplier suspended to cancel': {
-    cause: 'SUPPLIER_NOT_VERIFIED',
+    cause: 'SUPPLIER_SUSPENDED',
     subject: 'supplier',
     spares: true,
     ready: (w: World) => Promise.resolve<Press>(() => supplierSuspended(w, 'cancel')),
@@ -698,7 +698,7 @@ describe('SEC-AG-11 the brakes void their own pending requests in their transact
     await voidedBefore(
       w,
       [approved, waiting],
-      'SUPPLIER_NOT_VERIFIED',
+      'SUPPLIER_SUSPENDED',
       await newestSeq(w, 'supplier', w.suppliers[0] ?? ''),
     );
   });
@@ -884,7 +884,7 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     expect(await supplierSuspended(w, 'pause')).toMatchObject({ supplier: { status: 'SUSPENDED' } });
 
     const suspended = await firstSeqAfter(w, 'supplier', supplierOfWorld(w), before);
-    await voidedBefore(w, left === undefined ? [] : [left], 'SUPPLIER_NOT_VERIFIED', suspended);
+    await voidedBefore(w, left === undefined ? [] : [left], 'SUPPLIER_SUSPENDED', suspended);
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 

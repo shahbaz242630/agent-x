@@ -138,7 +138,7 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
     ['another agent’s mandate', { mandate: { ...MANDATE, agentId: SOURCE } }, 'MANDATE_NOT_IN_FORCE'],
     ['an unknown supplier', { supplierStatus: null }, 'SUPPLIER_NOT_VERIFIED'],
     ['an unverified supplier', { supplierStatus: 'UNVERIFIED' }, 'SUPPLIER_NOT_VERIFIED'],
-    ['a suspended supplier', { supplierStatus: 'SUSPENDED' }, 'SUPPLIER_NOT_VERIFIED'],
+    ['a suspended supplier', { supplierStatus: 'SUSPENDED' }, 'SUPPLIER_SUSPENDED'],
     ['a source that may not fund', { sourceMayFund: false }, 'SOURCE_NOT_USABLE'],
     ['a duplicate order', { duplicateOrder: true }, 'DUPLICATE_ORDER_REFERENCE'],
     [
@@ -201,7 +201,7 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
     const ended = { mandate: { ...MANDATE, status: 'EXPIRED' }, supplierStatus: 'SUSPENDED' };
     expect(decide(input(30_000, ended))).toMatchObject({
       decision: 'DENY',
-      reasons: ['SUPPLIER_NOT_VERIFIED', 'MANDATE_NOT_IN_FORCE'],
+      reasons: ['SUPPLIER_SUSPENDED', 'MANDATE_NOT_IN_FORCE'],
     });
     const capped = { organizationPolicy: orgPolicy({ monthlyCap: aed(20_000) }) };
     expect(decide(input(30_000, { ...capped, duplicateOrder: true }))).toMatchObject({

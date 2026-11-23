@@ -44,13 +44,16 @@ describe('rejectedFor: what a refusal at approval rejects it for', () => {
     expect(rejectedFor('DENY', ['POLICY_ORDER_CAP'])).toEqual(['POLICY_ORDER_CAP']);
   });
 
-  it.each(['AGENT_SUSPENDED', 'SUPPLIER_NOT_VERIFIED', 'SOURCE_NOT_USABLE', 'MANDATE_NOT_IN_FORCE'] as const)(
-    'never rejects for a stop, even beside a rule: %s (perhaps a pause the team chose)',
-    (stop) => {
-      expect(rejectedFor('DENY', [stop])).toBeNull();
-      expect(rejectedFor('DENY', ['POLICY_MONTHLY_CAP', stop])).toBeNull();
-    },
-  );
+  it.each([
+    'AGENT_SUSPENDED',
+    'SUPPLIER_NOT_VERIFIED',
+    'SUPPLIER_SUSPENDED',
+    'SOURCE_NOT_USABLE',
+    'MANDATE_NOT_IN_FORCE',
+  ] as const)('never rejects for a stop, even beside a rule: %s (perhaps a pause the team chose)', (stop) => {
+    expect(rejectedFor('DENY', [stop])).toBeNull();
+    expect(rejectedFor('DENY', ['POLICY_MONTHLY_CAP', stop])).toBeNull();
+  });
 
   it('names a policy’s order cap beside another refusal: it may have refused as well', () => {
     expect(rejectedFor('DENY', ['POLICY_MONTHLY_CAP', 'POLICY_ORDER_CAP'])).toEqual([

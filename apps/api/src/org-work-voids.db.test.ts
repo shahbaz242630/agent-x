@@ -128,7 +128,8 @@ const WAYS: Readonly<Record<Exclude<VoidCause, 'APPROVAL_LAPSED'>, readonly (rea
       (w) => shared.partnerSays(w, { availability: 'UNAVAILABLE', consentStatus: 'Revoked' }),
     ],
   ],
-  SUPPLIER_NOT_VERIFIED: [['the supplier suspended', STOPS['the supplier suspended']]],
+  SUPPLIER_NOT_VERIFIED: [['the supplier’s details changed', STOPS['the supplier’s details changed']]],
+  SUPPLIER_SUSPENDED: [['the supplier suspended', STOPS['the supplier suspended']]],
   SUPPLIER_CHANGED: [['the supplier’s details changed', STOPS['the supplier’s details changed']]],
 };
 
