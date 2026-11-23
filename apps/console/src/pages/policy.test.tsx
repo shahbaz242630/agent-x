@@ -257,6 +257,7 @@ describe('the organisation’s policy (6D3b)', () => {
     as('viewer');
     open('/more/policy');
     expect(await screen.findByRole('heading', { name: 'Organisation policy' })).toBeDefined();
+    expect(screen.getByRole('link', { name: 'Back to More' })).toBeDefined();
     expect(screen.getByText('Up to AED 1,000.00; above it, refused')).toBeDefined();
     expect(screen.getByText('AED 5,000.00')).toBeDefined();
     expect(screen.getByText('Above AED 500.00')).toBeDefined();
@@ -660,7 +661,7 @@ describe('a mandate’s own policy (6D3b)', () => {
     const history = open(page);
     await userEvent.click(await screen.findByRole('link', { name: 'Try a request in the simulator' }));
     expect(history.location.pathname).toBe(`/more/mandates/${MANDATE}/simulate`);
-    await userEvent.click(await screen.findByRole('link', { name: '← The mandate' }));
+    await userEvent.click(await screen.findByRole('link', { name: 'Back to the mandate' }));
     expect(history.location.pathname).toBe(`/more/mandates/${MANDATE}`);
   });
 

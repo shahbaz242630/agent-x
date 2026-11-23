@@ -1,6 +1,7 @@
 import type { Organization } from '../session.tsx';
 import { t } from '../text.ts';
 import { Panel, Unreadable } from './panel.tsx';
+import { Tag } from './tag.tsx';
 
 /** More than one organisation and none chosen yet: each with the person's role in it. */
 export function Choose({
@@ -28,7 +29,7 @@ export function Choose({
               <span>{organization.name}</span>
               <span className="muted">
                 {t(`choose.role.${organization.role}`)}
-                {organization.frozen && <span className="tag warn">{t('choose.frozen')}</span>}
+                {organization.frozen && <Tag warn>{t('choose.frozen')}</Tag>}
               </span>
             </button>
           </li>

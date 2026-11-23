@@ -28,6 +28,7 @@ import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
 import { ActorLine } from './log-event.tsx';
 import { Download, type Field, FilterForm, FormatField, LogScreen, Pages, useFilters } from './log-parts.tsx';
+import { Tag } from './tag.tsx';
 
 const FIELDS: readonly Field[] = [{ name: 'actorType', options: ['', 'user', 'agent'] }, { name: 'actorId' }];
 
@@ -81,7 +82,7 @@ function Row({ row, narrow }: { readonly row: ActivityRow; readonly narrow: (mor
           <span className="mono">
             {row.method} {row.route}
           </span>
-          {row.sealed && <span className="tag">{t('logs.access.sealed')}</span>}
+          {row.sealed && <Tag>{t('logs.access.sealed')}</Tag>}
         </span>
         <span className="muted">
           {timeText(row.recordedAt)} · <span className="mono">{said}</span>

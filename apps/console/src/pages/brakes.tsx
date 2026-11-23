@@ -18,6 +18,7 @@ import { ask, changeAt } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
+import { Tag } from './tag.tsx';
 
 interface Opened {
   readonly kind: 'suspend' | 'reactivate';
@@ -55,8 +56,8 @@ function Row({
           <Link to={page} params={{ id: thing.id }}>
             {thing.name}
           </Link>
-          {thing.suspended && <span className="tag warn">{t('brakes.suspended')}</span>}
-          {thing.ended && <span className="tag">{t('brakes.ended')}</span>}
+          {thing.suspended && <Tag warn>{t('brakes.suspended')}</Tag>}
+          {thing.ended && <Tag>{t('brakes.ended')}</Tag>}
         </span>
         <span className="muted mono">{thing.detail}</span>
       </span>

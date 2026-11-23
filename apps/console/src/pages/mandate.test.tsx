@@ -265,6 +265,107 @@ describe('the mandates list', () => {
   });
 });
 
+describe('names, not bare IDs (CO11a F2, F6)', () => {
+  const noneListed = (path: string, kind: string) =>
+    answer(path, { status: 200, body: { [kind]: [], next: null, unchecked: [] } });
+
+  it('names a row’s agent with its ID beside it, and keeps the status badge its own word', async () => {
+    as('admin');
+    open('/more/mandates');
+
+    const forAgent = await screen.findByText('For Buyer bot');
+    expect(forAgent.textContent).toBe(`For Buyer bot ${AGENT}`);
+    expect(within(forAgent).getByText(AGENT).className).toBe('mono');
+    expect(screen.getByText('In force').parentElement?.textContent).toBe('Office supplies In force');
+  });
+
+  it('says a row’s agent by its ID alone while the Agents list doesn’t name it', async () => {
+    as('admin');
+    noneListed('GET /v1/agents', 'agents');
+    open('/more/mandates');
+
+    expect((await screen.findByText(`For ${AGENT}`)).textContent).toBe(`For ${AGENT}`);
+  });
+
+  it('names the agent, suppliers and bank account on the page, each ID beside it, the signed terms unchanged', async () => {
+    as('admin');
+    open(`/more/mandates/${MANDATE}`);
+
+    const link = await screen.findByRole('link', { name: 'Buyer bot' });
+    expect(link.parentElement?.textContent).toBe(`Buyer bot ${AGENT}`);
+    const table = within(screen.getByRole('table'));
+    expect((await table.findByText('Gulf Traders')).textContent).toBe(`Gulf Traders ${SUPPLIER}`);
+    expect((await table.findByText('Gulf Office LLC · AE…6026')).textContent).toBe(
+      `Gulf Office LLC · AE…6026 ${SOURCE}`,
+    );
+    expect(table.getByText(SUPPLIER).className).toBe('muted mono');
+    expect(table.getByText('a'.repeat(64))).toBeDefined();
+  });
+
+  it('names the agent from the Agents list when its own page can’t be read', async () => {
+    as('admin');
+    answer(`GET /v1/agents/${AGENT}`, refused(403, 'FORBIDDEN'));
+    open(`/more/mandates/${MANDATE}`);
+
+    expect((await screen.findByRole('link', { name: 'Buyer bot' })).parentElement?.textContent).toBe(
+      `Buyer bot ${AGENT}`,
+    );
+  });
+
+  it('falls back to the IDs alone where no list names them', async () => {
+    as('admin');
+    answer(`GET /v1/agents/${AGENT}`, refused(404, 'NOT_FOUND'));
+    noneListed('GET /v1/agents', 'agents');
+    noneListed('GET /v1/suppliers', 'suppliers');
+    noneListed('GET /v1/funding-sources', 'sources');
+    open(`/more/mandates/${MANDATE}`);
+
+    expect((await screen.findByRole('link', { name: AGENT })).parentElement?.textContent).toBe(AGENT);
+    const table = within(screen.getByRole('table'));
+    expect(table.getByText(SUPPLIER).className).toBe('mono');
+    expect(table.getByText(SOURCE).className).toBe('mono');
+  });
+
+  it('lists several suppliers by name, comma-separated', async () => {
+    as('admin', mandate({ current: version({ supplierIds: [SUPPLIER, OTHER_SUPPLIER] }) }));
+    open(`/more/mandates/${MANDATE}`);
+
+    // The ID shown muted once the Suppliers list names it.
+    const table = within(await screen.findByRole('table'));
+    const cell = (await table.findByText(OTHER_SUPPLIER, { selector: '.muted' })).parentElement;
+    expect(cell?.textContent).toBe(`Gulf Traders ${SUPPLIER}, Desert Paper ${OTHER_SUPPLIER}`);
+  });
+
+  it('offers the Gulf’s time zones first, then all of them, none chosen', async () => {
+    as('admin');
+    open('/more/mandates/new');
+
+    const zone = await screen.findByRole('combobox', { name: 'Time zone its months are counted in' });
+    expect(zone).toHaveProperty('value', '');
+    const groups = zone.querySelectorAll('optgroup');
+    expect([...groups].map((group) => group.label)).toEqual(['Common in the UAE and the Gulf', 'All time zones']);
+    expect([...(groups[0]?.querySelectorAll('option') ?? [])].map((option) => option.value)).toEqual([
+      'Asia/Dubai',
+      'Asia/Riyadh',
+      'Asia/Qatar',
+      'Asia/Bahrain',
+      'Asia/Kuwait',
+      'Asia/Muscat',
+    ]);
+    expect(groups[1]?.querySelectorAll('option').length).toBe(Intl.supportedValuesOf('timeZone').length);
+    expect([...zone.querySelectorAll('option')].filter((option) => option.selected).map((o) => o.value)).toEqual(['']);
+  });
+
+  it('names the agent in a draft’s confirm with its ID beside it', { timeout: 20_000 }, async () => {
+    as('admin');
+    open('/more/mandates/new');
+    await fillDraft();
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }));
+
+    expect(dialog().getByText('Buyer bot').textContent).toBe(`Buyer bot ${AGENT}`);
+  });
+});
+
 describe('a mandate’s page', () => {
   it('shows everything the API gives, the waiting draft beside the version in force with its changes marked', async () => {
     as(
@@ -284,7 +385,7 @@ describe('a mandate’s page', () => {
     expect(table.getByText('AED 2,500.00')).toBeDefined();
     expect(table.getByText('AED 3,000.00')).toBeDefined();
     expect(await table.findAllByText('Gulf Traders')).toHaveLength(2);
-    expect(await table.findAllByText('Gulf Office LLC (AE…6026)')).toHaveLength(2);
+    expect(await table.findAllByText('Gulf Office LLC · AE…6026')).toHaveLength(2);
     expect(table.getAllByText('Changed')).toHaveLength(2);
     expect(screen.getByText(/Past the bank consent: the per-order limit/)).toBeDefined();
     expect(screen.getByText(/Past the agent's monthly cap: the agent’s monthly cap is below/)).toBeDefined();
@@ -663,7 +764,7 @@ async function fillDraft() {
   await userEvent.type(screen.getByRole('textbox', { name: 'Most in a month, in AED' }), '20000');
   await userEvent.type(screen.getByRole('textbox', { name: 'A person approves above, in AED' }), '1000');
   await userEvent.click(await screen.findByRole('checkbox', { name: /Gulf Traders/ }));
-  await userEvent.click(await screen.findByRole('radio', { name: /Gulf Office LLC \(AE…6026\)/ }));
+  await userEvent.click(await screen.findByRole('radio', { name: /Gulf Office LLC · AE…6026/ }));
   await userEvent.click(screen.getByRole('radio', { name: /^Check them/ }));
   await userEvent.click(screen.getByRole('radio', { name: /^Strict/ }));
   await userEvent.click(screen.getByRole('radio', { name: 'Not until it is revoked' }));
@@ -893,7 +994,7 @@ describe('drafting a mandate', { timeout: 20_000 }, () => {
     await userEvent.type(screen.getByRole('textbox', { name: 'Most in a month, in AED' }), '20000');
     await userEvent.type(screen.getByRole('textbox', { name: 'A person approves above, in AED' }), '1000');
     await userEvent.click(await screen.findByRole('checkbox', { name: /Gulf Traders/ }));
-    await userEvent.click(await screen.findByRole('radio', { name: /Gulf Office LLC \(AE…6026\)/ }));
+    await userEvent.click(await screen.findByRole('radio', { name: /Gulf Office LLC · AE…6026/ }));
     await userEvent.click(screen.getByRole('radio', { name: /^Check them/ }));
     await userEvent.click(screen.getByRole('radio', { name: /^Strict/ }));
     await userEvent.click(screen.getByRole('radio', { name: 'Not until it is revoked' }));

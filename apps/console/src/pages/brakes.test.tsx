@@ -145,6 +145,8 @@ describe('the kill switch: suspending an agent (6B2)', () => {
     expect(await screen.findByText(AGENT)).toBeDefined();
     expect(screen.getByText(TWIN)).toBeDefined();
     expect(screen.getByText('Suspended')).toBeDefined();
+    // The badge is its own word to a screen reader, never run into the name (CO11a F6).
+    expect(screen.getByText('Suspended').parentElement?.textContent).toBe('Phase 4 demo agent Suspended');
     expect(screen.getAllByRole('button', { name: 'Suspend Phase 4 demo agent' })).toHaveLength(1);
     expect(screen.getAllByRole('button', { name: 'Reactivate Phase 4 demo agent' })).toHaveLength(1);
     expect(sentTo('GET', '/v1/agents?limit=50')).toHaveLength(1);

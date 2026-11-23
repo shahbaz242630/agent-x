@@ -26,6 +26,7 @@ import { t } from '../text.ts';
 import { Clues } from './access-log.tsx';
 import { Said, useChange } from './change.tsx';
 import { FilterForm, FormatField, Pages, useFilters } from './log-parts.tsx';
+import { Tag } from './tag.tsx';
 
 /** A download's refusals in a person's own words (no background build, no admin); any other as the logs say it. */
 const myRefusal = (error: unknown): string => {
@@ -43,7 +44,7 @@ function Row({ row }: { readonly row: MyActivityRow }) {
           <span className="mono">
             {row.method} {row.route}
           </span>
-          {row.sealed && <span className="tag">{t('logs.access.sealed')}</span>}
+          {row.sealed && <Tag>{t('logs.access.sealed')}</Tag>}
         </span>
         <span className="muted">
           {timeText(row.recordedAt)} · <span className="mono">{said}</span>

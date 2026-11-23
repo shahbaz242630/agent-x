@@ -3,13 +3,18 @@
 // name where the lists the page has read name them (by ID otherwise), and
 // every setting the admin chose. A waiting draft is shown beside the version
 // in force, each changed term marked, so the admin sees what accepting it
-// changes; the API's warnings for each version are said under it.
+// changes; the API's warnings for each version are said under it. Names are
+// for reading only: each ID stays beside its name, and what is signed (the
+// terms fingerprint, a passkey's acceptance) is the IDs alone.
+import { Fragment, type ReactNode } from 'react';
+
 import { useBrakeList } from '../brakes.ts';
 import type { MandateVersion, SourceListed } from '../mandates.ts';
 import { useSourceList } from '../mandates.ts';
 import { amountText, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t, type TextKey } from '../text.ts';
+import { Tag } from './tag.tsx';
 
 /** What the page can name: the suppliers and bank accounts read so far, by ID. */
 export interface Names {
@@ -30,8 +35,22 @@ export function useNames(): Names {
   };
 }
 
-/** A bank account as a person knows it: its holder and the end of its number. */
-export const sourceText = (source: SourceListed): string => `${source.holderName} (${source.hint})`;
+/** A bank account as a person knows it: its holder and the end of its number, as the Bank accounts list shows it. */
+export const sourceText = (source: SourceListed): string => `${source.holderName} · ${source.hint}`;
+
+/** A thing by its name with its ID beside it, muted; by its ID alone while no list read so far names it. */
+export function Named({ name, id }: { readonly name: string | undefined; readonly id: string }) {
+  return name === undefined ? (
+    <span className="mono">{id}</span>
+  ) : (
+    <>
+      {name} <span className="muted mono">{id}</span>
+    </>
+  );
+}
+
+/** A term: its label, its words (what a draft is compared by), and how it is shown where that differs. */
+export type TermRow = readonly [TextKey, string, ReactNode?];
 
 /** The terms a version holds, or a draft about to be sent: what termRows says. */
 export type Terms = Pick<
@@ -52,16 +71,26 @@ export type Terms = Pick<
 export function termRows(
   version: Terms & Partial<Pick<MandateVersion, 'overLimit'>>,
   names: Names,
-): readonly (readonly [TextKey, string])[] {
+): readonly TermRow[] {
   const money = (minor: number) => amountText(minor, version.currency);
   const source = names.sources.get(version.fundingSourceId);
+  const suppliers = version.supplierIds.map((id, at) => (
+    <Fragment key={id}>
+      {at > 0 && ', '}
+      <Named name={names.suppliers.get(id)} id={id} />
+    </Fragment>
+  ));
   return [
     ['mandates.term.purpose', version.purpose],
     ['mandates.term.perOrder', money(version.perOrderLimitMinor)],
     ['mandates.term.monthly', money(version.monthlyLimitMinor)],
     ['mandates.term.threshold', money(version.approvalThresholdMinor)],
-    ['mandates.term.suppliers', version.supplierIds.map((id) => names.suppliers.get(id) ?? id).join(', ')],
-    ['mandates.term.source', source === undefined ? version.fundingSourceId : sourceText(source)],
+    ['mandates.term.suppliers', version.supplierIds.map((id) => names.suppliers.get(id) ?? id).join(', '), suppliers],
+    [
+      'mandates.term.source',
+      source === undefined ? version.fundingSourceId : sourceText(source),
+      <Named key="source" name={source && sourceText(source)} id={version.fundingSourceId} />,
+    ],
     ['mandates.term.splitCheck', t(version.splitCheck ? 'mandates.split.on' : 'mandates.split.off')],
     ['mandates.term.consentLimits', t(`mandates.consent.${version.consentLimits}`)],
     ['mandates.term.ends', version.endsAt === null ? t('mandates.endsNever') : timeText(version.endsAt)],
@@ -120,15 +149,16 @@ export function TermsTable({
             </tr>
           </thead>
           <tbody>
-            {first.map(([label, words], at) => {
-              const draft = second?.[at]?.[1];
+            {first.map(([label, words, shownAs], at) => {
+              const [, draft, draftShownAs] = second?.[at] ?? [];
               return (
                 <tr key={label}>
                   <th scope="row">{t(label)}</th>
-                  <td>{words}</td>
+                  <td>{shownAs ?? words}</td>
                   {draft !== undefined && (
                     <td>
-                      {draft} {draft !== words && <span className="tag warn">{t('mandates.changed')}</span>}
+                      {draftShownAs ?? draft}
+                      {draft !== words && <Tag warn>{t('mandates.changed')}</Tag>}
                     </td>
                   )}
                 </tr>

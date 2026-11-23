@@ -12,6 +12,7 @@ import type { ReactNode } from 'react';
 
 import { useAgent, useMembers } from '../agents.ts';
 import { isMissing } from '../api.ts';
+import { useBrakeList } from '../brakes.ts';
 import { isEnded, MANAGING, type MandateDetails, useMandate } from '../mandates.ts';
 import { SIMULATING } from '../policies.ts';
 import { amountText, timeText } from '../requests.ts';
@@ -40,6 +41,11 @@ function capText({ agentMonthlyCap: cap }: MandateDetails): string {
 function MandateShown({ mandate }: { readonly mandate: MandateDetails }) {
   const { organization, session } = useActing();
   const agent = useAgent(mandate.agentId, organization.id);
+  // Its name from its own page's read, else from the Agents list read so far (the Mandates list's, cached).
+  const agents = useBrakeList('agents', organization.id);
+  const agentName =
+    agent.data?.agent.name ??
+    (agents.data?.pages ?? []).flatMap((page) => page.listed).find(({ id }) => id === mandate.agentId)?.name;
   const members = useMembers(organization.id);
   const me = session.userId.toLowerCase();
   const accepter = (members.data ?? []).find((member) => member.id === mandate.acceptedBy);
@@ -55,8 +61,9 @@ function MandateShown({ mandate }: { readonly mandate: MandateDetails }) {
         <dt>{t('mandates.agent')}</dt>
         <dd>
           <Link to="/agents/$id" params={{ id: mandate.agentId }}>
-            {agent.data?.agent.name ?? mandate.agentId}
+            {agentName ?? mandate.agentId}
           </Link>
+          {agentName !== undefined && <span className="muted mono"> {mandate.agentId}</span>}
         </dd>
         <dt>{t('mandates.timeZone')}</dt>
         <dd>{mandate.timeZone}</dd>
