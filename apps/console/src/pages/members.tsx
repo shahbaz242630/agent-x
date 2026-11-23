@@ -1,7 +1,8 @@
 // The organisation's members (6D4b; BR-01, BR-02): `/more/members`, for any
 // of its roles to read. Each member by role, "(you)" for the person signed in,
-// their membership ID, whether they are active and since when: the API keeps
-// names and email addresses with the login service, so none is shown. Each
+// their membership ID, whether they are active and since when; an admin sees
+// each by "Name (email)" too, as the API names them to admins alone (S212 F3,
+// decision 27), their role beside it. Each
 // opens their page (member.tsx), where an admin changes a role, deactivates
 // them or resets a lost second factor. An admin also invites people,
 // confirms or declines who accepted an admin's or approver's invitation
@@ -13,7 +14,7 @@ import { isIntegrityFailed } from '../api.ts';
 import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
-import { memberText } from './agent.tsx';
+import { memberText, namedText } from './agent.tsx';
 import { Loading, Retry } from './failed.tsx';
 import { Invite, WaitingInvitation } from './invite.tsx';
 import { Tag } from './tag.tsx';
@@ -28,6 +29,7 @@ function Row({ member, me }: { readonly member: Member; readonly me: string }) {
           </Link>
           {member.status === 'DEACTIVATED' && <Tag warn>{t('members.status.DEACTIVATED')}</Tag>}
         </span>
+        {namedText(member) !== undefined && <span className="muted">{t(`choose.role.${member.role}`)}</span>}
         <span className="mono fine">{member.id}</span>
         <span className="muted">{t('members.since', { time: timeText(member.joinedAt) })}</span>
       </span>
@@ -67,7 +69,7 @@ export function Members() {
         {t('members.backToMore')}
       </Link>
       <h1>{t('members.title')}</h1>
-      <p className="muted">{t('members.intro')}</p>
+      <p className="muted">{t(admin ? 'members.introNamed' : 'members.intro')}</p>
       <MemberList />
       {admin && (
         <>

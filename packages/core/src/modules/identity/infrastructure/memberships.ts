@@ -46,6 +46,7 @@ import {
   type MembershipsTransaction,
 } from './membership-grants.ts';
 import type { IdentityTables } from './tables.ts';
+import { type KeptPerson, keptPeopleOf } from './user-contacts.ts';
 
 /** A membership's row, as the signed state reads, records and moves it. */
 export const MEMBERSHIPS = {
@@ -261,6 +262,9 @@ export const isMembershipTaken = (error: unknown): boolean =>
   (error as { code?: unknown }).code === '23505' &&
   (error as { constraint?: unknown }).constraint === 'members_pkey';
 
+/** The tables a membership's or the members' read in a transaction of its own reaches. */
+type MembersTables = IdentityTables & DirectoryTables & AuditTables;
+
 /**
  * The person's membership of the organisation, verified: active with its
  * role, deactivated, none, or tampered with (the alarm is raised, and the
@@ -308,7 +312,7 @@ export async function membershipOf(
  * connection back and the request fails rather than hangs.
  */
 export function membershipFor(
-  db: Kysely<IdentityTables & DirectoryTables & AuditTables>,
+  db: Kysely<MembersTables>,
   services: SignedStatesServices,
   orgId: string,
   userId: string,
@@ -322,11 +326,42 @@ export function membershipFor(
  * reads (B4-2b). Each statement is limited to 10 seconds.
  */
 export function membersFor(
-  db: Kysely<IdentityTables & DirectoryTables & AuditTables>,
+  db: Kysely<MembersTables>,
   services: SignedStatesServices,
   orgId: string,
 ): Promise<MembersList> {
   return withSignedStates(db, orgId, services, (tx, states) => membersOf(tx, states, orgId));
+}
+
+/** The organisation's members, and what Agent X kept of each one's name and address at their latest sign-in. */
+export type KeptMembersList =
+  | (Extract<MembersList, { outcome: 'listed' }> & { readonly people: ReadonlyMap<string, KeptPerson> })
+  | Extract<MembersList, { outcome: 'tampered' }>;
+
+/**
+ * The organisation's members as membersFor reads them, and the copy Agent X
+ * kept of each one's name and address (decision 25), in the same transaction:
+ * one statement more for the whole list. Only the verified members' own IDs
+ * are asked for, so no one outside the organisation is named (decision 27:
+ * what its admins are shown).
+ */
+export function keptMembersFor(
+  db: Kysely<MembersTables>,
+  services: SignedStatesServices,
+  orgId: string,
+): Promise<KeptMembersList> {
+  return withSignedStates(db, orgId, services, async (tx, states) => {
+    const list = await membersOf(tx, states, orgId);
+    if (list.outcome === 'tampered') return list;
+    return {
+      ...list,
+      people: await keptPeopleOf(
+        tx,
+        services.keys,
+        list.members.map((member) => member.userId),
+      ),
+    };
+  });
 }
 
 /** The most members an organisation's list gives: more is refused, never cut short unseen. */

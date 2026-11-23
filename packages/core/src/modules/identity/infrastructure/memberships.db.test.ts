@@ -20,6 +20,7 @@ import { createOrganization, type OrganizationsTables } from '../../organization
 import type { Role } from '../domain/membership.ts';
 import {
   addMembership,
+  keptMembersFor,
   membersFor,
   membershipFor,
   membershipOf,
@@ -455,6 +456,26 @@ describe("an organisation's members, each verified (B4-2b)", () => {
 
     expect(await list(org)).toEqual({ outcome: 'tampered', sign: 'seal' });
     expect(alarms()).toEqual([expect.objectContaining({ subjectType: 'membership', objectId: id, reason: 'seal' })]);
+  });
+
+  it('SEC-TEN-01 reads the kept copy of its own members alone, and none when a membership was tampered with (S212 F3)', async () => {
+    const org = await organization();
+    const [first, second] = [await person(), await person()];
+    await add(org, first, 'admin');
+    await add(org, second, 'viewer');
+    await add(await organization(), await person(), 'admin');
+
+    const kept = await keptMembersFor(app, services(), org);
+
+    if (kept.outcome !== 'listed') throw new Error(`not listed: ${JSON.stringify(kept)}`);
+    expect(kept.members.map((member) => member.userId)).toEqual([first, second]);
+    expect([...kept.people.keys()].sort()).toEqual([first, second].sort());
+
+    const { id } = await add(org, await person(), 'viewer');
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('identity.memberships').set({ role: 'admin' }).where('id', '=', id).execute(),
+    );
+    expect(await keptMembersFor(app, services(), org)).toEqual({ outcome: 'tampered', sign: 'seal' });
   });
 
   it(`refuses an organisation listing more than ${String(MOST_MEMBERS)}, rather than cut the list short`, async () => {

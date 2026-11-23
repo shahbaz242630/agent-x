@@ -7321,6 +7321,34 @@
             "type": "string",
             "format": "date-time",
             "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shownFrom": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "login_service",
+                  "kept_copy",
+                  "agent",
+                  "agent_x"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -7347,7 +7375,7 @@
           "members"
         ],
         "additionalProperties": false,
-        "description": "The organisation's members, deactivated ones included, in order of membership ID."
+        "description": "The organisation's members, deactivated ones included, in order of membership ID; named for an admin (decision 27)."
       },
       "MemberChangeAsked": {
         "type": "object",
