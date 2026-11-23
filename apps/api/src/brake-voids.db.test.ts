@@ -1716,6 +1716,9 @@ describe('reactivating a suspended bank account: a fresh start or an un-pause (E
     await job(w).run();
 
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+    // Nor at approval, which reads its stops itself (cancelledSinceOf): the waiting one may still be approved.
+    const asked = await approvals().ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION);
+    expect(asked.outcome).toBe('asked');
   });
 });
 
