@@ -339,7 +339,7 @@ describe('SEC-DB-20 TR-14 attribution through snapshots', () => {
     const snapshots = createFakeWriteOnceStore();
     const honest = copyOn(store);
     await honest.log.now(CHAIN, head(7n, 1));
-    // The next release's snapshots, which write each head's writer (SNAPSHOT_WRITERS on).
+    // Snapshots that write each head's writer (SNAPSHOT_WRITERS on, S212).
     const leader = copyOn(store, { snapshots, leads: true, snapshotWriters: true });
     await leader.log.refresh();
     leader.log.soon(OTHER, head(1n, 1));
@@ -750,9 +750,9 @@ describe('SEC-DB-20 TR-14 review: a writer set aside twice, snapshots this relea
     expect(names(store, 'set-aside')).toHaveLength(2);
   });
 
-  it('this release writes no writer into a snapshot (SNAPSHOT_WRITERS off); the next release does', async () => {
-    expect(SNAPSHOT_WRITERS).toBe(false);
-    for (const snapshotWriters of [undefined, true]) {
+  it('snapshots write each head’s writer by default (SNAPSHOT_WRITERS on, TR-14b); a build before writes none', async () => {
+    expect(SNAPSHOT_WRITERS).toBe(true);
+    for (const snapshotWriters of [undefined, false]) {
       const store = createFakeWriteOnceStore();
       const snapshots = createFakeWriteOnceStore();
       const leader = copyOn(store, { snapshots, leads: true, snapshotWriters });
@@ -763,7 +763,7 @@ describe('SEC-DB-20 TR-14 review: a writer set aside twice, snapshots this relea
       const text = gunzipSync(snapshots.files.get(name) ?? Buffer.alloc(0)).toString();
       expect({ snapshotWriters, written: text.includes(`"w":"${leader.log.writer()}"`) }).toEqual({
         snapshotWriters,
-        written: snapshotWriters === true,
+        written: snapshotWriters !== false,
       });
     }
   });
