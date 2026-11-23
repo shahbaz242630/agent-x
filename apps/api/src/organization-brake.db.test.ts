@@ -566,7 +566,8 @@ describe('the kill switch: the agent’s own brake', () => {
       // answer (8.5 s, six runs), and the wait for a connection, the rig's own (0.9 s to 2 s).
       expect(ms - times.poolWaitMs).toBeLessThan(BRAKE_WAIT_MS);
       expect(times.poolWaitMs).toBeLessThan(BRAKE_WAIT_MS);
-      expect(await keyCheck().check(acting.text, CORRELATION)).toEqual({ outcome: 'refused' });
+      // A live key, its agent suspended: named so to its holder (E6-P7).
+      expect(await keyCheck().check(acting.text, CORRELATION)).toEqual({ outcome: 'suspended' });
       expect(alarms()).toEqual([]);
     },
     LONG,
@@ -586,7 +587,7 @@ describe('the kill switch: the agent’s own brake', () => {
 
     await letGo(inside);
     expect(await suspending).toMatchObject({ outcome: 'changed', agent: { agent: { status: 'SUSPENDED' } } });
-    expect(await checking).toEqual({ outcome: 'refused' });
+    expect(await checking).toEqual({ outcome: 'suspended' });
     expect(await late).toMatchObject({
       outcome: 'decided',
       request: { decision: 'DENY', reasons: ['AGENT_SUSPENDED'] },

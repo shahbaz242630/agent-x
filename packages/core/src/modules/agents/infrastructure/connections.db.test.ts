@@ -80,7 +80,8 @@ const check = (text: string, resource = RESOURCE) => checker().check(text, CORRE
 
 /** Refused, with the one answer, and its reason logged once. */
 async function refusedFor(text: string, reason: string): Promise<void> {
-  expect(await check(text)).toEqual({ outcome: 'refused' });
+  // E6-P7: a live token's agent suspended is answered as such; every other reason the same `refused`.
+  expect(await check(text)).toEqual({ outcome: reason === 'agent_suspended' ? 'suspended' : 'refused' });
   expect(lines('connection_token.refused')).toEqual([expect.objectContaining({ reason })]);
 }
 

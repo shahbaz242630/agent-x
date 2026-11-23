@@ -164,7 +164,7 @@ export function createSupplierChanges({
             pendingRequests === 'pause' &&
             (await cancelledByItsStop(tx, states, member.orgId, found.supplier, found.state));
           if (pendingRequests === 'cancel' || cancelledBefore) {
-            await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
+            await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_SUSPENDED', clock.now());
           }
           // Pressed twice: stopped already, and answered as it is, unless the choice changes (chosenAgain).
           if (found.supplier.status === 'SUSPENDED') {
@@ -215,7 +215,8 @@ export function createSupplierChanges({
           { passkeyRequired: true },
         );
         if (pendingRequests === 'cancel') {
-          // A brake's batch; the request-voids job the rest, by this reactivation's event (F1 G1).
+          // A brake's batch; the request-voids job the rest, by this reactivation's event (F1 G1). The job sees the
+          // supplier verified again, so it can't name the suspension: both give SUPPLIER_NOT_VERIFIED alike (E6-P5).
           const braked = { supplierId: found.supplier.id };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
         }

@@ -315,7 +315,7 @@ export const REASON_CODES = {
   SUPPLIER_NOT_UNVERIFIED:
     'The supplier is verified or suspended, so there is nothing to verify. Nothing was changed. Look at the supplier again.',
   SUPPLIER_NOT_VERIFIED:
-    "The supplier is not one of the organisation's verified suppliers: it is unknown, not yet verified, or suspended. So the request is refused. Nothing is held for the request.",
+    "The supplier is not one of the organisation's verified suppliers: it is unknown or not yet verified. So the request is refused. Nothing is held for the request.",
   SUPPLIER_NO_CHANGE_WAITING:
     "No change of this supplier's bank details is waiting, so there is nothing to confirm or withdraw. Nothing was changed. Look at the supplier again.",
   SUPPLIER_NO_PAYEE:
@@ -326,6 +326,8 @@ export const REASON_CODES = {
     "The supplier's phone number changed less than 30 days ago, so a call-back to it can't verify the supplier yet. Nothing was changed.",
   SUPPLIER_REMITTANCE_UNCHANGED:
     "This is already the supplier's remittance email setting, so nothing was changed and no sign-in is needed.",
+  SUPPLIER_SUSPENDED:
+    "The organisation has suspended this supplier, so the request is refused. Nothing is held for the request. The agent asks again once an admin lifts the supplier's suspension.",
   SUPPLIER_UNKNOWN:
     "A supplier the mandate names is not one of the organisation's. Check the suppliers' IDs. Nothing was changed.",
   TOO_MANY_CONTACTS:

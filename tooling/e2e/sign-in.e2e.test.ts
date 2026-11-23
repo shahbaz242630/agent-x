@@ -151,11 +151,13 @@ describe('SEC-HA-07 a sign-in through the API, in a real browser', () => {
     expect(await sql(`SELECT count(*) FROM identity.sessions s WHERE strpos(s::text, '${first.value}') > 0`)).toBe('0');
   });
 
-  it('uses the flow once: the same callback address again is refused, and changes nothing', async () => {
+  it('uses the flow once: the same callback address again is refused, sent home saying so (E6-P1), and changes nothing', async () => {
     if (seen.callbackUrl === undefined) throw new Error('no sign-in came back to the callback');
     const response = await page.goto(seen.callbackUrl);
-    expect(response?.status()).toBe(401);
-    expect(await response?.json()).toMatchObject({ error: { code: 'SIGN_IN_FAILED' } });
+    // No flow waiting: home with ?signInLate=1, never a bare error the browser's Back would leave (E6-P1).
+    expect(response?.request().redirectedFrom()?.url()).toBe(seen.callbackUrl);
+    expect(new URL(page.url()).pathname).toBe('/');
+    expect(new URL(page.url()).searchParams.get('signInLate')).toBe('1');
     expect(cookieNamed(await context.cookies(API_ORIGIN), SESSION_COOKIE)?.value).toBe(first.value);
     expect((await sessions()).count).toBe(1);
   });

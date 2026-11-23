@@ -128,13 +128,14 @@ export type CallbackInput = {
 /**
  * Why a step-up failed: the sign-in's own failures on the way back (but the
  * login service being unreachable, which stays SignInFailed), no live session
- * (`session_missing`), the challenge gone, used or out of time
- * (`challenge_missing`), the fresh sign-in not standing for it, or the person's day's step-ups spent
+ * (`session_missing`), the challenge out of time (`challenge_expired`, E6-P4) or gone, used or never the
+ * session's (`challenge_missing`), the fresh sign-in not standing for it, or the person's day's step-ups spent
  * (`step_ups_spent`, S210 TR-7).
  */
 export type StepUpFailure =
   | Exclude<SignInFailure, 'provider_unavailable'>
   | 'session_missing'
+  | 'challenge_expired'
   | 'challenge_missing'
   | 'step_ups_spent'
   | StepUpRefusal;
@@ -189,8 +190,9 @@ export interface SignIn {
   begin(returnTo: string | undefined, network: string): Promise<SignInBegun>;
   /**
    * Starts a step-up for the session's own pending challenge, sending the
-   * browser back to `returnTo` after. Throws StepUpFailed `challenge_missing`
-   * for a challenge that isn't the session's or isn't pending, `step_ups_spent`
+   * browser back to `returnTo` after. Throws StepUpFailed `challenge_expired`
+   * for the session's challenge out of time, `challenge_missing` for one that
+   * isn't the session's or isn't pending, `step_ups_spent`
    * past the person's day's step-ups, RangeError for a path that isn't ours.
    */
   beginStepUp(sessionId: string, challengeId: string, returnTo?: string): Promise<SignInBegun>;
@@ -316,6 +318,9 @@ export function createSignIn({
     const { sessionId, userId } = session;
     const pending = await limited((tx) => challenges.pending(tx, challengeId, sessionId));
     if (pending === undefined) {
+      if (await limited((tx) => challenges.expired(tx, challengeId, sessionId))) {
+        throw failed('challenge_expired', 'the challenge ran out of time before the sign-in came back', userId);
+      }
       throw failed('challenge_missing', 'the challenge is not pending for this session', userId);
     }
     // The flow's row has no MAC (0011, 0014); the challenge's nonce is sealed. A flow started for this challenge
@@ -360,7 +365,13 @@ export function createSignIn({
         idpSessionId: evidence.idpSessionId ?? null,
         idTokenHash,
       });
-      if (!recorded) throw failed('challenge_missing', 'the challenge ran out of time', userId);
+      if (!recorded) {
+        // Ran out between the first read and now, unless it was gone or forged (that row's own alarm is raised).
+        const expired = await challenges.expired(tx, challengeId, sessionId);
+        throw expired
+          ? failed('challenge_expired', 'the challenge ran out of time as the sign-in came back', userId)
+          : failed('challenge_missing', 'the challenge could not be recorded', userId);
+      }
       // The row as it was, signed as retired, last of the locks (S207 GM-4): put back, it finds nothing for the old cookie.
       await platform.record(tx as unknown as PlatformTransaction, sessionRotatedEvent(rotated.retired, clock.now()));
       return { userId, sessionId, cookie: rotated.cookie, returnTo: taken.returnTo, stepUpChallengeId: challengeId };
@@ -382,7 +393,15 @@ export function createSignIn({
       if (!isReturnPath(returnTo)) throw new RangeError('the return path is not a path on our own origin');
       const pending = await limited(async (tx) => {
         const found = await challenges.pending(tx, challengeId, sessionId);
-        if (found === undefined) throw new StepUpFailed('challenge_missing', 'no challenge of this session is pending');
+        if (found === undefined) {
+          if (await challenges.expired(tx, challengeId, sessionId)) {
+            throw new StepUpFailed(
+              'challenge_expired',
+              "the session's challenge ran out of time before it was started",
+            );
+          }
+          throw new StepUpFailed('challenge_missing', 'no challenge of this session is pending');
+        }
         // Answered before the browser leaves (S210 TR-7): the step-up would be refused as it completes.
         if (await stepUpsSpent(tx, found.userId, mostStepUps)) {
           throw new StepUpFailed('step_ups_spent', "the person's step-ups for the day are spent", found.userId);

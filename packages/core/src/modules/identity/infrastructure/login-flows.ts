@@ -33,6 +33,12 @@ import type { IdentityTables } from './tables.ts';
 export const LOGIN_FLOW_SECONDS = 600;
 
 /**
+ * How long a step-up's flow lasts: five minutes past its challenge's ten (E6-P2), so a person back too late is told
+ * their time ran out (`challenge_expired`), not a flow gone. It grants nothing alone: the challenge decides.
+ */
+export const STEP_UP_FLOW_SECONDS = 900;
+
+/**
  * The sign-ins under way, every network together, past which only a quiet network's start (S206 V8): the table's
  * storage backstop, far above any real day (a flow lives ten minutes), never a lockout.
  */
@@ -79,10 +85,10 @@ export interface LoginFlows {
    * pass a cap by a few rows, which the network's next start trims back. In the caller's transaction.
    */
   start(db: Kysely<IdentityTables>, flow: LoginFlow, returnTo: string, network: string): Promise<SignInFlowStarted>;
-  /** Takes the flow this ID names, once and within its ten minutes; undefined for any other. */
+  /** Takes the flow this ID names, once and within its time (ten minutes, a step-up's fifteen); undefined for any other. */
   take(db: Kysely<IdentityTables>, flowId: string): Promise<TakenFlow | undefined>;
   /**
-   * Deletes up to `most` flows past their ten minutes, and says how many: a browser that never came back leaves its flow behind, and
+   * Deletes up to `most` flows past their time, and says how many: a browser that never came back leaves its flow behind, and
    * anyone can start one (B2-3a-2 sweeps them hourly, a batch at a time). In
    * a transaction of its own, its statement limited to 10 seconds, a wait for
    * a lock included.
@@ -146,7 +152,7 @@ export function createLoginFlows({
   /** Every network's backstop (MOST_OPEN_SIGN_INS unless a test names fewer, rather than add a million rows). */
   readonly mostOpen?: number;
 }): LoginFlows {
-  /** Keeps the flow from `now` for its ten minutes: a step-up's with its challenge, a sign-in's with its network. */
+  /** Keeps the flow from `now`: a sign-in's ten minutes with its network, a step-up's fifteen with its challenge. */
   async function kept(
     db: Kysely<IdentityTables>,
     flow: LoginFlow,
@@ -165,7 +171,9 @@ export function createLoginFlows({
         verifier: flow.verifier,
         return_to: returnTo,
         created_at: now,
-        ends_at: new Date(now.getTime() + LOGIN_FLOW_SECONDS * 1000),
+        ends_at: new Date(
+          now.getTime() + (from.stepUpChallengeId === undefined ? LOGIN_FLOW_SECONDS : STEP_UP_FLOW_SECONDS) * 1000,
+        ),
         step_up_challenge_id: from.stepUpChallengeId ?? null,
         network_key: from.network ?? null,
       })

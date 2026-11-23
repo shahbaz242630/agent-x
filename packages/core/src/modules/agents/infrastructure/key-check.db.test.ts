@@ -89,7 +89,8 @@ const lines = (event: string) => capture.lines().filter((line) => line.event ===
 
 /** Refused, with the one answer every refusal has, and its reason logged once. */
 async function refusedFor(text: string, reason: string, keyId: string | null): Promise<void> {
-  expect(await check(text)).toEqual({ outcome: 'refused' });
+  // E6-P7: a live key's agent suspended is answered as such; every other reason the same `refused`.
+  expect(await check(text)).toEqual({ outcome: reason === 'agent_suspended' ? 'suspended' : 'refused' });
   expect(lines('agent_key.refused')).toEqual([
     expect.objectContaining({ level: 'info', correlationId: '0199a0f0-0000-7000-8000-00000000c011', reason, keyId }),
   ]);
@@ -988,6 +989,33 @@ describe('the key check: every refusal the same answer, its reason logged alone'
     await refusedFor(text, 'agent_suspended', id);
     await moveAgent(agent, 'reactivate');
     expect(await check(text)).toMatchObject({ outcome: 'accepted' });
+  });
+
+  it('E6-P7 a revoked key of a suspended agent: refused as any revoked key, never told the agent is suspended', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    await moveAgent(agent, 'suspend');
+    await revoke(id);
+
+    await refusedFor(text, 'revoked', id);
+  });
+
+  it('E6-P7 an expired key of a suspended agent: refused as any expired key', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent, { expiresAt: new Date(START.getTime() + DAY_MS) });
+    await moveAgent(agent, 'suspend');
+    clock.advanceBy(DAY_MS);
+
+    await refusedFor(text, 'expired', id);
+  });
+
+  it('E6-P7 the wrong secret for a suspended agent’s key: refused as any wrong secret', async () => {
+    const agent = await newAgent();
+    const one = await issue(agent);
+    const other = await issue(agent);
+    await moveAgent(agent, 'suspend');
+
+    await refusedFor(`${one.text.slice(0, 37)}${other.secret.toString('base64url')}`, 'wrong_secret', one.id);
   });
 
   it('a revoked key', async () => {

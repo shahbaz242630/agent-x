@@ -17,11 +17,12 @@
 //    trips), credentialAt: the agent's brake, then the agent (3), the key (3a)
 //    and the key's connection (3b) in one gather, each believed only if sound.
 //    The connection must be made for exactly this MCP resource.
-// 5. The agent ACTIVE; the key ACTIVE and not expired: a connection revoked,
-//    or its agent suspended, refuses its tokens on their next call.
+// 5. The key ACTIVE and not expired, then the agent ACTIVE: a connection
+//    revoked refuses its tokens on their next call, as `refused`; its agent
+//    suspended answers a live token `suspended` (E6-P7, key-check.ts).
 //
 // So five trips for a token accepted, two for a wrong secret, as for a key.
-// Every refusal is the same `refused`; the reason goes to the log alone, with
+// Every other refusal is the same `refused`; the reason goes to the log alone, with
 // the key's and token's IDs (public), never the token. What it may do is what
 // its own scopes, its key's and its agent's all hold.
 import {
@@ -41,7 +42,7 @@ import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
 import { scopesOf } from '../domain/agent.ts';
 import { parseConnectionToken, type PresentedToken } from '../domain/connection.ts';
 import { tokenProven, tokenRowFound, tokenRowRead, type TokenProof } from './connection-tokens.ts';
-import { credentialAt, type KeyAtCheck, type KeyChecked, type KeyRefusal } from './key-check.ts';
+import { answeredAs, credentialAt, type KeyAtCheck, type KeyChecked, type KeyRefusal } from './key-check.ts';
 import type { AgentsTables } from './tables.ts';
 
 type Tables = AgentsTables & DirectoryTables & AuditTables;
@@ -73,7 +74,7 @@ export async function tokenAtTheDoor(
 export interface ConnectionTokenChecker {
   /**
    * Whether the access token a client sent may act at `resource`, the MCP endpoint's own address: the same `refused`
-   * for every reason, logged with it.
+   * for every reason but a live token's agent suspended (`suspended`, E6-P7), logged with it.
    */
   check(text: string, correlationId: string, resource: string): Promise<KeyChecked>;
 }
@@ -100,7 +101,7 @@ export function createConnectionTokenCheck({
         if (checked.reason === 'key_not_held')
           log.error('connection_token.refused', { reason: checked.reason, ...named });
         else log.info('connection_token.refused', { reason: checked.reason, ...named });
-        return { outcome: 'refused' };
+        return answeredAs(checked.reason);
       };
       const presented = parseConnectionToken(text, 'access');
       if (presented === undefined) return answer(refused('malformed'), { keyId: null, tokenId: null });

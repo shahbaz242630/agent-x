@@ -328,7 +328,7 @@ describe('the deadlock suite (SEC-AV-04): each change racing the agent’s reque
     expect(retries()).toEqual([]);
   });
 
-  it('its supplier suspended: no deadlock; a request after it denied SUPPLIER_NOT_VERIFIED', async () => {
+  it('its supplier suspended: no deadlock; a request after it denied SUPPLIER_SUSPENDED', async () => {
     const { w, acting } = await ready();
     const supplier = w.suppliers[0] ?? '';
 
@@ -346,7 +346,7 @@ describe('the deadlock suite (SEC-AV-04): each change racing the agent’s reque
     expect(decided).toHaveLength(6);
     for (const { request, seq } of decided) {
       expect(request.decision).toBe(seq < suspended ? 'ALLOW' : 'DENY');
-      if (seq > suspended) expect(request.reasons).toEqual(['SUPPLIER_NOT_VERIFIED']);
+      if (seq > suspended) expect(request.reasons).toEqual(['SUPPLIER_SUSPENDED']);
     }
     expect(retries()).toEqual([]);
   });

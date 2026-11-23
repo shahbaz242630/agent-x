@@ -75,6 +75,39 @@ describe('the console’s frame (6A1)', () => {
     expect(goTo).toHaveBeenCalledWith(expect.stringMatching(/^\/v1\/auth\/sign-in\?returnTo=/));
   });
 
+  it('E6-P1 says a sign-in that came back late wasn’t counted, and signs in again without saying so twice', async () => {
+    answers = { 'GET /v1/auth/session': { status: 401, body: { error: { code: 'UNAUTHENTICATED' } } } };
+    window.history.pushState({}, '', '/?org=x&signInLate=1');
+    open('/?org=x&signInLate=1');
+    expect(await screen.findByText(/took too long.* so you weren't signed in/)).toBeDefined();
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(goTo).toHaveBeenCalledWith(`/v1/auth/sign-in?${new URLSearchParams({ returnTo: '/?org=x' }).toString()}`);
+    window.history.pushState({}, '', '/');
+  });
+
+  it('E6-P1 says no late sign-in on the sign-in page without the query, and keeps its address as written', async () => {
+    answers = { 'GET /v1/auth/session': { status: 401, body: { error: { code: 'UNAUTHENTICATED' } } } };
+    window.history.pushState({}, '', '/payments?q=a%20b');
+    open('/payments?q=a%20b');
+    await userEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+    expect(screen.queryByText(/took too long/)).toBeNull();
+    expect(goTo).toHaveBeenCalledWith(
+      `/v1/auth/sign-in?${new URLSearchParams({ returnTo: '/payments?q=a%20b' }).toString()}`,
+    );
+    window.history.pushState({}, '', '/');
+  });
+
+  it('E6-P1 tells a signed-in person their late step-up didn’t count, and Close cleans the address', async () => {
+    signedIn([ORG_A]);
+    const router = open('/more?signInLate=1&tab=x');
+    expect(await screen.findByText(/so it didn't count and nothing was changed/)).toBeDefined();
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => {
+      expect(router.state.location.searchStr).toBe('?tab=x');
+    });
+    expect(screen.queryByText(/so it didn't count/)).toBeNull();
+  });
+
   it('opens the one organisation straight away, on approvals, with the tabs', async () => {
     signedIn([ORG_A]);
     const router = open('/');

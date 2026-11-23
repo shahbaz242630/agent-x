@@ -112,7 +112,7 @@ describe('voidCauses', () => {
     [
       'the supplier suspended',
       { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1', pausedFrom: [] } },
-      'SUPPLIER_NOT_VERIFIED',
+      'SUPPLIER_SUSPENDED',
     ],
     [
       'the supplier unverified',
@@ -312,6 +312,7 @@ describe('VOID_CAUSES and the choice', () => {
       voidCauses(DECIDED, { ...STANDING, agentStatus: 'SUSPENDED' }),
       voidCauses(DECIDED, { ...STANDING, mandate: { status: 'REVOKED', currentVersionId: 'mv1', ended: false } }),
       voidCauses(DECIDED, { ...STANDING, source: { ...STANDING.source, status: 'SUSPENDED' } }),
+      voidCauses(DECIDED, { ...STANDING, supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1', pausedFrom: [] } }),
       voidCauses(DECIDED, { ...STANDING, supplier: { status: 'SUSPENDED', currentVersionId: 'sv1', pausedFrom: [] } }),
       voidCauses(DECIDED, { ...STANDING, supplier: { status: 'VERIFIED', currentVersionId: 'sv2', pausedFrom: [] } }),
       voidCauses(approvedAgo(APPROVAL_HORIZON_MS), STANDING),

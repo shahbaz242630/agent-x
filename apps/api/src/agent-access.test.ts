@@ -279,6 +279,17 @@ describe('C2-1 SEC-AG-01 an agent is let in by its key alone', () => {
     expect(asked.reached).toEqual([]);
   });
 
+  it('E6-P7 answers a live key whose agent is suspended as 403 AGENT_SUSPENDED, with no challenge, never through', async () => {
+    const { app, asked } = await server({
+      checkKey: (a) => acceptingKey(a, () => Promise.resolve({ outcome: 'suspended' })),
+    });
+    const response = await app.inject({ url: '/test/agent', headers: bearer() });
+    expect(response.statusCode).toBe(403);
+    expect(response.headers['www-authenticate']).toBeUndefined();
+    expect(response.json()).toEqual(errorBody('AGENT_SUSPENDED', FIRST_ID));
+    expect(asked.reached).toEqual([]);
+  });
+
   it('refuses a key without every scope the route needs as INSUFFICIENT_SCOPE, naming them', async () => {
     const { app, asked } = await server();
     const response = await app.inject({ url: '/test/writes', headers: bearer() });

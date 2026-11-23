@@ -107,7 +107,7 @@ const CAUSES: Readonly<Record<Voiding, string>> = {
   'the mandate suspended': 'MANDATE_NOT_IN_FORCE',
   // Its unverify names no choice, so cancels: a stop chosen to cancel since the decision (F1 G1).
   'the supplier’s details changed': 'SUPPLIER_NOT_VERIFIED,SUPPLIER_CHANGED',
-  'the supplier suspended': 'SUPPLIER_NOT_VERIFIED',
+  'the supplier suspended': 'SUPPLIER_SUSPENDED',
   'the source suspended by the organisation': 'SOURCE_NOT_USABLE',
   'the agent suspended': 'AGENT_SUSPENDED',
 };

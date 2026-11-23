@@ -238,7 +238,9 @@ function statusChecks(input: DecisionInput, fail: Fail): void {
   // A setup gate: even a mandate's policy setting a cap doesn't stand in for the admin's choice.
   if (!input.organizationCapChosen) fail('ORG_MONTHLY_CAP_NOT_SET');
   if (input.agent.status !== 'ACTIVE') fail('AGENT_SUSPENDED');
-  if (input.supplierStatus !== 'VERIFIED') fail('SUPPLIER_NOT_VERIFIED');
+  // Suspended is named apart (E6-P5): the admin's brake, not a supplier still to verify.
+  if (input.supplierStatus === 'SUSPENDED') fail('SUPPLIER_SUSPENDED');
+  else if (input.supplierStatus !== 'VERIFIED') fail('SUPPLIER_NOT_VERIFIED');
   if (!input.sourceMayFund) fail('SOURCE_NOT_USABLE');
   if (input.duplicateOrder) fail('DUPLICATE_ORDER_REFERENCE');
   if (input.possibleDuplicate) fail('POSSIBLE_DUPLICATE_ORDER');
