@@ -28,6 +28,7 @@ export const CONFIRMS: readonly (readonly [path: string, named: readonly Named[]
   ['/v1/funding-sources/link-sessions/{linkId}/confirm', [['statementVersion', 'consent_expiry']]],
   ['/v1/funding-sources/{id}/suspend', [['statementVersion', 'suspend']]],
   ['/v1/funding-sources/{id}/consent-expiry', [['statementVersion', 'consent_expiry']]],
+  ['/v1/funding-sources/{id}/reactivate/confirm', [['statementVersion', 'source_reactivate']]],
   ['/v1/suppliers/{id}/suspend', [['statementVersion', 'suspend']]],
   ['/v1/suppliers/{id}/reactivate/confirm', [['statementVersion', 'reactivate']]],
   ['/v1/suppliers/{id}/details/confirm', [['statementVersion', 'supplier_details']]],

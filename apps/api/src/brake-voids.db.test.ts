@@ -37,6 +37,7 @@
 // INTEGRITY_FAILED once the cancel is edited to read as a pause; a cancel
 // past a page of pauses is still found.
 import { withSignedStates } from '@agentx/core/modules/audit';
+import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { createSessions, createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
@@ -335,6 +336,22 @@ const reactivated = async (w: World, choice: PendingChoice) => {
     CORRELATION,
   );
 };
+/** The world's source reactivated by its admin with `choice`, stepped up with a passkey (E6-P6). */
+const sourceReactivated = async (w: World, choice: PendingChoice) => {
+  const changes = createFundingSourceChanges({ ...services(), rail: undefined });
+  const challengeId = askedFor(
+    await changes.reactivate(w.admin, keyed(w.admin, SOURCE_REACTIVATE), w.source, choice, CORRELATION),
+  );
+  await stepUp(w.admin, challengeId);
+  return changes.reactivateConfirm(
+    w.admin,
+    keyed(w.admin, SOURCE_REACTIVATE_CONFIRM),
+    w.source,
+    { stepUpChallengeId: challengeId, pendingRequests: choice },
+    CORRELATION,
+  );
+};
+
 /** Details for the world's first supplier other than both its own and detailsChanging's. */
 const CHANGED_AGAIN = {
   displayName: 'Gulf Office Supplies Holdings LLC',
@@ -1589,6 +1606,100 @@ describe('reactivating a suspended supplier: a fresh start or an un-pause (decis
   });
 });
 
+describe('reactivating a suspended bank account: a fresh start or an un-pause (E6-P6)', () => {
+  const reactivation = async (w: World) =>
+    (await shared.eventsAbout(w.org, w.source, 'funding_source')).findLast(
+      ({ action }) => action === 'funding_source.reactivated',
+    );
+
+  it('a fresh start after a pause: every request on it voided before its event, the choice kept', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting, elsewhere } = await pendingOf(w, acting);
+    await sourceSuspended(w, 'pause');
+    const before = await newestSeq(w, 'funding_source', w.source);
+
+    expect(await sourceReactivated(w, 'cancel')).toMatchObject({ source: { status: 'ACTIVE' } });
+
+    const moved = await firstSeqAfter(w, 'funding_source', w.source, before);
+    await voidedBefore(w, [approved, waiting, elsewhere], 'SOURCE_NOT_USABLE', moved);
+    expect(await reactivation(w)).toMatchObject({
+      details: { pendingRequests: 'cancel', pendingStatementVersion: 1 },
+    });
+  });
+
+  it('an un-pause: its requests stand again at once, through the job, and the waiting one may be approved', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await sourceSuspended(w, 'pause');
+
+    expect(await sourceReactivated(w, 'pause')).toMatchObject({ source: { status: 'ACTIVE' } });
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+    expect(await reactivation(w)).toMatchObject({ details: { pendingRequests: 'pause', pendingStatementVersion: 1 } });
+    const asked = await approvals().ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION);
+    expect(asked.outcome).toBe('asked');
+  });
+
+  it('refuses an un-pause when its suspension cancelled them: PENDING_REQUESTS_CANCELLED, at the ask, still suspended', async () => {
+    const { w } = await ready();
+    await sourceSuspended(w, 'cancel');
+
+    expect(
+      await createFundingSourceChanges({ ...services(), rail: undefined }).reactivate(
+        w.admin,
+        keyed(w.admin, SOURCE_REACTIVATE),
+        w.source,
+        'pause',
+        CORRELATION,
+      ),
+    ).toEqual(refused(409, 'PENDING_REQUESTS_CANCELLED'));
+    expect((await shared.eventsAbout(w.org, w.source, 'funding_source')).at(-1)?.action).toBe(
+      'funding_source.suspended',
+    );
+  });
+
+  it('refuses a confirm with another choice than the step-up was asked for: STEP_UP_FAILED, nothing voided', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await sourceSuspended(w, 'pause');
+    const changes = createFundingSourceChanges({ ...services(), rail: undefined });
+    const challengeId = askedFor(
+      await changes.reactivate(w.admin, keyed(w.admin, SOURCE_REACTIVATE), w.source, 'pause', CORRELATION),
+    );
+    await stepUp(w.admin, challengeId);
+
+    expect(
+      await changes.reactivateConfirm(
+        w.admin,
+        keyed(w.admin, SOURCE_REACTIVATE_CONFIRM),
+        w.source,
+        { stepUpChallengeId: challengeId, pendingRequests: 'cancel' },
+        CORRELATION,
+      ),
+    ).toMatchObject({ outcome: 'refused', code: 'STEP_UP_FAILED' });
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+
+  it('one reactivated before the choice (its event naming none) cancels nothing: they stand through the job', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await sourceSuspended(w, 'pause');
+    // Reactivated past the use case, as before E6-P6: its event names no choice.
+    await withSignedStates(app, w.org, shared.quiet(), (tx, states) =>
+      states.changeStatus(tx, SOURCES, { orgId: w.org, id: w.source }, 'reactivate', {
+        actor: { type: 'user', id: w.admin.userId },
+        action: 'funding_source.reactivated',
+        details: {},
+      }),
+    );
+
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+});
+
 describe('freezing the organisation: an admin or approver chooses cancel or pause; unfreezing with a passkey, a reason and a choice (D1, D2)', () => {
   const freezes = async (w: World) =>
     (await shared.eventsAbout(w.org, w.org, 'organization')).filter(({ action }) => action === 'organization.freeze');
@@ -1846,22 +1957,10 @@ describe('a stop chosen to cancel voids for good: those past its batches never s
       CORRELATION,
     );
   };
-  /** The world's source reactivated by its admin, stepped up with a passkey. */
-  const sourceReactivated = async (w: World) => {
-    const changes = createFundingSourceChanges({ ...services(), rail: undefined });
-    const challengeId = askedFor(
-      await changes.reactivate(w.admin, keyed(w.admin, SOURCE_REACTIVATE), w.source, CORRELATION),
-    );
-    await stepUp(w.admin, challengeId);
-    return changes.reactivateConfirm(
-      w.admin,
-      keyed(w.admin, SOURCE_REACTIVATE_CONFIRM),
-      w.source,
-      challengeId,
-      CORRELATION,
-    );
-  };
-  /** Each stop that is lifted with no choice: how it stops, how it is lifted, and its cause. */
+  /**
+   * Each stop that is lifted with no choice, or (a source, E6-P6) with a fresh start, the only lift its cancel
+   * allows: how it stops, how it is lifted, and its cause.
+   */
   const LIFTS = {
     agent: {
       cause: 'AGENT_SUSPENDED',
@@ -1877,7 +1976,7 @@ describe('a stop chosen to cancel voids for good: those past its batches never s
     source: {
       cause: 'SOURCE_NOT_USABLE',
       stop: (w: World, _mandateId: string, choice: PendingChoice) => sourceSuspended(w, choice),
-      lift: (w: World) => sourceReactivated(w),
+      lift: (w: World) => sourceReactivated(w, 'cancel'),
     },
   } as const;
   /** `count` approved requests of the world's agent, in order of ID. */
