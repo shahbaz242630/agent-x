@@ -381,7 +381,9 @@ func identityOf(name string) string => resourceId('Microsoft.ManagedIdentity/use
 // blob's path, which Azure checks on every Put. The apps add under heads/ alone, never in the operator's folder or the
 // set-aside list (policy.ts holds the same words: WITNESS_CONDITIONS).
 var blobPath = '@Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]'
-var adds = '!(ActionMatches{\'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action\'}) AND !(ActionMatches{\'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write\'})'
+// add/action alone: Azure refuses a condition naming an action its role doesn't hold (InvalidRoleAssignmentCondition
+// on blobs/write at S212's first foundation), and policy.ts keeps write out of the role (WITNESS_ACTIONS).
+var adds = '!(ActionMatches{\'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action\'})'
 // Each app adds a file under e<epoch>/heads/ alone.
 var witnessAppCondition = '((${adds}) OR (${blobPath} StringLike \'e*/heads/*\' AND ${blobPath} StringNotLike \'*/set-aside/*\' AND ${blobPath} StringNotLike \'*/operator/*\'))'
 // The operator adds its own heads and the set-aside list alone.
