@@ -2,9 +2,9 @@
 // agent (the kill switch), a supplier or a bank account and freezing the
 // organisation are one confirm in the API's own words, a choice for pending
 // requests none picked for the person, and done at once: never a passkey.
-// Reactivating and unfreezing go by the shared step-up, a supplier's and an
-// unfreeze's choice asked first and the version of the words shown kept for
-// the confirm (CO3). Buttons show by role; refusals are said plainly.
+// Reactivating and unfreezing go by the shared step-up, a supplier's, a bank
+// account's (E6-P6) and an unfreeze's choice asked first and the version of
+// the words shown kept for the confirm (CO3). Buttons show by role; refusals are said plainly.
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -58,6 +58,11 @@ const STATEMENTS = {
   statements: [
     { id: 'suspend', version: 4, words: words('Every request under it is cancelled now.', 'Its requests are held.') },
     { id: 'reactivate', version: 3, words: words('A fresh start: cancelled now.', 'Un-pause: they stand again.') },
+    {
+      id: 'source_reactivate',
+      version: 1,
+      words: words('A fresh start: every request on this account cancelled.', 'Un-pause: its held requests stand.'),
+    },
     { id: 'freeze', version: 3, words: words('Every request is cancelled now.', 'Its requests are held as they are.') },
     { id: 'unfreeze', version: 2, words: words('A fresh start for all.', 'Un-pause: the held stand again.') },
   ],
@@ -329,7 +334,7 @@ describe('suppliers’ and bank accounts’ brakes (6B2)', () => {
     expect(goTo).not.toHaveBeenCalled();
   });
 
-  it('suspends a bank account, offers nothing for an ended one, and reactivates by passkey', async () => {
+  it('suspends a bank account, and offers nothing for an ended one', async () => {
     signedIn();
     answer('GET /v1/funding-sources', page('sources', [source(SOURCE, 'ACTIVE'), source(ENDED, 'ENDED')]));
     answer(`POST /v1/funding-sources/${SOURCE}/suspend`, { status: 200, body: {} });
@@ -344,6 +349,58 @@ describe('suppliers’ and bank accounts’ brakes (6B2)', () => {
     });
     expect(goTo).not.toHaveBeenCalled();
     expect(sessionStorage).toHaveLength(0);
+  });
+
+  it.each([
+    ['a fresh start', /A fresh start: every request on this account/, 'cancel'],
+    ['an un-pause', /Un-pause: its held requests stand/, 'pause'],
+  ] as const)(
+    'reactivates a bank account with %s asked first in its own words, the words’ version kept for the confirm (E6-P6)',
+    async (_what, label, choice) => {
+      signedIn();
+      answer('GET /v1/funding-sources', page('sources', [source(SOURCE, 'SUSPENDED')]));
+      answer(`POST /v1/funding-sources/${SOURCE}/reactivate`, { status: 202, body: { stepUpChallengeId: CHALLENGE } });
+      open('/more/sources');
+
+      await confirmChoice('Reactivate Staging Test Org 1 LLC', label, 'Continue with passkey');
+
+      await waitFor(() => {
+        expect(goTo).toHaveBeenCalledWith(expect.stringContaining(`challenge=${CHALLENGE}`));
+      });
+      expect(sentTo('POST', `/v1/funding-sources/${SOURCE}/reactivate`)[0]?.body).toEqual({ pendingRequests: choice });
+      expect(kept()).toMatchObject({
+        label: 'Reactivate Staging Test Org 1 LLC',
+        confirmPath: `/v1/funding-sources/${SOURCE}/reactivate/confirm`,
+        body: { pendingRequests: choice, statementVersion: 1 },
+      });
+    },
+  );
+
+  it('asks a bank account’s reactivation in its own words, never a supplier’s, sending nothing until confirmed', async () => {
+    signedIn();
+    answer('GET /v1/funding-sources', page('sources', [source(SOURCE, 'SUSPENDED')]));
+    open('/more/sources');
+    await userEvent.click(await screen.findByRole('button', { name: 'Reactivate Staging Test Org 1 LLC' }));
+    const dialog = await screen.findByRole('dialog');
+    const options = await within(dialog).findAllByRole('radio');
+    expect(options.map((one) => one.getAttribute('value'))).toEqual(['cancel', 'pause']);
+    expect(within(dialog).queryByLabelText(/Un-pause: they stand again/)).toBeNull();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(sent.filter((one) => one.method === 'POST')).toHaveLength(0);
+    expect(goTo).not.toHaveBeenCalled();
+  });
+
+  it('says a bank account’s un-pause its suspension cancelled can’t stand again (E6-P6)', async () => {
+    signedIn();
+    answer('GET /v1/funding-sources', page('sources', [source(SOURCE, 'SUSPENDED')]));
+    answer(`POST /v1/funding-sources/${SOURCE}/reactivate`, {
+      status: 409,
+      body: { error: { code: 'PENDING_REQUESTS_CANCELLED' } },
+    });
+    open('/more/sources');
+    await confirmChoice('Reactivate Staging Test Org 1 LLC', /Un-pause/, 'Continue with passkey');
+    expect(await screen.findByText(/Choose the option that cancels them instead/)).toBeDefined();
+    expect(goTo).not.toHaveBeenCalled();
   });
 
   it('never says a brake done when the API asks a passkey for it, and never steps up for one', async () => {

@@ -877,14 +877,15 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     await withTenant(app, ORG, (tx) => outbox.add(tx, [about(REQUEST, ADMIN), about(DECIDED, APPROVER)]));
     const { sent, service } = notifier();
 
-    await sender(
+    const { capture, run } = sender(
       service,
       addressBook(),
       audience(),
       contactAddresses(),
       resetLinks(),
       waitingRequests((requestId) => (requestId === REQUEST ? new Error('unreadable') : undefined)),
-    ).run.run();
+    );
+    await run.run();
 
     expect(sent).toEqual([]);
     const rows = await app
@@ -899,6 +900,20 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
         { recipient_user_id: APPROVER, sent_at: null, given_up_at: START, last_failure: 'request_not_waiting' },
       ]),
     );
+    // E6-P9: the unreadable one is a failure (warn); the one no longer waiting is an expected skip (info), no warn.
+    const notified = capture.lines().filter(({ event }) => String(event).startsWith('notification.'));
+    expect(notified.filter(({ event }) => event === 'notification.failed')).toEqual([
+      expect.objectContaining({ level: 'warn', failure: 'request_unavailable' }),
+    ]);
+    expect(notified.filter(({ event }) => event === 'notification.skipped')).toEqual([
+      expect.objectContaining({
+        level: 'info',
+        kind: 'spend_request_waiting',
+        reason: 'request_not_waiting',
+        outcome: 'given_up',
+      }),
+    ]);
+    expect(notified.find(({ event }) => event === 'notification.skipped')).not.toHaveProperty('says');
   });
 
   it('C2b sends a remittance to its paid supplier alone, with the payment read as it is sent, and never logs the address', async () => {

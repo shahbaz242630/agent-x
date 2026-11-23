@@ -163,12 +163,12 @@ async function withLinks(
       asked.push({ kind: 'chooseConsentExpiry', member, keyed, sourceId, consentExpiry });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
-    reactivate: (member, keyed, sourceId) => {
-      asked.push({ kind: 'reactivate', member, keyed, sourceId });
+    reactivate: (member, keyed, sourceId, pendingRequests) => {
+      asked.push({ kind: 'reactivate', member, keyed, sourceId, pendingRequests });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
-    reactivateConfirm: (member, keyed, sourceId, stepUpChallengeId) => {
-      asked.push({ kind: 'reactivateConfirm', member, keyed, sourceId, stepUpChallengeId });
+    reactivateConfirm: (member, keyed, sourceId, { stepUpChallengeId, pendingRequests }) => {
+      asked.push({ kind: 'reactivateConfirm', member, keyed, sourceId, stepUpChallengeId, pendingRequests });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
@@ -546,61 +546,108 @@ describe('POST /v1/funding-sources/:id/suspend: the brake (D2-4b)', () => {
   });
 });
 
-describe('POST /v1/funding-sources/:id/reactivate, then /confirm, with a step-up (D2-4b)', () => {
-  it('answers the ask 202 with the step-up to sign in again for', async () => {
-    const asked: Asked[] = [];
-    const { app } = await withLinks({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID } }, asked);
+describe('POST /v1/funding-sources/:id/reactivate, then /confirm, with a step-up and a choice (D2-4b, E6-P6)', () => {
+  it.each(['cancel', 'pause'] as const)(
+    'answers the ask 202 with the step-up to sign in again for, passing the choice: %s',
+    async (pendingRequests) => {
+      const asked: Asked[] = [];
+      const { app } = await withLinks({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID } }, asked);
 
-    const response = await app.inject(change('reactivate'));
+      const response = await app.inject(change('reactivate', { pendingRequests }));
 
-    expect(response.statusCode).toBe(202);
-    expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE_ID });
-    expect(asked).toMatchObject([{ kind: 'reactivate', member: IN_SESSION, sourceId: SOURCE_ID }]);
-  });
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE_ID });
+      expect(asked).toMatchObject([{ kind: 'reactivate', member: IN_SESSION, sourceId: SOURCE_ID, pendingRequests }]);
+    },
+  );
 
-  it('answers the confirm 200 with the source, ACTIVE, passing the step-up', async () => {
+  it('answers the confirm 200 with the source, ACTIVE, passing the step-up and the choice', async () => {
     const asked: Asked[] = [];
     const { app } = await withLinks({ change: { outcome: 'changed', source: SOURCE, consentExpiry: null } }, asked);
 
-    const response = await app.inject(change('reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID }));
+    const response = await app.inject(
+      change('reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID, pendingRequests: 'cancel' }),
+    );
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual(SOURCE_SHOWN);
     expect(asked).toMatchObject([
-      { kind: 'reactivateConfirm', member: IN_SESSION, sourceId: SOURCE_ID, stepUpChallengeId: CHALLENGE_ID },
+      {
+        kind: 'reactivateConfirm',
+        member: IN_SESSION,
+        keyed: { operation: 'funding-sources.reactivate.confirm' },
+        sourceId: SOURCE_ID,
+        stepUpChallengeId: CHALLENGE_ID,
+        pendingRequests: 'cancel',
+      },
     ]);
   });
 
   it.each([
     [409, 'SOURCE_NOT_SUSPENDED'],
+    [409, 'PENDING_REQUESTS_CANCELLED'],
     [403, 'STEP_UP_FAILED'],
     [404, 'NOT_FOUND'],
   ] as const)('answers %i %s as the use case refuses', async (status, code) => {
     const { app } = await withLinks({ change: { outcome: 'refused', status, code } });
 
-    const response = await app.inject(change('reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID }));
+    const response = await app.inject(
+      change('reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID, pendingRequests: 'pause' }),
+    );
 
     expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });
   });
 
+  it('answers an un-pause its suspension cancelled 409 on the ask too', async () => {
+    const { app } = await withLinks({
+      change: { outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_CANCELLED' },
+    });
+
+    const response = await app.inject(change('reactivate', { pendingRequests: 'pause' }));
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: 'PENDING_REQUESTS_CANCELLED' } });
+  });
+
   it('answers a key reused for another request as the idempotency store says', async () => {
     const { app } = await withLinks({ change: { outcome: 'conflict' } });
 
-    expect((await app.inject(change('reactivate'))).statusCode).toBe(409);
+    expect((await app.inject(change('reactivate', { pendingRequests: 'cancel' }))).statusCode).toBe(409);
   });
 
-  it('refuses a confirm without a step-up’s ID, or with more, before the use case runs', async () => {
+  it.each([
+    ['reactivate', {}],
+    ['reactivate', { pendingRequests: 'resume' }],
+    ['reactivate', { pendingRequests: 'cancel', more: 1 }],
+    ['reactivate/confirm', {}],
+    ['reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID }],
+    ['reactivate/confirm', { pendingRequests: 'cancel' }],
+    ['reactivate/confirm', { stepUpChallengeId: 'not-an-id', pendingRequests: 'cancel' }],
+    ['reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID, pendingRequests: 'keep' }],
+    ['reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID, pendingRequests: 'cancel', status: 'ACTIVE' }],
+  ])('refuses %s with %j, there being no default choice, before the use case runs', async (path, payload) => {
     const asked: Asked[] = [];
     const { app } = await withLinks({}, asked);
 
-    for (const payload of [
-      {},
-      { stepUpChallengeId: 'not-an-id' },
-      { stepUpChallengeId: CHALLENGE_ID, status: 'ACTIVE' },
-    ]) {
-      expect((await app.inject(change('reactivate/confirm', payload))).statusCode).toBe(400);
-    }
+    expect((await app.inject(change(path, payload))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+
+  it('refuses a confirm with words older than the API confirms with: 409 STATEMENT_CHANGED, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({}, asked);
+
+    const response = await app.inject(
+      change('reactivate/confirm', {
+        stepUpChallengeId: CHALLENGE_ID,
+        pendingRequests: 'cancel',
+        statementVersion: 99,
+      }),
+    );
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: 'STATEMENT_CHANGED' } });
     expect(asked).toEqual([]);
   });
 });

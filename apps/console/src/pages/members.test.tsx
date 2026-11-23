@@ -298,11 +298,41 @@ describe('a member’s page (6D4b)', () => {
     await inDialog('Continue with passkey');
     expect(sentTo('POST', `${at}/factor-reset`)[0]?.body).toEqual({});
     expect(kept()).toMatchObject({
-      label: `Reset the second factor of member ${OTHER}`,
+      label: `Ask a reset of the second factor of Approver ${OTHER}`,
       confirmPath: `/v1/factor-resets/${RESET}/confirm`,
       body: {},
       drafted: true,
       organization: ORG.id,
+      // Said once confirmed: asked, not done, as nothing is removed until a contact confirms.
+      done: `Asked: a reset of the second factor of Approver ${OTHER}. Nothing is removed until one of your registered contacts confirms it.`,
+    });
+  });
+
+  it('names the member in the reset’s words where the admin’s list names them', async () => {
+    as('admin');
+    answer('GET /v1/members', {
+      status: 200,
+      body: {
+        members: [
+          MEMBERS[0],
+          {
+            ...member(OTHER, '0199a0f0-0000-7000-8000-000000000033', 'approver'),
+            name: 'Sara Ali',
+            email: 'sara@company.example',
+          },
+        ],
+      },
+    });
+    answer(`POST ${at}/factor-reset`, {
+      status: 202,
+      body: { reset: reset({ status: 'DRAFT' }), stepUpChallengeId: CHALLENGE },
+    });
+    open(page);
+    await press('Ask a reset');
+    await inDialog('Continue with passkey');
+    expect(kept()).toMatchObject({
+      label: 'Ask a reset of the second factor of Sara Ali (sara@company.example)',
+      done: 'Asked: a reset of the second factor of Sara Ali (sara@company.example). Nothing is removed until one of your registered contacts confirms it.',
     });
   });
 
@@ -792,6 +822,79 @@ describe('a draft confirmed on the way back from the passkey (6D4b)', () => {
     // No invitation in the answer: nothing said about a link.
     expect(screen.queryByText(/can't be shown again/)).toBeNull();
     expect(screen.queryByRole('heading', { name: 'The invitation link' })).toBeNull();
+  });
+});
+
+describe('a reset asked, then cancelled (E6-P11)', () => {
+  const resetConfirm = `/v1/factor-resets/${RESET}/confirm`;
+  const label = `Ask a reset of the second factor of Approver ${OTHER}`;
+  const asked = `Asked: a reset of the second factor of Approver ${OTHER}. Nothing is removed until one of your registered contacts confirms it.`;
+  function keptFor(confirmPath: string, change: Record<string, unknown> = {}) {
+    sessionStorage.setItem(
+      `agentx.step-up.${CHALLENGE}`,
+      JSON.stringify({
+        challenge: CHALLENGE,
+        label,
+        confirmPath,
+        body: {},
+        organization: ORG.id,
+        idempotencyKey: '0199a0f0-0000-4000-8000-00000000c0de',
+        drafted: true,
+        done: asked,
+        ...change,
+      }),
+    );
+  }
+  const cancelReset = async () => {
+    answer(`POST /v1/factor-resets/${RESET}/cancel`, { status: 200, body: { reset: reset({ status: 'CANCELLED' }) } });
+    await press(`Cancel reset ${RESET}`);
+    await inDialog('Cancel the reset');
+    expect(await screen.findByText("Cancelled: the second factor isn't removed.")).toBeDefined();
+  };
+
+  it('says the reset asked and waiting for a contact, never done; a cancel clears it', async () => {
+    as('admin');
+    answer(`POST ${resetConfirm}`, { status: 200, body: { reset: reset() } });
+    keptFor(resetConfirm);
+    const { history } = open(`/more/members/${OTHER}?stepped=${CHALLENGE}`);
+    expect(await screen.findByText(label)).toBeDefined();
+    await press('Confirm');
+    expect(await screen.findByText(asked)).toBeDefined();
+    expect(screen.queryByText(/^Done:/)).toBeNull();
+    await cancelReset();
+    expect(screen.queryByText(asked)).toBeNull();
+    expect(history.location.search).not.toContain('stepped');
+  });
+
+  it('forgets the cancelled reset’s draft still waiting to be confirmed', async () => {
+    as('admin');
+    keptFor(resetConfirm);
+    const { history } = open(`/more/factor-resets?stepped=${CHALLENGE}`);
+    expect(await screen.findByText(label)).toBeDefined();
+    await cancelReset();
+    expect(screen.queryByText(label)).toBeNull();
+    expect(kept()).toBeNull();
+    expect(history.location.search).not.toContain('stepped');
+    expect(sentTo('POST', resetConfirm)).toHaveLength(0);
+  });
+
+  it('keeps another change still waiting to be confirmed', async () => {
+    as('admin');
+    const roleConfirm = `/v1/members/${OTHER}/role/confirm`;
+    keptFor(roleConfirm, { label: 'Change the role', drafted: undefined, done: undefined });
+    const { history } = open(`/more/factor-resets?stepped=${CHALLENGE}`);
+    expect(await screen.findByText('Change the role')).toBeDefined();
+    await cancelReset();
+    expect(screen.getByText('Change the role')).toBeDefined();
+    expect(kept()).toMatchObject({ confirmPath: roleConfirm });
+    expect(history.location.search).toContain(`stepped=${CHALLENGE}`);
+  });
+
+  it('reads no change kept with done words that aren’t words', async () => {
+    as('admin');
+    keptFor(resetConfirm, { done: 5 });
+    open(`/more/factor-resets?stepped=${CHALLENGE}`);
+    expect(await screen.findByText(/can't be found in this window/)).toBeDefined();
   });
 });
 

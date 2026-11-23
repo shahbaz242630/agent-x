@@ -426,13 +426,13 @@ const CHANGES: readonly (readonly [string, (ready_: Ready) => Promise<() => Prom
       await sourceChanges().suspend(w.admin, keyed(w.admin, SOURCE_SUSPEND), w.source, 'pause', CORRELATION);
       return async () => {
         const challengeId = await steppedUp(w, () =>
-          sourceChanges().reactivate(w.admin, keyed(w.admin, SOURCE_REACTIVATE), w.source, CORRELATION),
+          sourceChanges().reactivate(w.admin, keyed(w.admin, SOURCE_REACTIVATE), w.source, 'pause', CORRELATION),
         );
         return sourceChanges().reactivateConfirm(
           w.admin,
           keyed(w.admin, SOURCE_REACTIVATE_CONFIRM),
           w.source,
-          challengeId,
+          { stepUpChallengeId: challengeId, pendingRequests: 'pause' },
           CORRELATION,
         );
       };

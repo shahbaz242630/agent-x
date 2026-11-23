@@ -16,6 +16,7 @@ import {
   choiceDetails,
   detailsChoiceDetails,
   reactivationChoiceDetails,
+  sourceReactivationChoiceDetails,
   unfreezeChoiceDetails,
 } from './suspensions.ts';
 
@@ -54,6 +55,7 @@ const LARGEST: Readonly<Record<string, readonly string[]>> = {
   'funding_source.suspended': [...STEP_UP, ...keysOf(choiceDetails('cancel')), 'reason'],
   'funding_source.consent_lapsed': ['consentId', 'consentExpiresAt', 'pendingRequests', 'chosen'],
   'funding_source.consent_expiry_chosen': ['pendingRequests', 'pendingStatementVersion', 'lapsedConsentId'],
+  'funding_source.reactivated': [...STEP_UP, ...keysOf(sourceReactivationChoiceDetails('cancel'))],
   'supplier.suspend': [...STEP_UP, ...keysOf(choiceDetails('cancel')), 'reason'],
   'supplier.unverify': [...STEP_UP, ...keysOf(choiceDetails('cancel')), 'reason', 'versionId'],
   'supplier.pending_requests_chosen': ['pendingRequests', 'pendingStatementVersion'],

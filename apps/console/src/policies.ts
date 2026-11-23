@@ -208,6 +208,30 @@ export function draftFrom(current: Rules | null, digits: number, suggestedMonthl
   };
 }
 
+const amountOrNone = (minor: number | null): AmountOrNone => (minor === null ? 'none' : 'amount');
+
+/**
+ * A draft to change a policy from: the rules in force, each choice as an
+ * admin made it before (their own, shown to keep or change, Rule Book §1.9).
+ * With no rules in force, no choice is made; the organisation's monthly cap
+ * not chosen yet stays unchosen.
+ */
+export function draftInForce(policy: Policy, digits: number): Draft {
+  const org = policy.scope === 'organization';
+  const start = draftFrom(policy.current, digits, org ? policy.suggestedMonthlyCapMinor : undefined);
+  const current = policy.current;
+  if (current === null) return start;
+  return {
+    ...start,
+    perOrder: current.perOrderCap === null ? 'none' : 'cap',
+    over: current.perOrderCap?.over ?? null,
+    monthly: org ? policy.monthlyCapChoice : amountOrNone(current.monthlyCapMinor),
+    threshold: amountOrNone(current.approvalThresholdMinor),
+    suppliers: current.supplierIds === null ? 'any' : 'only',
+    wait: WAITS.find((hours) => Number(hours) === policy.approvalWaitHours) ?? null,
+  };
+}
+
 /** What is wrong with a draft, each said in place. */
 export type Problem =
   | 'perOrder'

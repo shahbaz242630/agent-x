@@ -53,8 +53,11 @@ interface Kept {
   readonly read: (listed: never) => Braked;
   /** Who may suspend: the API's SUSPENDING_ROLES for this kind. Reactivating is an admin's alone for every kind. */
   readonly suspending: readonly Role[];
-  /** Reactivating chooses what happens to the held requests (a supplier, decision 9); the others choose nothing. */
-  readonly reactivateChooses: boolean;
+  /**
+   * The API's words (GET /v1/statements) reactivating chooses what happens to the held requests with: a supplier's
+   * (decision 9) and a bank account's (E6-P6); null for an agent, whose reactivation chooses nothing.
+   */
+  readonly reactivateStatement: 'reactivate' | 'source_reactivate' | null;
 }
 
 export const KINDS: Readonly<Record<Kind, Kept>> = {
@@ -68,7 +71,7 @@ export const KINDS: Readonly<Record<Kind, Kept>> = {
       ended: false,
     }),
     suspending: ['admin', 'developer'],
-    reactivateChooses: false,
+    reactivateStatement: null,
   },
   suppliers: {
     path: '/v1/suppliers',
@@ -80,7 +83,7 @@ export const KINDS: Readonly<Record<Kind, Kept>> = {
       ended: false,
     }),
     suspending: ['admin', 'approver'],
-    reactivateChooses: true,
+    reactivateStatement: 'reactivate',
   },
   sources: {
     path: '/v1/funding-sources',
@@ -92,7 +95,7 @@ export const KINDS: Readonly<Record<Kind, Kept>> = {
       ended: source.status === 'ENDED',
     }),
     suspending: ['admin', 'approver'],
-    reactivateChooses: false,
+    reactivateStatement: 'source_reactivate',
   },
 };
 
