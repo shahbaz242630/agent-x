@@ -38,11 +38,23 @@ import { Connections } from './agent-connections.tsx';
 import { Said, useChange } from './change.tsx';
 import { Loading, NotShown } from './failed.tsx';
 
-/** A member as the console can name them: the API gives a role and IDs, no name. */
+/** A member's "Name (email)", either alone when only one is known; undefined when the API named them not (a non-admin's list). */
+export function namedText(member: Member): string | undefined {
+  const name = member.name ?? undefined;
+  const email = member.email ?? undefined;
+  if (name !== undefined && email !== undefined) return `${name} (${email})`;
+  return name ?? email;
+}
+
+/**
+ * A member as the console can name them: by name for an admin, whose list
+ * names them (decision 27); by role for everyone else, and for a member it
+ * names not; "A member" for one not on the list.
+ */
 export function memberText(member: Member | undefined, me: string): string {
   if (member === undefined) return t('agents.memberUnknown');
-  const role = t(`choose.role.${member.role}`);
-  return member.userId.toLowerCase() === me ? `${role} ${t('payments.you')}` : role;
+  const shown = namedText(member) ?? t(`choose.role.${member.role}`);
+  return member.userId.toLowerCase() === me ? `${shown} ${t('payments.you')}` : shown;
 }
 
 /** What an agent may do, each scope in plain words: on its page, and confirming a registration. */

@@ -809,6 +809,7 @@
   "members.people": "People",
   "members.title": "Members",
   "members.intro": "Everyone in this organisation, by role and Agent X ID. Names and email addresses stay with your sign-in service, so they aren't shown here.",
+  "members.introNamed": "Everyone in this organisation, by name, role and Agent X ID.",
   "members.backToMore": "Back to More",
   "members.back": "Back to members",
   "members.trust": "Who vouches for your organisation",

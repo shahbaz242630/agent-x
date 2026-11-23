@@ -11,6 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App, createConsoleRouter, createQueries } from '../app.tsx';
+import { memberText } from './agent.tsx';
 
 vi.mock('../navigate.ts', () => ({ goTo: vi.fn() }));
 const { goTo } = await import('../navigate.ts');
@@ -608,5 +609,30 @@ describe('an agent’s connected apps (6E3b)', () => {
     open(page);
     await userEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     expect(await screen.findByRole('button', { name: 'Revoke the connection of Claude Desktop' })).toBeDefined();
+  });
+});
+
+describe('a member named as decision 27 names them (S212 F3)', () => {
+  const approver = {
+    id: APPROVER,
+    userId: '0199a0f0-0000-7000-8000-000000000033',
+    role: 'approver',
+    status: 'ACTIVE',
+    joinedAt: '2026-01-01T00:00:00.000Z',
+  } as const;
+
+  it('names a member by "Name (email)" where the list names them (an admin’s), either alone when only one is known', () => {
+    expect(memberText({ ...approver, name: 'Sara Khan', email: 'sara@example.com' }, ME)).toBe(
+      'Sara Khan (sara@example.com)',
+    );
+    expect(memberText({ ...approver, name: 'Sara Khan', email: null }, ME)).toBe('Sara Khan');
+    expect(memberText({ ...approver, name: null, email: 'sara@example.com' }, ME)).toBe('sara@example.com');
+    expect(memberText({ ...approver, userId: ME, name: 'Sara Khan', email: null }, ME)).toBe('Sara Khan (you)');
+  });
+
+  it('names them by role where the list doesn’t (anyone else’s), and "A member" for one not on it', () => {
+    expect(memberText(approver, ME)).toBe('Approver');
+    expect(memberText({ ...approver, name: null, email: null }, ME)).toBe('Approver');
+    expect(memberText(undefined, ME)).toBe('A member');
   });
 });

@@ -29,7 +29,7 @@ export {
   MOST_EXPORT_DAYS,
   MOST_EXPORTED_EVENTS,
 } from './domain/exports.ts';
-export { type ActorName, createActorNamer, SHOWN_FROM } from './infrastructure/actor-names.ts';
+export { type ActorName, createActorNamer, nameOf, SHOWN_FROM } from './infrastructure/actor-names.ts';
 export {
   newestPersonSeal,
   OPERATOR_PERSON_LOG_EXPORTED,

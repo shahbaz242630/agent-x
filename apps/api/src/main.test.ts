@@ -263,6 +263,10 @@ vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
       identityReads.push({ read: 'membersFor', args });
       return Promise.resolve('the members');
     },
+    keptMembersFor: (...args: readonly unknown[]) => {
+      identityReads.push({ read: 'keptMembersFor', args });
+      return Promise.resolve({ outcome: 'tampered', sign: 'seal' });
+    },
   };
 });
 
@@ -1096,13 +1100,28 @@ describe("the server's two membership reads, as the process wires them", () => {
   it('listMembers asks for that organisation, on the pool, with a logger naming the request', async () => {
     const { capture } = await start();
     const { listMembers } = serverOptions.last as {
-      listMembers: (orgId: string, correlationId: string) => Promise<unknown>;
+      listMembers: (orgId: string, correlationId: string, named: boolean) => Promise<unknown>;
     };
 
-    await expect(listMembers(ORG, CORRELATION)).resolves.toBe('the members');
+    await expect(listMembers(ORG, CORRELATION, false)).resolves.toBe('the members');
 
     const [asked] = identityReads;
     expect(asked?.read).toBe('membersFor');
+    expect(asked?.args[0]).toBe(fake.created[0]);
+    expect(asked?.args.slice(2)).toEqual([ORG]);
+    expectServices(capture, asked?.args[1]);
+  });
+
+  it('listMembers for an admin reads the list with its kept names, on the pool, with a logger naming the request', async () => {
+    const { capture } = await start();
+    const { listMembers } = serverOptions.last as {
+      listMembers: (orgId: string, correlationId: string, named: boolean) => Promise<unknown>;
+    };
+
+    await expect(listMembers(ORG, CORRELATION, true)).resolves.toEqual({ outcome: 'tampered', sign: 'seal' });
+
+    const [asked] = identityReads;
+    expect(asked?.read).toBe('keptMembersFor');
     expect(asked?.args[0]).toBe(fake.created[0]);
     expect(asked?.args.slice(2)).toEqual([ORG]);
     expectServices(capture, asked?.args[1]);
