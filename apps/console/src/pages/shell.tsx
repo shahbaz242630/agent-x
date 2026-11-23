@@ -5,6 +5,7 @@ import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
 import { HoldBanner } from './hold.tsx';
 import { KeyHold } from './key-once.tsx';
+import { SignInLate } from './sign-in-late.tsx';
 import { SteppedUp } from './stepped-up.tsx';
 
 const TABS = [
@@ -57,6 +58,7 @@ export function Shell() {
         <KeyHold onHeld={setHeld}>
           <SteppedUp />
         </KeyHold>
+        <SignInLate />
         <Outlet />
       </main>
     </div>

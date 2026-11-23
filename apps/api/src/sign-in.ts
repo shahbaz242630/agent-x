@@ -85,6 +85,7 @@
 // HEAD of either GET (Fastify serves one beside each): a link checker's HEAD
 // must neither start a flow nor use one up.
 import {
+  HOME_PATH,
   type LoginSessions,
   MOST_OPEN_SIGN_INS,
   MOST_OPEN_SIGN_INS_A_NETWORK,
@@ -243,6 +244,9 @@ const STEP_UP_FAILED_QUERY = 'stepUpFailed';
 const STEP_UP_WHY_QUERY = 'stepUpWhy';
 type StepUpWhy = 'spent' | 'expired';
 
+/** The query the home page comes back with when a sign-in's way back found nothing waiting (E6-P1, sign-in-late.tsx). */
+const SIGN_IN_LATE_QUERY = 'signInLate';
+
 /** The query a step-up's page comes back with to confirm its change: never kept on a failed one. */
 const STEPPED_QUERY = 'stepped';
 
@@ -332,6 +336,20 @@ export function registerSignIn(
       .warn('auth.sign_in_failed', reason === undefined ? { failure } : { failure, reason });
     securityEvents.note({ kind: 'sign_in_failed', reason: failure, ip: request.ip });
     return sendErrorBody(reply, 401, 'SIGN_IN_FAILED', request.id);
+  };
+  /**
+   * A way back that found no flow waiting (E6-P1): too late, used already, or started in another window. Logged and
+   * noted as any failed sign-in, but the browser goes home saying so, never left on a bare error at the callback, from
+   * which Back led to the login service's dead end. No session is opened; the person, if signed in, stays so.
+   */
+  const cameBackLate = (request: FastifyRequest, reply: FastifyReply, reason: string) => {
+    logger.child({ correlationId: request.id }).warn('auth.sign_in_failed', { failure: 'flow_missing', reason });
+    securityEvents.note({ kind: 'sign_in_failed', reason: 'flow_missing', ip: request.ip });
+    return reply
+      .code(302)
+      .header('location', `${HOME_PATH}?${SIGN_IN_LATE_QUERY}=1`)
+      .header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0))
+      .send({});
   };
   const off = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
   /**
@@ -469,6 +487,7 @@ export function registerSignIn(
       }
       if (!(thrown instanceof SignInFailed)) throw thrown;
       if (thrown.failure === 'provider_unavailable') return unavailable(request, reply, thrown.message);
+      if (thrown.failure === 'flow_missing') return cameBackLate(request, reply, thrown.message);
       return failed(request, reply, thrown.failure, thrown.message);
     }
     logger

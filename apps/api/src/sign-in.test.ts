@@ -290,6 +290,28 @@ describe('coming back from the login service', () => {
     expect(noted).toEqual([{ kind: 'sign_in_failed', reason: failure, ip: '203.0.113.9' }]);
   });
 
+  it('E6-P1 sends a way back that finds no flow waiting home, saying it came back late, not a bare error', async () => {
+    const standIn = new StandIn();
+    standIn.failWith = new SignInFailed('flow_missing', 'no flow of ours is waiting for this browser');
+    const { app, capture, noted } = await server(standIn);
+
+    const response = await app.inject({
+      ...callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
+      remoteAddress: '203.0.113.9',
+    });
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe('/?signInLate=1');
+    // The flow cookie cleared, the session's left alone: a signed-in person stays signed in.
+    expect(setCookies(response.headers['set-cookie'])).toEqual([
+      `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+    ]);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'auth.sign_in_failed', failure: 'flow_missing', level: 'warn' }),
+    );
+    expect(noted).toEqual([{ kind: 'sign_in_failed', reason: 'flow_missing', ip: '203.0.113.9' }]);
+  });
+
   it('refuses as SIGN_IN_FAILED when the sign-in fails, setting no cookie, and logs which step failed', async () => {
     const standIn = new StandIn();
     standIn.failWith = new SignInFailed('token_invalid', 'the ID token failed its check: ERR_JWT_EXPIRED');
