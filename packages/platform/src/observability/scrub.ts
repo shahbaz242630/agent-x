@@ -254,8 +254,19 @@ export function passesLuhn(digits: string): boolean {
   return sum % 10 === 0;
 }
 
-function cleanJoinedCard(candidate: string): string {
-  return passesLuhn(candidate) ? LABELS.card : candidate;
+/**
+ * A witness file's name (signed-files.ts: fileName): a folder, a 13-digit countdown, then a UUID. The countdown passes
+ * Luhn about one time in ten, which would hide the name the fork and set-aside alarms give (TR-23). Only that exact
+ * shape stays: 13 digits right after a `/` and right before `-` and a whole lower-case UUID.
+ */
+const WITNESS_NAME_TAIL = /^-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9A-Za-z])/;
+const isWitnessName = (candidate: string, offset: number, text: string): boolean =>
+  candidate.length === 13 &&
+  text.charAt(offset - 1) === '/' &&
+  WITNESS_NAME_TAIL.test(text.slice(offset + 13, offset + 13 + 38));
+
+function cleanJoinedCard(candidate: string, offset: number, text: string): string {
+  return passesLuhn(candidate) && !isWitnessName(candidate, offset, text) ? LABELS.card : candidate;
 }
 
 /**

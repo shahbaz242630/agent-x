@@ -253,6 +253,32 @@ describe('SEC-DATA-01 scrub: URLs keep where they point, and lose credentials, q
   });
 });
 
+describe('SEC-DATA-01 TR-23 a witness file name is no card, and nothing else that looks like one is spared', () => {
+  // A countdown that passes Luhn, as about one in ten witness file names' does (signed-files.ts: fileName).
+  const countdown = '6735260000000';
+  const id = '0a1b2c3d-4e5f-4abc-8def-0123456789ab';
+  it.each([
+    ['a heads file’s name', `file e3/heads/${countdown}-${id}`],
+    ['a snapshot’s name in JSON', `{"file":"e3/snapshots/${countdown}-${id}"}`],
+  ])('%s stays whole', (_what, text) => {
+    expect(passesLuhn(countdown)).toBe(true);
+    expect(scrub(text)).toBe(text);
+  });
+  it.each([
+    ['the digits with no folder before them', `${countdown}-${id}`, `[card]-${id}`],
+    ['the digits after a folder, then a word', `heads/${countdown}-paid`, 'heads/[card]-paid'],
+    ['the digits after a folder, then a cut-short UUID', `heads/${countdown}-0a1b2c3d`, 'heads/[card]-0a1b2c3d'],
+    ['a 16-digit card after a folder, then a UUID', `heads/4111111111111111-${id}`, `heads/[card]-${id}`],
+    [
+      'the digits after a folder, then a UUID in capitals',
+      `heads/${countdown}-${id.toUpperCase()}`,
+      `heads/[card]-${id.toUpperCase()}`,
+    ],
+  ])('%s is still hidden', (_what, text, expected) => {
+    expect(scrub(text)).toBe(expected);
+  });
+});
+
 describe('scrub: ordinary log text is left alone', () => {
   it.each([
     ['an ISO timestamp', '2026-09-14T10:15:30.123Z'],
