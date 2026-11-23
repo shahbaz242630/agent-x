@@ -303,7 +303,7 @@ describe('the audit log (6C2, CO7)', () => {
     await userEvent.type(screen.getByLabelText('Object ID'), REQUEST);
     await userEvent.click(screen.getByRole('button', { name: 'Show' }));
     expect((await screen.findByRole('alert')).textContent).toMatch(/both its kind and its ID/);
-    expect(sent.length).toBe(asked);
+    expect(sent).toHaveLength(asked);
     expect(router.state.location.searchStr).toBe('');
     // Both halves given: the notice goes and the log is asked.
     await userEvent.type(screen.getByLabelText(/^Object kind/), 'spend_request');
