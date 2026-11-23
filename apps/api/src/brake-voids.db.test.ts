@@ -1627,6 +1627,25 @@ describe('reactivating a suspended bank account: a fresh start or an un-pause (E
     });
   });
 
+  it('a fresh start past what one brake cancels at once: the batch now, the job the rest, by the reactivation’s own event', async () => {
+    const { w, acting } = await ready();
+    const many = [];
+    for (let each = 0; each < 21; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    expect(many.every(({ status }) => status === 'APPROVED')).toBe(true);
+    // Paused, so the suspension itself cancels nothing: only the reactivation's fresh start can end the one left.
+    await sourceSuspended(w, 'pause');
+
+    expect(await sourceReactivated(w, 'cancel')).toMatchObject({ source: { status: 'ACTIVE' } });
+    const left = many.at(-1);
+    expect(await statusOf(w, left?.id ?? '')).toBe('APPROVED');
+    await job(w).run();
+
+    expect(lines('request_void.voided')).toEqual([
+      expect.objectContaining({ requestId: left?.id, causes: 'SOURCE_NOT_USABLE' }),
+    ]);
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+
   it('an un-pause: its requests stand again at once, through the job, and the waiting one may be approved', async () => {
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);
