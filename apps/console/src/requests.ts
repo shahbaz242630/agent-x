@@ -10,6 +10,10 @@ import { useEffect, useState } from 'react';
 import { api, isUuid } from './api.ts';
 import { t } from './text.ts';
 
+/** A payment's status as the API sends it: here, not in payments.ts, which reads requests.ts (no import cycle). */
+export type PaymentStatus =
+  'SUBMISSION_PENDING' | 'SUBMITTED' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN' | 'REVERSED';
+
 export type Status =
   | 'VALIDATING'
   | 'DENIED'
@@ -56,6 +60,8 @@ export interface RequestDetails extends ListedRequest {
   readonly agentWrote: { readonly purpose: string; readonly orderReference: string };
   readonly rejection: { readonly byUserId: string; readonly at: string; readonly reason: string } | null;
   readonly voiding: { readonly at: string; readonly reasons: readonly Reason[] } | null;
+  /** For one handed off, its payment, which carries how it came out; null before. */
+  readonly payment: { readonly id: string; readonly status: PaymentStatus } | null;
 }
 
 /**

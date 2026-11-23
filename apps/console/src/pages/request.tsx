@@ -109,6 +109,18 @@ function Facts({ request }: { readonly request: RequestDetails }) {
           <dd>{timeText(request.expiresAt)}</dd>
         </>
       )}
+      {/* Its own story ends with the bank (HANDED_OFF): the payment says how it came out (S212 G2). */}
+      {request.payment !== null && (
+        <>
+          <dt>{t('request.payment')}</dt>
+          <dd>
+            {t(`payments.status.${request.payment.status}`)}{' '}
+            <Link to="/payments/$id" params={{ id: request.payment.id }}>
+              {t('request.seePayment')}
+            </Link>
+          </dd>
+        </>
+      )}
       <dt>{t('request.changed')}</dt>
       <dd>{timeText(request.changedAt)}</dd>
       <dt>{t('request.bankReference')}</dt>

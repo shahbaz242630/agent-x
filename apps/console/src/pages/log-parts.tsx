@@ -75,6 +75,19 @@ function optionText(name: FilterName, option: string): string {
   return option === '' ? t('logs.anyone') : t(`logs.actor.${option as 'user' | 'agent' | 'system'}`);
 }
 
+/** A kind and its ID go to the API together or not at all (it refuses half of one, 400): which pair is half filled. */
+type Pair = 'actor' | 'subject';
+const PAIRS = [
+  ['actor', 'actorType', 'actorId'],
+  ['subject', 'subjectType', 'subjectId'],
+] as const;
+function halfPairIn(draft: Filters, fields: readonly Field[]): Pair | null {
+  const shown = new Set(fields.map(({ name }) => name));
+  const filled = (name: keyof Filters) => (draft[name] ?? '') !== '';
+  const half = PAIRS.find(([, kind, id]) => shown.has(kind) && shown.has(id) && filled(kind) !== filled(id));
+  return half === undefined ? null : half[0];
+}
+
 /** The filters to set, applied together: kept as typed while typed, sent to the address on Apply. */
 export function FilterForm({
   filters,
@@ -87,6 +100,7 @@ export function FilterForm({
 }) {
   const id = useId();
   const [draft, setDraft] = useState<Filters>(filters);
+  const [halfPair, setHalfPair] = useState<Pair | null>(null);
   /** A field's id, value as typed ('' left empty) and change, the same for a date, a text or a choice. */
   const bound = (name: keyof Filters) => ({
     id: `${id}-${name}`,
@@ -110,7 +124,9 @@ export function FilterForm({
       className="filters"
       onSubmit={(event) => {
         event.preventDefault();
-        onApply(draft);
+        const half = halfPairIn(draft, fields);
+        setHalfPair(half);
+        if (half === null) onApply(draft);
       }}
     >
       {dates}
@@ -134,6 +150,11 @@ export function FilterForm({
       <button type="submit" className="secondary">
         {t('logs.apply')}
       </button>
+      {halfPair !== null && (
+        <p className="notice" role="alert">
+          {t(`logs.halfPair.${halfPair}`)}
+        </p>
+      )}
     </form>
   );
 }

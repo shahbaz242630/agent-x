@@ -13,6 +13,7 @@ import { createStepUpChallenges, type LiveSession, type MembershipCheck } from '
 import { MANDATES } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { createFakeRail } from '@agentx/core/modules/providers';
+import type { PaymentsTables } from '@agentx/core/modules/transactions';
 import {
   AGENT_BRAKE,
   createDatabase,
@@ -87,7 +88,8 @@ const BRAKE_WAIT_MS = 12_000;
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<MandateWorldTables>;
+// With the payments too: the team's read of a request carries its payment (S212 G2).
+let app: Database<MandateWorldTables & PaymentsTables>;
 const ids = new SequentialIds(0xb8a0_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000b8';
 let clock: FixedClock;
@@ -98,7 +100,10 @@ const { world, keyed, agentKey, stepUp, quiet, termsOf } = shared;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<MandateWorldTables>({ ...database.connection('app'), maxConnections: 16 }, testLogger());
+  app = createDatabase<MandateWorldTables & PaymentsTables>(
+    { ...database.connection('app'), maxConnections: 16 },
+    testLogger(),
+  );
 });
 
 afterAll(async () => {

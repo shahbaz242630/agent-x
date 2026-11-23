@@ -10,11 +10,10 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
 import { api, isIntegrityFailed, isUuid } from './api.ts';
 import { refusalText } from './refusals.ts';
-import { pageQuery } from './requests.ts';
+import { pageQuery, type PaymentStatus } from './requests.ts';
 import { t } from './text.ts';
 
-export type PaymentStatus =
-  'SUBMISSION_PENDING' | 'SUBMITTED' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN' | 'REVERSED';
+export type { PaymentStatus } from './requests.ts';
 
 /** The groups a list may be filtered to, as the API's `status` takes them, in the order the filter offers them. */
 export const GROUPS = ['pending', 'paid', 'failed', 'cancelled', 'unknown', 'reversed'] as const;

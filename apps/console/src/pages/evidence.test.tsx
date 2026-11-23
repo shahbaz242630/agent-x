@@ -268,6 +268,7 @@ describe('reaching a request’s evidence (6C2)', () => {
         agentWrote: { purpose: 'Toner', orderReference: 'INV-1' },
         rejection: null,
         voiding: null,
+        payment: null,
       },
     });
     answer(`GET ${READ}`, { status: 200, body: { evidence: denied() } });

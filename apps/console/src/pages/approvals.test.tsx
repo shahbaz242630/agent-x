@@ -26,6 +26,7 @@ const ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const AGENT = '0199a0f0-0000-7000-8000-0000000000c1';
 const SECOND = '0199a0f0-0000-7000-8000-0000000000b2';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000c0ffe';
+const PAYMENT = '0199a0f0-0000-7000-8000-0000000000a9';
 /** An approve's ask, waiting for the passkey: nothing re-weighed, nothing stopping it. */
 const ASKED = { stepUpChallengeId: CHALLENGE, recheck: null, rejection: null };
 const RECHECKED = {
@@ -70,6 +71,7 @@ const details = (overrides: Record<string, unknown> = {}) => ({
   agentWrote: { purpose: 'Packaging restock, October', orderReference: 'INV-2026-0417' },
   rejection: null,
   voiding: null,
+  payment: null,
   ...overrides,
 });
 
@@ -292,6 +294,25 @@ describe('one request’s page (6B1)', () => {
     expect(within(agent).getByText(AGENT).className).toBe('mono');
     expect(sentTo('GET', `/v1/spend-requests/${ID}`)[0]?.headers.get('agentx-organization')).toBe(OTHER.id);
     expect(localStorage.getItem('agentx.organization')).toBe(OTHER.id);
+    // Not handed off: no payment yet, so none is shown.
+    expect(screen.queryByText('Payment')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'See the payment' })).toBeNull();
+  });
+
+  it('S212 G2 shows a handed-off request’s payment, how it came out, and links to it (BR-17)', async () => {
+    signedIn();
+    answer(`GET /v1/spend-requests/${ID}`, {
+      status: 200,
+      body: details({ status: 'HANDED_OFF', expiresAt: null, payment: { id: PAYMENT, status: 'SUCCEEDED' } }),
+    });
+    open(`/approvals/${ID}`);
+
+    // The request's own status stays as it is; the payment row says it was paid.
+    expect(await screen.findByText('With the bank')).toBeDefined();
+    expect(screen.getByText('Payment')).toBeDefined();
+    expect(screen.getByText('Paid', { exact: false })).toBeDefined();
+    const link = screen.getByRole('link', { name: 'See the payment' });
+    expect(link.getAttribute('href')).toContain(`/payments/${PAYMENT}`);
   });
 
   it('S206 V8 shows the agent’s words as text, never markup, each isolated so a direction override can’t reorder the page', async () => {

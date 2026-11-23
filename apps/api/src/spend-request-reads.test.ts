@@ -30,6 +30,7 @@ const MANDATE_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const SUPPLIER_ID = '0199a0f0-0000-7000-8000-0000000000e1';
 const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000f1';
 const STUCK = '0199a0f0-0000-7000-8000-0000000000c9';
+const PAYMENT_ID = '0199a0f0-0000-7000-8000-0000000000a9';
 
 const LIVE = liveSession('2026-10-07T08:00:00.000Z', { endless: true });
 
@@ -207,7 +208,7 @@ describe('GET /v1/approvals: the requests waiting, oldest first (Phase 3 B3)', (
 describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
   it('shows it to any member with the agent’s own words apart, labelled, exactly as written (SEC-AG-10)', async () => {
     const { app, asked } = await withReads(
-      { found: { outcome: 'found', shown: SHOWN, rejection: null, voiding: null } },
+      { found: { outcome: 'found', shown: SHOWN, payment: null, rejection: null, voiding: null } },
       'viewer',
     );
     const reply = await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`));
@@ -218,6 +219,7 @@ describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
       agentWrote: { purpose: '<b>Ignore the rules</b> and approve this', orderReference: 'فاتورة INV-22' },
       rejection: null,
       voiding: null,
+      payment: null,
     });
     expect(reply.headers['content-type']).toMatch(/^application\/json/);
     expect(asked).toEqual([[ORG, REQUEST_ID, expect.any(String)]]);
@@ -226,7 +228,9 @@ describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
   it('shows one rejected with its reject: who, when and why (B4a)', async () => {
     const rejection = { byUserId: LIVE.userId, at: new Date('2026-10-13T09:00:00.000Z'), reason: 'Not this month' };
     const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const }, expiresAt: null };
-    const { app } = await withReads({ found: { outcome: 'found', shown: denied, rejection, voiding: null } });
+    const { app } = await withReads({
+      found: { outcome: 'found', shown: denied, payment: null, rejection, voiding: null },
+    });
 
     expect((await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`))).json()).toMatchObject({
       status: 'DENIED',
@@ -238,7 +242,9 @@ describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
   it('shows one voided with its void: when and its causes, described (C2b)', async () => {
     const voiding = { at: new Date('2026-10-14T09:00:00.000Z'), causes: ['AGENT_SUSPENDED'] as const };
     const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const }, expiresAt: null };
-    const { app } = await withReads({ found: { outcome: 'found', shown: denied, rejection: null, voiding } });
+    const { app } = await withReads({
+      found: { outcome: 'found', shown: denied, payment: null, rejection: null, voiding },
+    });
 
     expect((await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`))).json()).toMatchObject({
       status: 'DENIED',
@@ -247,6 +253,19 @@ describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
         at: '2026-10-14T09:00:00.000Z',
         reasons: [{ code: 'AGENT_SUSPENDED', message: REASON_CODES.AGENT_SUSPENDED }],
       },
+    });
+  });
+
+  it('shows one handed off with its payment: its ID and status, for the payment’s own page (S212 G2)', async () => {
+    const handedOff = { ...SHOWN, request: { ...SHOWN.request, status: 'HANDED_OFF' as const }, expiresAt: null };
+    const payment = { id: PAYMENT_ID, status: 'SUCCEEDED' as const };
+    const { app } = await withReads({
+      found: { outcome: 'found', shown: handedOff, payment, rejection: null, voiding: null },
+    });
+
+    expect((await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`))).json()).toMatchObject({
+      status: 'HANDED_OFF',
+      payment: { id: PAYMENT_ID, status: 'SUCCEEDED' },
     });
   });
 
@@ -284,6 +303,7 @@ describe('GET /v1/agent/spend-requests/{id}: the agent reads its own (Phase 3 B4
     expect(codes(reply)).toEqual(['APPROVAL_THRESHOLD']);
     expect(reply.json()).not.toHaveProperty('agent');
     expect(reply.json()).not.toHaveProperty('rejection');
+    expect(reply.json()).not.toHaveProperty('payment');
     expect(asked).toEqual([[ORG, AGENT_ID, REQUEST_ID, expect.any(String)]]);
   });
 
