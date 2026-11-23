@@ -174,6 +174,230 @@
       "package": "undici",
       "reason": "Fixed upstream in undici 6.29.1; still present (undici 6.28.0) in v4.20.5, the newest tag of this image: no vendor image with it yet.",
       "reviewBy": "2026-12-17"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112314",
+      "package": "libgssapi-krb5-2",
+      "reason": "Kerberos: fixed by Debian in libgssapi-krb5-2 1.21.3-5+deb13u2; still present (libgssapi-krb5-2 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112314",
+      "package": "libk5crypto3",
+      "reason": "Kerberos: fixed by Debian in libk5crypto3 1.21.3-5+deb13u2; still present (libk5crypto3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112314",
+      "package": "libkrb5-3",
+      "reason": "Kerberos: fixed by Debian in libkrb5-3 1.21.3-5+deb13u2; still present (libkrb5-3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112314",
+      "package": "libkrb5support0",
+      "reason": "Kerberos: fixed by Debian in libkrb5support0 1.21.3-5+deb13u2; still present (libkrb5support0 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112320",
+      "package": "libgssapi-krb5-2",
+      "reason": "Kerberos: fixed by Debian in libgssapi-krb5-2 1.21.3-5+deb13u2; still present (libgssapi-krb5-2 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112320",
+      "package": "libk5crypto3",
+      "reason": "Kerberos: fixed by Debian in libk5crypto3 1.21.3-5+deb13u2; still present (libk5crypto3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112320",
+      "package": "libkrb5-3",
+      "reason": "Kerberos: fixed by Debian in libkrb5-3 1.21.3-5+deb13u2; still present (libkrb5-3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112320",
+      "package": "libkrb5support0",
+      "reason": "Kerberos: fixed by Debian in libkrb5support0 1.21.3-5+deb13u2; still present (libkrb5support0 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112321",
+      "package": "libgssapi-krb5-2",
+      "reason": "Kerberos: fixed by Debian in libgssapi-krb5-2 1.21.3-5+deb13u2; still present (libgssapi-krb5-2 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112321",
+      "package": "libk5crypto3",
+      "reason": "Kerberos: fixed by Debian in libk5crypto3 1.21.3-5+deb13u2; still present (libk5crypto3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112321",
+      "package": "libkrb5-3",
+      "reason": "Kerberos: fixed by Debian in libkrb5-3 1.21.3-5+deb13u2; still present (libkrb5-3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112321",
+      "package": "libkrb5support0",
+      "reason": "Kerberos: fixed by Debian in libkrb5support0 1.21.3-5+deb13u2; still present (libkrb5support0 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112322",
+      "package": "libgssapi-krb5-2",
+      "reason": "Kerberos: fixed by Debian in libgssapi-krb5-2 1.21.3-5+deb13u2; still present (libgssapi-krb5-2 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112322",
+      "package": "libk5crypto3",
+      "reason": "Kerberos: fixed by Debian in libk5crypto3 1.21.3-5+deb13u2; still present (libk5crypto3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112322",
+      "package": "libkrb5-3",
+      "reason": "Kerberos: fixed by Debian in libkrb5-3 1.21.3-5+deb13u2; still present (libkrb5-3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112322",
+      "package": "libkrb5support0",
+      "reason": "Kerberos: fixed by Debian in libkrb5support0 1.21.3-5+deb13u2; still present (libkrb5support0 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112323",
+      "package": "libgssapi-krb5-2",
+      "reason": "Kerberos: fixed by Debian in libgssapi-krb5-2 1.21.3-5+deb13u2; still present (libgssapi-krb5-2 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112323",
+      "package": "libk5crypto3",
+      "reason": "Kerberos: fixed by Debian in libk5crypto3 1.21.3-5+deb13u2; still present (libk5crypto3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112323",
+      "package": "libkrb5-3",
+      "reason": "Kerberos: fixed by Debian in libkrb5-3 1.21.3-5+deb13u2; still present (libkrb5-3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-112323",
+      "package": "libkrb5support0",
+      "reason": "Kerberos: fixed by Debian in libkrb5support0 1.21.3-5+deb13u2; still present (libkrb5support0 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-119079",
+      "package": "libgssapi-krb5-2",
+      "reason": "Kerberos: fixed by Debian in libgssapi-krb5-2 1.21.3-5+deb13u2; still present (libgssapi-krb5-2 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-119079",
+      "package": "libk5crypto3",
+      "reason": "Kerberos: fixed by Debian in libk5crypto3 1.21.3-5+deb13u2; still present (libk5crypto3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-119079",
+      "package": "libkrb5-3",
+      "reason": "Kerberos: fixed by Debian in libkrb5-3 1.21.3-5+deb13u2; still present (libkrb5-3 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-119079",
+      "package": "libkrb5support0",
+      "reason": "Kerberos: fixed by Debian in libkrb5support0 1.21.3-5+deb13u2; still present (libkrb5support0 1.21.3-5+deb13u1) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-19499",
+      "package": "libc-bin",
+      "reason": "glibc: fixed by Debian in libc-bin 2.41-12+deb13u5; still present (libc-bin 2.41-12+deb13u4) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-19499",
+      "package": "libc-l10n",
+      "reason": "glibc: fixed by Debian in libc-l10n 2.41-12+deb13u5; still present (libc-l10n 2.41-12+deb13u4) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-19499",
+      "package": "libc6",
+      "reason": "glibc: fixed by Debian in libc6 2.41-12+deb13u5; still present (libc6 2.41-12+deb13u4) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-19499",
+      "package": "locales",
+      "reason": "glibc: fixed by Debian in locales 2.41-12+deb13u5; still present (locales 2.41-12+deb13u4) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-5435",
+      "package": "libc-bin",
+      "reason": "glibc: fixed by Debian in libc-bin 2.41-12+deb13u5; still present (libc-bin 2.41-12+deb13u4) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-5435",
+      "package": "libc-l10n",
+      "reason": "glibc: fixed by Debian in libc-l10n 2.41-12+deb13u5; still present (libc-l10n 2.41-12+deb13u4) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-5435",
+      "package": "libc6",
+      "reason": "glibc: fixed by Debian in libc6 2.41-12+deb13u5; still present (libc6 2.41-12+deb13u4) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
+    },
+    {
+      "image": "postgres",
+      "id": "CVE-2026-5435",
+      "package": "locales",
+      "reason": "glibc: fixed by Debian in locales 2.41-12+deb13u5; still present (locales 2.41-12+deb13u4) in 18.7-trixie, the newest tag of this image (digest eb63372c, 20 Nov), and in 16.16-trixie: no vendor image with it yet. Local stack and database tests only; staging uses Azure's managed Postgres.",
+      "reviewBy": "2026-12-07"
     }
   ]
 }
