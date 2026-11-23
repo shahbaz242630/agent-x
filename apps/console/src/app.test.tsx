@@ -154,7 +154,11 @@ describe('the console’s frame (6A1)', () => {
     signedIn([ORG_A]);
     answers['POST /v1/auth/sign-out'] = { status: 200, body: {} };
     open('/more');
-    expect(await screen.findByText(/Signed in until/)).toBeDefined();
+    // Both ends (E2E6 F8): the latest, and the one a person away meets first.
+    const format = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    const said = (await screen.findByText(/Signed in until/)).textContent;
+    expect(said).toContain(`until ${format.format(new Date(SESSION.expiresAt))} at the latest`);
+    expect(said).toContain(`signed out at ${format.format(new Date(SESSION.idleExpiresAt))}`);
     await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await waitFor(() => {
       expect(goTo).toHaveBeenCalledWith('/');

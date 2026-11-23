@@ -22,7 +22,7 @@
   "nav.switch": "Switch organisation",
   "frozen.banner": "This organisation is frozen. No agent can spend until an admin unfreezes it.",
   "more.title": "More",
-  "more.session": "Signed in until {time}",
+  "more.session": "Signed in until {time} at the latest. If you're away, you're signed out at {idle}; using Agent X moves that on.",
   "more.signOut": "Sign out",
   "more.signOutFailed": "You're still signed in: Agent X couldn't sign you out just now. Try again, or close every window of this browser.",
   "error.title": "Something went wrong",

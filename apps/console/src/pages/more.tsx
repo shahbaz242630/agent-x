@@ -80,7 +80,13 @@ export function More() {
         <Link to="/more/my-activity">{t('myActivity.link')}</Link>
       </nav>
       <h2>{t('more.sessionHeading')}</h2>
-      <p className="muted">{t('more.session', { time: UNTIL.format(new Date(session.expiresAt)) })}</p>
+      {/* Both ends (E2E6 F8): the one a person away meets first, moved on by each request, and the latest. */}
+      <p className="muted">
+        {t('more.session', {
+          idle: UNTIL.format(new Date(session.idleExpiresAt)),
+          time: UNTIL.format(new Date(session.expiresAt)),
+        })}
+      </p>
       <button type="button" className="secondary" disabled={leaving} onClick={() => void signOut()}>
         {t('more.signOut')}
       </button>
