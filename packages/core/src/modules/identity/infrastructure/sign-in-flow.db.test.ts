@@ -45,7 +45,12 @@ import {
 import { PERSON_CHAIN_LOCK, sessionsSpent } from './person-chain-caps.ts';
 import { createSignIn, SessionsSpent, type SignIn, SignInBusy, StepUpFailed } from './sign-in-flow.ts';
 import { createSignedEnds } from './signed-ends.ts';
-import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
+import {
+  createStepUpChallenges,
+  STEP_UP_SECONDS,
+  type StepUpBinding,
+  type StepUpChallenges,
+} from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { contactData } from './user-contacts.ts';
 
@@ -826,6 +831,18 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     expect(client.started).toBe(started);
   });
 
+  it('E6-P4 refuses to begin one for its own challenge out of time as challenge_expired, starting nothing', async () => {
+    const { done, challenge } = await signedInWithChallenge();
+    const started = client.started;
+    clock.advanceBy(STEP_UP_SECONDS * 1000);
+
+    await expect(signIn.beginStepUp(done.sessionId, challenge.challengeId)).rejects.toMatchObject({
+      failure: 'challenge_expired',
+      back: undefined,
+    });
+    expect(client.started).toBe(started);
+  });
+
   type SetUp = Awaited<ReturnType<typeof signedInWithChallenge>>;
 
   it.each<[string, (setUp: SetUp) => Promise<unknown>, string]>([
@@ -883,21 +900,33 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
       'a challenge that runs out of time while the person is at the login service',
       ({ done, challenge }) => {
         client.whileFinishing = () => {
-          clock.advanceBy(300_000);
+          clock.advanceBy(STEP_UP_SECONDS * 1000);
         };
         return stepUp(done.sessionId, challenge.challengeId, done.cookie);
       },
-      'challenge_missing',
+      'challenge_expired',
     ],
     [
       'a challenge out of time',
       async ({ done, challenge }) => {
+        // Back after twelve minutes: its flow (fifteen) still stands, so the failure says the time ran out (E6-P2).
         const { url, flowId } = await signIn.beginStepUp(done.sessionId, challenge.challengeId);
         const state = new URL(url).searchParams.get('state') ?? '';
-        clock.advanceBy(300_000);
+        clock.advanceBy(12 * 60_000);
         return signIn.complete({ flowId, code: 'a-code', state, previousCookie: done.cookie });
       },
-      'challenge_missing',
+      'challenge_expired',
+    ],
+    [
+      'a challenge one millisecond short of its ten minutes: still pending, so another failure names it (E6-P2)',
+      async ({ done, challenge }) => {
+        const { url, flowId } = await signIn.beginStepUp(done.sessionId, challenge.challengeId);
+        const state = new URL(url).searchParams.get('state') ?? '';
+        clock.advanceBy(STEP_UP_SECONDS * 1000 - 1);
+        client.proves = { ...FRESH, amr: ['pwd'] };
+        return signIn.complete({ flowId, code: 'a-code', state, previousCookie: done.cookie });
+      },
+      'no_second_factor',
     ],
     [
       'a token the client refused',

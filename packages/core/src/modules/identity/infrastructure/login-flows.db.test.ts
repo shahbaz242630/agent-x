@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import {
   createLoginFlows,
   LOGIN_FLOW_SECONDS,
+  STEP_UP_FLOW_SECONDS,
   MOST_OPEN_SIGN_INS_A_NETWORK,
   QUIET_NETWORK_SIGN_INS,
   signInsUnderWay,
@@ -106,6 +107,21 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
     clock.advanceBy(LOGIN_FLOW_SECONDS * 1000 - 1);
 
     expect(await store.take(app, flowId)).toMatchObject({ flow });
+  });
+
+  it('E6-P2 keeps a step-up’s flow fifteen minutes, five past its challenge’s ten', async () => {
+    const clock = new FixedClock(START);
+    const store = createLoginFlows({ clock });
+    const kept = newFlow();
+    const gone = newFlow();
+    const keptId = await store.save(app, kept, '/', '0199a0f0-0000-7000-8000-0000000000e1');
+    const goneId = await store.save(app, gone, '/', '0199a0f0-0000-7000-8000-0000000000e2');
+    clock.advanceBy(STEP_UP_FLOW_SECONDS * 1000 - 1);
+
+    expect(STEP_UP_FLOW_SECONDS).toBe(LOGIN_FLOW_SECONDS + 300);
+    expect(await store.take(app, keptId)).toMatchObject({ flow: kept });
+    clock.advanceBy(1);
+    expect(await store.take(app, goneId)).toBeUndefined();
   });
 
   it('gives back nothing for an ID it never gave, or text that is none, and takes no other flow', async () => {

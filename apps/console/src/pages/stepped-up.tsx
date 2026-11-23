@@ -80,6 +80,12 @@ const refusedAs = (error: unknown): Sent => {
 };
 
 /** Each end's words, with the change named. */
+/** A failed step-up's own words, by the why the API names (TR-7, E6-P2); the general words for any other. */
+const FAILED_WHY: ReadonlyMap<string, TextKey> = new Map([
+  ['spent', 'stepUp.spent'],
+  ['expired', 'stepUp.expired'],
+]);
+
 const ENDED = { done: 'stepUp.done', refused: 'stepUp.refused', wordsChanged: 'stepUp.wordsChanged' } as const;
 
 /** The address without the step-up's query, the page's own kept (CO5). */
@@ -109,7 +115,7 @@ export function SteppedUp() {
   if (failedFor !== undefined) {
     return (
       <section className="notice stepped" role="alert">
-        <p>{t(params.get(STEP_UP_WHY) === 'spent' ? 'stepUp.spent' : 'stepUp.signInFailed')}</p>
+        <p>{t(FAILED_WHY.get(params.get(STEP_UP_WHY) ?? '') ?? 'stepUp.signInFailed')}</p>
         <button type="button" className="secondary" onClick={close}>
           {t('stepUp.close')}
         </button>

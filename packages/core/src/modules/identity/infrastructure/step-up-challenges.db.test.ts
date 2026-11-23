@@ -176,6 +176,29 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     expect(await other.challenges.pending(app, verified.challengeId, other.sessionId)).toBeUndefined();
   });
 
+  it('E6-P4 says a challenge expired only for its own session, unverified and out of time: ten minutes (E6-P2)', async () => {
+    const { clock, challenges, binding } = await setUp();
+    const other = await setUp();
+    const opened = await challenges.open(app, binding);
+    if (opened === undefined) throw new Error('no challenge');
+
+    expect(STEP_UP_SECONDS).toBe(600);
+    expect(await challenges.expired(app, opened.challengeId, binding.sessionId)).toBe(false);
+    clock.advanceBy(STEP_UP_SECONDS * SECOND - 1);
+    expect(await challenges.expired(app, opened.challengeId, binding.sessionId)).toBe(false);
+    clock.advanceBy(1);
+    expect(await challenges.expired(app, opened.challengeId, binding.sessionId)).toBe(true);
+    expect(await challenges.expired(app, opened.challengeId, other.sessionId)).toBe(false);
+    expect(await challenges.expired(app, 'not-an-id', binding.sessionId)).toBe(false);
+    expect(await challenges.expired(app, opened.challengeId, 'not-an-id')).toBe(false);
+
+    const verified = await other.challenges.open(app, other.binding);
+    if (verified === undefined) throw new Error('no challenge');
+    expect(await other.challenges.recordEvidence(app, verified.challengeId, other.sessionId, EVIDENCE)).toBe(true);
+    other.clock.advanceBy(STEP_UP_SECONDS * SECOND);
+    expect(await other.challenges.expired(app, verified.challengeId, other.sessionId)).toBe(false);
+  });
+
   it('records the evidence once, for its own session, in time', async () => {
     const { clock, challenges, binding } = await setUp();
     const other = await setUp();

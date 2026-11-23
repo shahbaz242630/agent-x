@@ -4,7 +4,7 @@
 // 1. `open`: the change's route opens a challenge for the session, naming the
 //    action and the pending change's SHA-256, which the change's own module
 //    keeps. The person is the session's. The challenge holds the nonce the
-//    login service must echo, and lives five minutes.
+//    login service must echo, and lives ten minutes (E6-P2).
 // 2. `pending`: on the way back from the login service, the challenge as it
 //    stands, for the checks (B3-2): only this session's, not yet verified,
 //    still in time.
@@ -66,8 +66,11 @@ import {
 } from './row-macs.ts';
 import type { IdentityTables } from './tables.ts';
 
-/** How long a person has to sign in again and confirm the change. */
-export const STEP_UP_SECONDS = 300;
+/**
+ * How long a person has to sign in again and confirm the change: 10 minutes (E6-P2, S214). Five ran out for 2 of 13
+ * real step-ups (login name, password and passkey, and the login service waking from idle).
+ */
+export const STEP_UP_SECONDS = 600;
 
 /** What a challenge is for: the session it binds to, the action, and the pending change's SHA-256. */
 export interface StepUpBinding {
@@ -118,6 +121,11 @@ export interface StepUpChallenges {
   open(db: Handle, binding: StepUpBinding): Promise<PendingChallenge | undefined>;
   /** The session's challenge, not yet verified and still in time; undefined for any other. */
   pending(db: Kysely<IdentityTables>, challengeId: string, sessionId: string): Promise<PendingChallenge | undefined>;
+  /**
+   * Whether the session's challenge, not yet verified, has run out of time: only to say why a step-up failed (E6-P4),
+   * never to grant anything, so its MAC isn't judged. False once the sweep has deleted it.
+   */
+  expired(db: Kysely<IdentityTables>, challengeId: string, sessionId: string): Promise<boolean>;
   /** Records what the fresh sign-in proved on the session's challenge, once and in time; false if it can't. */
   recordEvidence(
     db: Kysely<IdentityTables>,
@@ -411,6 +419,19 @@ export function createStepUpChallenges({
       if (!isId(challengeId) || !isId(sessionId)) return undefined;
       const row = await unverified(db, challengeId, sessionId, clock.now());
       return row !== undefined && genuine(row, undefined) ? pendingOf(row) : undefined;
+    },
+
+    async expired(db, challengeId, sessionId) {
+      if (!isId(challengeId) || !isId(sessionId)) return false;
+      const row = await db
+        .selectFrom('identity.step_up_challenges')
+        .select('id')
+        .where('id', '=', challengeId)
+        .where('session_id', '=', sessionId)
+        .where('verified_at', 'is', null)
+        .where('ends_at', '<=', clock.now())
+        .executeTakeFirst();
+      return row !== undefined;
     },
 
     async recordEvidence(db, challengeId, sessionId, evidence) {

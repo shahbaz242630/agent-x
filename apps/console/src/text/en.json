@@ -45,6 +45,7 @@
   "stepUp.busy": "Agent X is still working on this, or there were too many tries just now, so the change isn't made yet. Wait a moment, then confirm again.",
   "stepUp.notMade": "Agent X didn't make this change: {change}.",
   "stepUp.signInFailed": "Signing in again didn't go through, so Agent X didn't make the change. Ask for it again if you still want it.",
+  "stepUp.expired": "The 10 minutes to sign in again ran out before you finished, so Agent X didn't make the change. Ask for it again, and finish signing in within 10 minutes.",
   "stepUp.spent": "You've confirmed as many changes by signing in again as one person may in a day, so Agent X didn't make this one. Try again in an hour or so; if you didn't make all of them, tell your admins at once.",
   "approvals.title": "Approvals",
   "approvals.waiting": "Waiting for approval",

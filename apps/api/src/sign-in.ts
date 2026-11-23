@@ -117,6 +117,8 @@ export const SESSION_COOKIE = '__Host-agentx-session';
 
 /** How long the flow cookie lasts: the flow's own ten minutes (LOGIN_FLOW_SECONDS). */
 const FLOW_COOKIE_SECONDS = 600;
+/** A step-up's: its flow's fifteen (STEP_UP_FLOW_SECONDS, E6-P2), so a late return reads as its time run out. */
+const STEP_UP_FLOW_COOKIE_SECONDS = 900;
 
 /** A value one of our cookies can hold: 32 random bytes as base64url. */
 const COOKIE_VALUE = /^[A-Za-z0-9_-]{43}$/;
@@ -234,9 +236,12 @@ const SIGN_OUT_SCHEMA = {
 /** The query a step-up's page comes back with when it failed at the login service's return: the challenge it was for. */
 const STEP_UP_FAILED_QUERY = 'stepUpFailed';
 
-/** Why a failed step-up's page came back, where the console has its own words for it: the day's step-ups spent (TR-7). */
+/**
+ * Why a failed step-up's page came back, where the console has its own words for it: the day's step-ups spent (TR-7),
+ * or its time ran out (E6-P2).
+ */
 const STEP_UP_WHY_QUERY = 'stepUpWhy';
-const STEP_UPS_SPENT_WHY = 'spent';
+type StepUpWhy = 'spent' | 'expired';
 
 /** The query a step-up's page comes back with to confirm its change: never kept on a failed one. */
 const STEPPED_QUERY = 'stepped';
@@ -246,7 +251,7 @@ const STEPPED_QUERY = 'stepped';
  * (its filter, `?org=`, CO5) less `?stepped=`, which would offer the change to
  * confirm, with the challenge, so the console forgets the change it kept for it.
  */
-function failedStepUpPage({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>, spent: boolean): string {
+function failedStepUpPage({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>, why?: StepUpWhy): string {
   const at = returnTo.indexOf('?');
   const path = at === -1 ? returnTo : returnTo.slice(0, at);
   // The rest is its query, any later `?` a part of it (URLSearchParams drops the leading one).
@@ -254,7 +259,7 @@ function failedStepUpPage({ returnTo, challengeId }: NonNullable<StepUpFailed['b
   query.delete(STEPPED_QUERY);
   query.delete(STEP_UP_WHY_QUERY);
   query.set(STEP_UP_FAILED_QUERY, challengeId);
-  if (spent) query.set(STEP_UP_WHY_QUERY, STEP_UPS_SPENT_WHY);
+  if (why !== undefined) query.set(STEP_UP_WHY_QUERY, why);
   return `${path}?${query.toString()}`;
 }
 
@@ -359,10 +364,10 @@ export function registerSignIn(
    * goes back to the change's page, saying so; at the start, a 403.
    */
   /** Back to the page a failed step-up was asked on, said failed (and why, where the console has words for it). */
-  const failedPage = (reply: FastifyReply, back: NonNullable<StepUpFailed['back']>, spent: boolean) =>
+  const failedPage = (reply: FastifyReply, back: NonNullable<StepUpFailed['back']>, why?: StepUpWhy) =>
     reply
       .code(302)
-      .header('location', failedStepUpPage(back, spent))
+      .header('location', failedStepUpPage(back, why))
       .header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0))
       .send({});
   const stepUpFailed = (request: FastifyRequest, reply: FastifyReply, failed: StepUpFailed) => {
@@ -370,7 +375,7 @@ export function registerSignIn(
     // Past the day's step-ups the sign-in itself was sound (S210 TR-7): the cap's own line and code, no security event.
     if (failure === 'step_ups_spent') {
       if (userId !== undefined) stepUpsSpent(userId);
-      if (failed.back !== undefined) return failedPage(reply, failed.back, true);
+      if (failed.back !== undefined) return failedPage(reply, failed.back, 'spent');
       return sendErrorBody(
         reply.header('retry-after', String(PERSON_SPENT_RETRY_SECONDS)),
         429,
@@ -389,7 +394,7 @@ export function registerSignIn(
       ...(userId !== undefined && { userId }),
     });
     if (failed.back === undefined) return sendErrorBody(reply, 403, 'STEP_UP_FAILED', request.id);
-    return failedPage(reply, failed.back, false);
+    return failedPage(reply, failed.back, failure === 'challenge_expired' ? 'expired' : undefined);
   };
 
   const startLimit = createAddressCounter(
@@ -500,7 +505,7 @@ export function registerSignIn(
     return reply
       .code(302)
       .header('location', begun.url)
-      .header('set-cookie', cookie(FLOW_COOKIE, begun.flowId, 'Lax', FLOW_COOKIE_SECONDS))
+      .header('set-cookie', cookie(FLOW_COOKIE, begun.flowId, 'Lax', STEP_UP_FLOW_COOKIE_SECONDS))
       .send({});
   });
 

@@ -960,7 +960,7 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     expect(response.statusCode).toBe(302);
     expect(response.headers.location).toBe(`${LOGIN_URL}&prompt=login`);
     expect(setCookies(response.headers['set-cookie'])).toEqual([
-      `${FLOW_COOKIE}=${FLOW_ID}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600`,
+      `${FLOW_COOKIE}=${FLOW_ID}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900`,
     ]);
     expect(standIn.steppedUp).toEqual([[LIVE.sessionId, CHALLENGE, '/members/confirm']]);
   });
@@ -1172,6 +1172,28 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     );
     expect(noted).toEqual([
       { kind: 'sign_in_failed', reason: 'step_up_challenge_missing', ip: '127.0.0.1', userId: USER_ID },
+    ]);
+  });
+
+  it('E6-P2 sends a step-up whose ten minutes ran out back to its page, failed and saying so, logged as expired', async () => {
+    const standIn = new StandIn();
+    standIn.failWith = new StepUpFailed('challenge_expired', 'test', USER_ID, {
+      returnTo: `/approvals/abc?stepped=${CHALLENGE}&stepUpWhy=spent`,
+      challengeId: CHALLENGE,
+    });
+    const { app, noted, capture } = await server(standIn);
+
+    const response = await app.inject(
+      callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
+    );
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe(`/approvals/abc?stepUpFailed=${CHALLENGE}&stepUpWhy=expired`);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'auth.step_up_failed', failure: 'challenge_expired', userId: USER_ID }),
+    );
+    expect(noted).toEqual([
+      { kind: 'sign_in_failed', reason: 'step_up_challenge_expired', ip: '127.0.0.1', userId: USER_ID },
     ]);
   });
 

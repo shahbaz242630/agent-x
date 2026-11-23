@@ -7,7 +7,7 @@
 // - console sessions (B2-4a): a session past its idle or absolute timeout is
 //   never found again, but its row stays until the person signs out, which
 //   most never do;
-// - step-up challenges (B3-1): each lives five minutes, but its row stays
+// - step-up challenges (B3-1): each lives ten minutes (E6-P2), but its row stays
 //   until its change consumes it or its session ends, and most sessions last
 //   hours;
 // - security events (B2-5a): each is kept for the retention period the config

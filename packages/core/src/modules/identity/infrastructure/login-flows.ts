@@ -33,6 +33,12 @@ import type { IdentityTables } from './tables.ts';
 export const LOGIN_FLOW_SECONDS = 600;
 
 /**
+ * How long a step-up's flow lasts: five minutes past its challenge's ten (E6-P2), so a person back too late is told
+ * their time ran out (`challenge_expired`), not a flow gone. It grants nothing alone: the challenge decides.
+ */
+export const STEP_UP_FLOW_SECONDS = 900;
+
+/**
  * The sign-ins under way, every network together, past which only a quiet network's start (S206 V8): the table's
  * storage backstop, far above any real day (a flow lives ten minutes), never a lockout.
  */
@@ -165,7 +171,9 @@ export function createLoginFlows({
         verifier: flow.verifier,
         return_to: returnTo,
         created_at: now,
-        ends_at: new Date(now.getTime() + LOGIN_FLOW_SECONDS * 1000),
+        ends_at: new Date(
+          now.getTime() + (from.stepUpChallengeId === undefined ? LOGIN_FLOW_SECONDS : STEP_UP_FLOW_SECONDS) * 1000,
+        ),
         step_up_challenge_id: from.stepUpChallengeId ?? null,
         network_key: from.network ?? null,
       })

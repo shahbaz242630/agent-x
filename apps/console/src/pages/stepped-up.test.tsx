@@ -179,6 +179,20 @@ describe('back from a step-up', () => {
     expect(confirms).toBe(0);
   });
 
+  it.each([
+    ['expired', /The 10 minutes to sign in again ran out/],
+    ['something-else', /Signing in again didn't go through/],
+    ['toString', /Signing in again didn't go through/],
+  ])('E6-P2 says why a step-up failed by the why the API named: %s', async (why, words) => {
+    sessionStorage.setItem(`agentx.step-up.${CHALLENGE}`, JSON.stringify(PENDING));
+    const history = createMemoryHistory({ initialEntries: [`/more?stepUpFailed=${CHALLENGE}&stepUpWhy=${why}`] });
+    render(<App queries={createQueries()} router={createConsoleRouter(history)} />);
+
+    expect(await screen.findByText(words)).toBeDefined();
+    expect(sessionStorage).toHaveLength(0);
+    expect(confirms).toBe(0);
+  });
+
   it('says nothing for a stepUpFailed that names no challenge (a made-up link)', async () => {
     const history = createMemoryHistory({ initialEntries: ['/more?stepUpFailed=anything'] });
     render(<App queries={createQueries()} router={createConsoleRouter(history)} />);
