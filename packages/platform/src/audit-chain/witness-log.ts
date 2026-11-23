@@ -90,8 +90,8 @@
 // (RevisionName, ContainerGroupName: the replica) tell which copy holds it. The fork alarm names the writer of both
 // heads (`writer`, `against`) and the file each came from (`file`, `againstFiles`: a snapshot's name for a head read from
 // one, `noted` for one noted here); a snapshot's head line may carry its own writer (`w`), so a head read from a snapshot
-// names who wrote it, never the leader that kept it (`snapshot` where the line says none). This release reads `w` and
-// writes none (SNAPSHOT_WRITERS: a build before it would take the snapshot as spoiled); the next release writes it.
+// names who wrote it, never the leader that kept it (`snapshot` where the line says none). Snapshots write `w` since
+// S212 (SNAPSHOT_WRITERS, TR-14b: every kept image reads it, so none takes such a snapshot as spoiled).
 // Released and other compact heads carry no writer, and reach a new copy only through the leader's snapshot.
 // A copy can claim any ID, so a name is never trusted alone: a file named for a process's own ID that it never wrote
 // is the alarm (`impersonated`). The operator signs the set-aside list, `e<epoch>/set-aside/` beside the heads
@@ -114,8 +114,8 @@
 //      `misdated_heads` or `impersonated` alarm names (`file`): then restart the revision it names and set nothing
 //      aside. Where fork alarms by any other heads file name it too, set it aside anyway: a copy broken into can write
 //      one back-dated file in its own ID, which never makes it exempt. A file under snapshots/, or `noted`, counts
-//      neither way (it says who kept the head, not when its file landed). Once snapshots name each head's writer
-//      (SNAPSHOT_WRITERS on, the next release), an ID named only through snapshots/ files is not framed by that alone:
+//      neither way (it says who kept the head, not when its file landed). Since snapshots name each head's writer
+//      (SNAPSHOT_WRITERS on, S212), an ID named only through snapshots/ files is not framed by that alone:
 //      look at the fork alarms by its on-time heads files.
 //   2. Find its copy: ContainerAppConsoleLogs where Log has 'audit.witness_writer' and that ID; RevisionName and
 //      ContainerGroupName are the platform's, never the copy's word. An ID no such line names was made up: go to 5.
@@ -554,11 +554,11 @@ function lineWriter(w: unknown, h: unknown, fileBy: string, snapshot: boolean): 
 }
 
 /**
- * Whether snapshots write each head's writer (`w`). Off in this release: a build before TR-14 takes a line with `w` for
- * no line of ours and the snapshot as spoiled, the alarm on every deploy overlap and rollback. This release reads `w`;
- * the next turns it on, once no build before this one can start.
+ * Whether snapshots write each head's writer (`w`). On since S212 (TR-14b): a build before TR-14 (#779) took a line with
+ * `w` for no line of ours and the snapshot as spoiled, so it stayed off until every kept image (the 5 newest, all after
+ * #779) read it.
  */
-export const SNAPSHOT_WRITERS = false;
+export const SNAPSHOT_WRITERS = true;
 
 /** A snapshot's head line: who wrote it too, where known and `withWriter` (SNAPSHOT_WRITERS). */
 const snapshotHeadText = (chain: string, { seq, hash, at, by }: Held, withWriter: boolean): string =>
@@ -708,7 +708,7 @@ export function createWitnessLog({
    * copy that anchors (jobs) lets a head go only once it confirmed it (`prune`), as an anchor of its own is no proof.
    */
   readonly dropsAtAnchor?: boolean;
-  /** Whether its snapshots write each head's writer: SNAPSHOT_WRITERS, but for a test of the next release's. */
+  /** Whether its snapshots write each head's writer: SNAPSHOT_WRITERS, but false for a test of a build before S212. */
   readonly snapshotWriters?: boolean;
 }): WitnessLog {
   const folder = (kind: 'heads' | 'operator' | 'snapshots' | 'set-aside'): string => `e${String(epoch)}/${kind}/`;
