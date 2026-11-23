@@ -708,7 +708,7 @@ export function createWitnessLog({
    * copy that anchors (jobs) lets a head go only once it confirmed it (`prune`), as an anchor of its own is no proof.
    */
   readonly dropsAtAnchor?: boolean;
-  /** Whether its snapshots write each head's writer: SNAPSHOT_WRITERS, but for a test of the next release's. */
+  /** Whether its snapshots write each head's writer: SNAPSHOT_WRITERS, but false for a test of a build before S212. */
   readonly snapshotWriters?: boolean;
 }): WitnessLog {
   const folder = (kind: 'heads' | 'operator' | 'snapshots' | 'set-aside'): string => `e${String(epoch)}/${kind}/`;

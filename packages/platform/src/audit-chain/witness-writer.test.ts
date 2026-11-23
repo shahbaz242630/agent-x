@@ -720,7 +720,7 @@ describe('SEC-DB-20 TR-7 D6 a set-aside flood', () => {
   });
 });
 
-describe('SEC-DB-20 TR-14 review: a writer set aside twice, snapshots this release, a copy set aside rewriting', () => {
+describe('SEC-DB-20 TR-14 review: a writer set aside twice, snapshots naming writers, a copy set aside rewriting', () => {
   it("holds a writer's earliest set-aside: a second line for it never passes over more; the command writes no second", async () => {
     const store = createFakeWriteOnceStore();
     const time = { at: AT.getTime() };
