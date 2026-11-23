@@ -25,7 +25,7 @@ function Row({ member, me }: { readonly member: Member; readonly me: string }) {
         <span>
           <Link to="/more/members/$id" params={{ id: member.id }}>
             {memberText(member, me)}
-          </Link>{' '}
+          </Link>
           {member.status === 'DEACTIVATED' && <Tag warn>{t('members.status.DEACTIVATED')}</Tag>}
         </span>
         <span className="mono fine">{member.id}</span>
