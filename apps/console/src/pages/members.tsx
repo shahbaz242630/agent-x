@@ -16,6 +16,7 @@ import { t } from '../text.ts';
 import { memberText } from './agent.tsx';
 import { Loading, Retry } from './failed.tsx';
 import { Invite, WaitingInvitation } from './invite.tsx';
+import { Tag } from './tag.tsx';
 
 function Row({ member, me }: { readonly member: Member; readonly me: string }) {
   return (
@@ -25,7 +26,7 @@ function Row({ member, me }: { readonly member: Member; readonly me: string }) {
           <Link to="/more/members/$id" params={{ id: member.id }}>
             {memberText(member, me)}
           </Link>{' '}
-          {member.status === 'DEACTIVATED' && <span className="tag warn">{t('members.status.DEACTIVATED')}</span>}
+          {member.status === 'DEACTIVATED' && <Tag warn>{t('members.status.DEACTIVATED')}</Tag>}
         </span>
         <span className="mono fine">{member.id}</span>
         <span className="muted">{t('members.since', { time: timeText(member.joinedAt) })}</span>

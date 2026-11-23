@@ -35,6 +35,7 @@ import { type Asked, askFirst, byPasskey, changeAt } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
 import { TermsTable } from './mandate-terms.tsx';
+import { Tag } from './tag.tsx';
 
 type Move = 'suspend' | 'resume' | 'revoke';
 
@@ -79,10 +80,8 @@ function Plan({ plan, later }: { readonly plan: readonly Carried[]; readonly lat
         <ul className="plain stack">
           {plan.map((carried) => (
             <li key={carried.id}>
-              <span className="mono">{carried.id}</span>{' '}
-              <span className={carried.outcome === 'cancel' ? 'tag warn' : 'tag'}>
-                {t(`mandates.accept.outcome.${carried.outcome}`)}
-              </span>
+              <span className="mono">{carried.id}</span>
+              <Tag warn={carried.outcome === 'cancel'}>{t(`mandates.accept.outcome.${carried.outcome}`)}</Tag>
               {carried.reasons.map((reason) => (
                 <span key={reason.code} className="fine reason">
                   {reason.message}

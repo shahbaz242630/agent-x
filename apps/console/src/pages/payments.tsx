@@ -11,6 +11,7 @@ import { amountText, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
 import { Loading, Retry } from './failed.tsx';
+import { Tag } from './tag.tsx';
 
 /** Why a payment is on the exception list: its outcome never came, or the bank's word disagrees with its status. */
 function Why({ payment }: { readonly payment: ListedPayment }) {
@@ -30,7 +31,7 @@ function Row({ payment, exceptions }: { readonly payment: ListedPayment; readonl
           <span>
             {payment.supplier.name}
             {/* On the exception list the why line says it already. */}
-            {payment.contradicted && !exceptions && <span className="tag warn">{t('payments.contradicted')}</span>}
+            {payment.contradicted && !exceptions && <Tag warn>{t('payments.contradicted')}</Tag>}
           </span>
           <span className="muted">
             {t(`payments.status.${payment.status}`)} · <span className="mono">{payment.bankReference}</span> ·{' '}

@@ -43,14 +43,14 @@ import {
   WINDOW_HOURS,
 } from '../mandates.ts';
 import { useActing } from '../session.tsx';
-import { t, type TextKey } from '../text.ts';
+import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
 import { Choices, FieldBroken } from './choices.tsx';
 import { Loading, NotShown } from './failed.tsx';
 import { LineField } from './line-field.tsx';
 import { MandateLink } from './mandate.tsx';
 import { type Broken, TermsFields } from './mandate-fields.tsx';
-import { termRows, type Terms, useNames } from './mandate-terms.tsx';
+import { Named, type TermRow, termRows, type Terms, useNames } from './mandate-terms.tsx';
 
 /** A draft's body as sent: its terms, and for a new mandate its agent, zone and window. */
 type Body = Terms & { readonly agentId?: string; readonly timeZone?: string; readonly splitWindowHours?: number };
@@ -58,9 +58,11 @@ type Body = Terms & { readonly agentId?: string; readonly timeZone?: string; rea
 /** The terms about to be sent, in full, as the confirm shows them. */
 function Summary({ body, agent }: { readonly body: Body; readonly agent?: string | undefined }) {
   const names = useNames();
-  const rows: (readonly [TextKey, string])[] = [];
+  const rows: TermRow[] = [];
   // A new mandate's agent always, by its ID while the Agents list read so far doesn't name it.
-  if (body.agentId !== undefined) rows.push(['mandates.agent', agent ?? body.agentId]);
+  if (body.agentId !== undefined) {
+    rows.push(['mandates.agent', body.agentId, <Named key="agent" name={agent} id={body.agentId} />]);
+  }
   if (body.timeZone !== undefined) rows.push(['mandates.timeZone', body.timeZone]);
   if (body.splitWindowHours !== undefined) {
     rows.push(['mandates.splitWindow', t('mandates.hours', { hours: String(body.splitWindowHours) })]);
@@ -68,10 +70,10 @@ function Summary({ body, agent }: { readonly body: Body; readonly agent?: string
   rows.push(...termRows(body, names));
   return (
     <dl className="facts">
-      {rows.map(([label, words]) => (
+      {rows.map(([label, words, shownAs]) => (
         <Fragment key={label}>
           <dt>{t(label)}</dt>
-          <dd>{words}</dd>
+          <dd>{shownAs ?? words}</dd>
         </Fragment>
       ))}
     </dl>
@@ -253,6 +255,22 @@ function useCurrency(source: string | null, fallback: string | undefined): strin
 
 /** Every IANA time zone the browser knows, for the admin to choose from: none picked for them. */
 const ZONES: readonly string[] = Intl.supportedValuesOf('timeZone');
+/** The zones most organisations here count in, offered first so Asia/Dubai isn't buried among ~400 (CO11a F5); still none picked. */
+const GULF_ZONES: readonly string[] = [
+  'Asia/Dubai',
+  'Asia/Riyadh',
+  'Asia/Qatar',
+  'Asia/Bahrain',
+  'Asia/Kuwait',
+  'Asia/Muscat',
+];
+
+const zoneOptions = (zones: readonly string[]) =>
+  zones.map((zone) => (
+    <option key={zone} value={zone}>
+      {zone}
+    </option>
+  ));
 
 /** The new mandate's own: its agent among the organisation's active ones, its time zone and split window. */
 function MandateOwn({
@@ -308,11 +326,8 @@ function MandateOwn({
         }}
       >
         <option value="">{t('mandates.form.timeZonePick')}</option>
-        {ZONES.map((zone) => (
-          <option key={zone} value={zone}>
-            {zone}
-          </option>
-        ))}
+        <optgroup label={t('mandates.form.zonesGulf')}>{zoneOptions(GULF_ZONES)}</optgroup>
+        <optgroup label={t('mandates.form.zonesAll')}>{zoneOptions(ZONES)}</optgroup>
       </select>
       <p id="mandate-zone-hint" className="fine">
         {t('mandates.form.timeZoneHint')}

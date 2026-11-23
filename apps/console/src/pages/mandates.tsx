@@ -1,6 +1,6 @@
 // The organisation's mandates (6D3a): `/more/mandates`, every member's to
-// read. Each row names its agent (by its name where the Agents list read so
-// far names it), its purpose and its status; a mandate's page holds its terms
+// read. Each row names its agent (by its name, its ID beside it, where the
+// Agents list read so far names it), its purpose and its status; a mandate's page holds its terms
 // and what can be done with it. An admin drafts a new one from here. The list
 // pages as the API does, 50 at a time.
 import { Link } from '@tanstack/react-router';
@@ -10,6 +10,7 @@ import { isEnded, MANAGING, type MandateListed, useMandateList } from '../mandat
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
 import { Loading, Retry } from './failed.tsx';
+import { Tag } from './tag.tsx';
 
 function Row({ mandate, agent }: { readonly mandate: MandateListed; readonly agent: string | undefined }) {
   const ended = isEnded(mandate.status);
@@ -20,9 +21,12 @@ function Row({ mandate, agent }: { readonly mandate: MandateListed; readonly age
           <Link to="/more/mandates/$id" params={{ id: mandate.id }}>
             {mandate.purpose}
           </Link>
-          <span className={ended ? 'tag' : 'tag warn'}>{t(`mandates.status.${mandate.status}`)}</span>
+          <Tag warn={!ended}>{t(`mandates.status.${mandate.status}`)}</Tag>
         </span>
-        <span className="muted">{t('mandates.forAgent', { agent: agent ?? mandate.agentId })}</span>
+        <span className="muted">
+          {t('mandates.forAgent', { agent: agent ?? mandate.agentId })}
+          {agent !== undefined && <span className="mono"> {mandate.agentId}</span>}
+        </span>
       </span>
     </li>
   );
