@@ -8,7 +8,7 @@
 // the agent; and the lock order against the admin's demotion.
 import { AGENTS } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
-import { createStepUpChallenges } from '@agentx/core/modules/identity';
+import { createStepUpChallenges, STEP_UP_SECONDS } from '@agentx/core/modules/identity';
 import { MANDATES } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
@@ -223,7 +223,7 @@ describe('the step-up an acceptance needs (B3, SEC-HA-12)', () => {
 
     const late = askedFor(await ask(w.admin, id, versionId));
     await stepUp(w.admin, late);
-    clock.advanceBy(301_000);
+    clock.advanceBy(STEP_UP_SECONDS * 1000 + 1000);
     expect(await confirm(w.admin, id, late)).toEqual(refused(403, 'STEP_UP_FAILED'));
   });
 
