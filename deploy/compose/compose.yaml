@@ -54,7 +54,7 @@ services:
   # (tooling/test-db/postgres-images.ts; a check keeps the two digests equal).
   # It starts empty but for its superuser; db-setup gives it everything else.
   db:
-    image: postgres:18.7-trixie@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+    image: postgres:18.7-trixie@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a
     environment:
       POSTGRES_PASSWORD: ${AGENTX_LOCAL_POSTGRES_ADMIN_PASSWORD:?}
       # Passwords for every connection, local ones included: no trust auth anywhere.
