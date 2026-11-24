@@ -52,6 +52,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  // A spy (the Mac's userAgent) never outlives its test, even one that failed before its end.
+  vi.restoreAllMocks();
 });
 
 const signedInAs = (role: string) => {
@@ -248,7 +250,6 @@ describe('the command bar beside other modals and keyboards (S216 review)', () =
     open('/approvals');
     await sections();
     expect(screen.getByRole('button', { name: /Go to a page/ }).textContent).toContain('⌘ K');
-    vi.restoreAllMocks();
   });
 
   it('lets a member of several organisations switch from More, as a phone has no sidebar switch', async () => {
