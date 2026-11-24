@@ -60,6 +60,28 @@ describe('the sign-in pages’ branding (CO11)', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('goes on past a policy that changes nothing (a run again), uploading and activating', async () => {
+    const unchanged = JSON.stringify({ code: 9, message: 'Errors.Instance.LabelPolicy.NotChanged (INSTANCE-28fHe)' });
+    const send = vi.fn<Send>((_method, path) =>
+      path === '/admin/v1/policies/label' ? Promise.resolve(new Response(unchanged, { status: 400 })) : ok(),
+    );
+    await applyBranding(send, CSS, picture);
+    expect(send).toHaveBeenCalledTimes(2 + ASSETS.length);
+    expect(send.mock.calls.at(-1)?.[1]).toBe('/admin/v1/policies/label/_activate');
+  });
+
+  it('stops at any other 400 on the policy, and at the same words from a picture', async () => {
+    const other = vi.fn<Send>(() => Promise.resolve(new Response('invalid colour', { status: 400 })));
+    await expect(applyBranding(other, CSS, picture)).rejects.toThrow('400 invalid colour');
+    expect(other).toHaveBeenCalledTimes(1);
+    const picturesSay = vi.fn<Send>((_method, path) =>
+      path === '/admin/v1/policies/label' ? ok() : Promise.resolve(new Response('INSTANCE-28fHe', { status: 400 })),
+    );
+    await expect(applyBranding(picturesSay, CSS, picture)).rejects.toThrow(/refused POST \/assets/);
+    const elsewhere = vi.fn<Send>(() => Promise.resolve(new Response('INSTANCE-28fHe', { status: 500 })));
+    await expect(applyBranding(elsewhere, CSS, picture)).rejects.toThrow('500');
+  });
+
   it('sends the token from the environment to the origin given, and says what it did', async () => {
     const fetcher = vi.fn<typeof fetch>(ok);
     const said = await main(['https://auth.example'], { ZITADEL_ADMIN_TOKEN: 'secret' }, fetcher);

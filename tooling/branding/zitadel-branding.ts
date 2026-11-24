@@ -63,6 +63,10 @@ export function labelPolicy({ light, dark }: { readonly light: Palette; readonly
   } as const;
 }
 
+/** The instance's label policy, and the ID of Zitadel's refusal of one that changes nothing. */
+const LABEL_POLICY = '/admin/v1/policies/label';
+const UNCHANGED = 'INSTANCE-28fHe';
+
 export type Send = (method: string, path: string, body: unknown) => Promise<Response>;
 
 /** The pictures the sign-in pages show (rendered from the console's mark, light and dark), and where each goes. */
@@ -90,15 +94,19 @@ export async function applyBranding(
   picture: (file: string) => Uint8Array<ArrayBuffer>,
 ): Promise<void> {
   const steps: readonly (readonly [string, string, unknown])[] = [
-    ['PUT', '/admin/v1/policies/label', labelPolicy(palettes(css))],
+    ['PUT', LABEL_POLICY, labelPolicy(palettes(css))],
     ...ASSETS.map(({ file, path }) => ['POST', path, pictureForm(file, picture(file))] as const),
     ['POST', '/admin/v1/policies/label/_activate', {}],
   ];
   for (const [method, path, body] of steps) {
     const response = await send(method, path, body);
-    if (!response.ok) {
-      throw new Error(`Zitadel refused ${method} ${path}: ${String(response.status)} ${await response.text()}`);
-    }
+    if (response.ok) continue;
+    const said = await response.text();
+    // A run again (after a picture failed, or on a stack already given these colours by compose): Zitadel refuses a
+    // policy that changes nothing (v4.20.5 instance_policy_label.go, INSTANCE-28fHe). The colours are already set,
+    // so the pictures and the activation still go on.
+    if (path === LABEL_POLICY && response.status === 400 && said.includes(UNCHANGED)) continue;
+    throw new Error(`Zitadel refused ${method} ${path}: ${String(response.status)} ${said}`);
   }
 }
 
