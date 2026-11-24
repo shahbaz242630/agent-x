@@ -97,7 +97,8 @@ function Facts({ request }: { readonly request: RequestDetails }) {
       </dd>
       {request.reasons.length > 0 && (
         <>
-          <dt>{t('request.why')}</dt>
+          {/* Rejected, the rules' reasons are why it waited for a person, not why it ended (E6-P8). */}
+          <dt>{t(request.rejection === null ? 'request.why' : 'request.whyWaited')}</dt>
           <dd>
             <Reasons reasons={request.reasons} />
           </dd>
@@ -385,8 +386,9 @@ export function RequestPage({ id }: { readonly id: string }) {
       {back}
       <span className="kicker">{left !== null ? t('request.waiting', { left }) : t(`status.${shown.status}`)}</span>
       <h1 className="amount big">{amountText(shown.amountMinor, shown.currency)}</h1>
-      <Facts request={shown} />
+      {/* How it ended first, then its facts (E6-P8: a reject's reason sat at the bottom, under the rules' "Why"). */}
       <Decided request={shown} />
+      <Facts request={shown} />
       <Actions request={shown} />
       <EvidenceLink id={shown.id} />
     </section>

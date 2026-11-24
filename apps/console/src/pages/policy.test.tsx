@@ -278,7 +278,9 @@ describe('the organisation’s policy (6D3b)', () => {
   it('is linked from More', async () => {
     as('viewer');
     const history = open('/more');
-    await userEvent.click(await screen.findByRole('link', { name: 'Organisation policy' }));
+    await userEvent.click(
+      await within(await screen.findByRole('main')).findByRole('link', { name: 'Organisation policy' }),
+    );
     expect(history.location.pathname).toBe('/more/policy');
   });
 

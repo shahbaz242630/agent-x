@@ -166,12 +166,14 @@ describe('reaching the logs (6C2)', () => {
     signedIn();
     answer('GET /v1/audit-log', events([]));
     open('/more');
-    await userEvent.click(await screen.findByRole('link', { name: 'Audit log' }));
+    await userEvent.click(await within(await screen.findByRole('main')).findByRole('link', { name: 'Audit log' }));
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeDefined();
     expect(await screen.findByText('Nothing in this range matches these filters.')).toBeDefined();
     cleanup();
     open('/more');
-    expect((await screen.findByRole('link', { name: 'Access log' })).getAttribute('href')).toBe('/more/access-log');
+    expect(
+      (await within(await screen.findByRole('main')).findByRole('link', { name: 'Access log' })).getAttribute('href'),
+    ).toBe('/more/access-log');
   });
 
   it('shows no one else a way to them, and reads nothing for them on the pages themselves', async () => {
@@ -816,7 +818,9 @@ describe('the security events (6E1b, CO7b)', () => {
     signedIn();
     answer('GET /v1/security-events', page([]));
     open('/more');
-    await userEvent.click(await screen.findByRole('link', { name: 'Security events' }));
+    await userEvent.click(
+      await within(await screen.findByRole('main')).findByRole('link', { name: 'Security events' }),
+    );
     expect(await screen.findByRole('heading', { name: 'Security events' })).toBeDefined();
     expect(await screen.findByText('Nothing in this range matches these filters.')).toBeDefined();
     expect(sentTo('GET', `/v1/security-events?${DEFAULT}`)).toHaveLength(1);

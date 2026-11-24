@@ -141,7 +141,7 @@ describe('the members (6D4b)', () => {
   it('lists every member by role and IDs where the API names no one, from the More page', async () => {
     as('admin');
     const { history } = open('/more');
-    await userEvent.click(await screen.findByRole('link', { name: 'Members' }));
+    await userEvent.click(await within(await screen.findByRole('main')).findByRole('link', { name: 'Members' }));
     expect(history.location.pathname).toBe('/more/members');
     expect(await screen.findByRole('link', { name: 'Admin (you)' })).toBeDefined();
     expect(screen.getByRole('link', { name: 'Approver' })).toBeDefined();
@@ -160,7 +160,7 @@ describe('the members (6D4b)', () => {
     expect(await screen.findByRole('link', { name: 'Approver' })).toBeDefined();
     expect(screen.queryByRole('heading', { name: 'Invite someone' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'Registered contacts' })).toBeNull();
-    expect(screen.queryByRole('button')).toBeNull();
+    expect(within(screen.getByRole('main')).queryByRole('button')).toBeNull();
   });
 
   it('says members whose records failed the integrity check as that, and offers a retry for anything else', async () => {
@@ -459,7 +459,7 @@ describe('a member’s page (6D4b)', () => {
     as('approver');
     open(page);
     expect(await screen.findByText("Only an admin can change a member's role or membership.")).toBeDefined();
-    expect(screen.queryByRole('button')).toBeNull();
+    expect(within(screen.getByRole('main')).queryByRole('button')).toBeNull();
     expect(sentTo('GET', '/v1/factor-resets')).toHaveLength(0);
   });
 

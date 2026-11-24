@@ -225,7 +225,7 @@ describe('the mandates list', () => {
   it('lists each mandate with its agent and status, linked to its page, from More', async () => {
     as('admin');
     open('/more');
-    await userEvent.click(await screen.findByRole('link', { name: 'Mandates' }));
+    await userEvent.click(await within(await screen.findByRole('main')).findByRole('link', { name: 'Mandates' }));
 
     expect(await screen.findByRole('link', { name: 'Office supplies' })).toBeDefined();
     expect(await screen.findByText('For Buyer bot')).toBeDefined();

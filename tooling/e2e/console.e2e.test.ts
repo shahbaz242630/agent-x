@@ -73,14 +73,15 @@ describe('6A1 the console in a real browser, served by the API', () => {
     const headers = response?.headers() ?? {};
     expect(headers['content-security-policy']).toContain("script-src 'self'");
     expect(headers['cache-control']).toBe('no-store');
-    await page.getByRole('heading', { name: 'Sign in to Agent X' }).waitFor({ timeout: 15_000 });
+    // The front page (CO11): its headline, then its one Sign in (the hero's "Sign in to the console" is another name).
+    await page.getByRole('heading', { level: 1, name: /Your agents pay suppliers/ }).waitFor({ timeout: 15_000 });
     expect(assets.length).toBeGreaterThan(0);
     for (const asset of assets) expect(asset.cacheControl, asset.url).toBe('public, max-age=31536000, immutable');
     expect(problems).toEqual([]);
   });
 
   it('signs in through the login service and comes back to the page asked for, which says they are in no organisation', async () => {
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     const { stoppedAt } = await drive(page, user, []);
     expect(stoppedAt, where(page)).toBe('callback');
     expect(page.url()).toBe(`${API_ORIGIN}${RETURN_TO}`);

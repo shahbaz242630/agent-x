@@ -199,7 +199,7 @@ describe('a bank account’s page (6D4a)', () => {
     as('viewer');
     open(page);
     expect(await screen.findByText(/Only an admin can check this account/)).toBeDefined();
-    expect(screen.queryByRole('button')).toBeNull();
+    expect(within(screen.getByRole('main')).queryByRole('button')).toBeNull();
   });
 
   it.each([
