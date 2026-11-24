@@ -351,6 +351,33 @@ describe('suppliers’ and bank accounts’ brakes (6B2)', () => {
     expect(sessionStorage).toHaveLength(0);
   });
 
+  it('clears a step-up’s Done once another change is asked on the page, keeping the new one’s words (E7)', async () => {
+    signedIn();
+    answer('GET /v1/funding-sources', page('sources', [source(SOURCE, 'ACTIVE')]));
+    answer(`POST /v1/funding-sources/${SOURCE}/reactivate/confirm`, { status: 200, body: {} });
+    answer(`POST /v1/funding-sources/${SOURCE}/suspend`, { status: 200, body: {} });
+    sessionStorage.setItem(
+      `agentx.step-up.${CHALLENGE}`,
+      JSON.stringify({
+        challenge: CHALLENGE,
+        label: 'Reactivate Staging Test Org 1 LLC',
+        confirmPath: `/v1/funding-sources/${SOURCE}/reactivate/confirm`,
+        body: { pendingRequests: 'pause', statementVersion: 1 },
+        organization: ORG.id,
+        idempotencyKey: '0199a0f0-0000-7000-8000-0000000e7001',
+      }),
+    );
+    open(`/more/sources?stepped=${CHALLENGE}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('Done: Reactivate Staging Test Org 1 LLC')).toBeDefined();
+
+    await confirmChoice('Suspend Staging Test Org 1 LLC', /Its requests are held/, 'Suspend now');
+    expect(await screen.findByText('Staging Test Org 1 LLC is suspended.')).toBeDefined();
+    await waitFor(() => {
+      expect(screen.queryByText('Done: Reactivate Staging Test Org 1 LLC')).toBeNull();
+    });
+  });
+
   it.each([
     ['a fresh start', /A fresh start: every request on this account/, 'cancel'],
     ['an un-pause', /Un-pause: its held requests stand/, 'pause'],

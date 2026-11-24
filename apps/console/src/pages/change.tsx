@@ -8,6 +8,7 @@ import { useState } from 'react';
 
 import { isRefusal, isSignedOut } from '../api.ts';
 import { endSession } from '../session.tsx';
+import { useEndStepped } from './stepped-up.tsx';
 
 interface Sending {
   /** What to say once done; nothing for a change whose page shows it done. */
@@ -23,9 +24,12 @@ export function useChange(refusal: (error: unknown) => string) {
   const queries = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
+  const endStepped = useEndStepped();
   const run = async (send: () => Promise<unknown>, { done, after, refusal: own = refusal }: Sending = {}) => {
     setBusy(true);
     setSaid(null);
+    // A step-up's change that ended stops being said: this one's words take its place (E7).
+    endStepped();
     try {
       const sent = await send();
       if (sent === 'stepping' || sent === 'held') return;

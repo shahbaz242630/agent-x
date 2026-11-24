@@ -106,16 +106,18 @@ function useClose() {
  * Clears what the step-up says on this page once its subject is gone (E6-P11:
  * a factor reset cancelled): a change that ended, or the one waiting to be
  * confirmed at `confirmPath` (forgotten, as it can no longer be made). Any
- * other change still waiting to be confirmed is kept.
+ * other change still waiting to be confirmed is kept. With no `confirmPath`,
+ * only one that ended: another change asked on the page (E7, S215: a bank
+ * account's "Done: reactivate" stayed above its next suspension).
  */
-export function useEndStepped(): (confirmPath: string) => void {
+export function useEndStepped(): (confirmPath?: string) => void {
   const query = useRouterState({ select: ({ location }) => location.searchStr });
   const close = useClose();
   return (confirmPath) => {
     const challenge = new URLSearchParams(query).get(STEPPED);
     if (challenge === null) return;
     const pending = pendingFor(challenge);
-    if (pending !== undefined && pending.confirmPath !== confirmPath) return;
+    if (pending !== undefined && (confirmPath === undefined || pending.confirmPath !== confirmPath)) return;
     forget(challenge);
     close();
   };
