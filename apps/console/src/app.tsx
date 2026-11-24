@@ -207,9 +207,10 @@ const routes = root.addChildren([
   createRoute({
     getParentRoute: () => root,
     path: '/',
-    beforeLoad: () => {
+    // Its query goes on with it: a late sign-in's `signInLate` lands here (E7, S215: dropped, its notice never showed).
+    beforeLoad: ({ location }) => {
       // eslint-disable-next-line @typescript-eslint/only-throw-error -- the router's own way to send a page on: it throws its redirect
-      throw redirect({ to: '/approvals' });
+      throw redirect({ href: `/approvals${location.searchStr}` });
     },
   }),
   createRoute({ getParentRoute: () => root, path: '/approvals', component: () => <Approvals list="waiting" /> }),

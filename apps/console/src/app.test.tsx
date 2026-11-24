@@ -97,6 +97,14 @@ describe('the console’s frame (6A1)', () => {
     window.history.pushState({}, '', '/');
   });
 
+  it('E7 keeps the home page’s query on its way to Approvals, so a late sign-in landing on / is told', async () => {
+    signedIn([ORG_A]);
+    const router = open('/?signInLate=1');
+    expect(await screen.findByText(/so it didn't count and nothing was changed/)).toBeDefined();
+    expect(router.state.location.pathname).toBe('/approvals');
+    expect(router.state.location.searchStr).toBe('?signInLate=1');
+  });
+
   it('E6-P1 tells a signed-in person their late step-up didn’t count, and Close cleans the address', async () => {
     signedIn([ORG_A]);
     const router = open('/more?signInLate=1&tab=x');

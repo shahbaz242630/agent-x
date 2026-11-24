@@ -708,7 +708,7 @@
                   {
                     "type": "string",
                     "const": "SECOND_FACTOR_REMOVED",
-                    "description": "A second factor of yours was removed in the last 7 days, by a reset or at the login service, so for 7 days from then you keep only what a developer or a viewer may do, in every organisation. If you didn't ask for this, tell your organisation's admins at once."
+                    "description": "A second factor of yours was removed in the last 7 days (by a reset or at the login service), or a security key or passkey added beside one you had, so for 7 days from then you keep only what a developer or a viewer may do, in every organisation. If you didn't make this change, tell your organisation's admins at once."
                   },
                   {
                     "type": "string",
@@ -738,7 +738,7 @@
                   {
                     "type": "string",
                     "const": "SOURCE_NOT_USABLE",
-                    "description": "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it. Nothing was changed, and nothing is held for a request on it."
+                    "description": "The funding source can't fund payments now (it is suspended, unavailable or ended, or its bank consent has expired), or an admin cancelled the requests waiting on it, by suspending it or by reactivating it with a fresh start. No mandate or request can draw on it while it can't fund payments, and nothing is held for a request on it."
                   },
                   {
                     "type": "string",
@@ -813,7 +813,7 @@
                   {
                     "type": "string",
                     "const": "SUPPLIER_NOT_VERIFIED",
-                    "description": "The supplier is not one of the organisation's verified suppliers: it is unknown or not yet verified. So the request is refused. Nothing is held for the request."
+                    "description": "The supplier is not one of the organisation's verified suppliers: it is unknown or not yet verified, or an admin cancelled the requests waiting on it by reactivating it with a fresh start. So the request is refused. Nothing is held for the request."
                   },
                   {
                     "type": "string",

@@ -267,6 +267,11 @@ export function createNoticeSender({
     });
     return became;
   };
+  /** A notice whose reason to go ended before it went: given up at once like a failure, logged as info (E6-P9, E7). */
+  const skipped = async (notice: ClaimedNotice, reason: string): Promise<void> => {
+    const became = await outbox.failed(db, notice.id, reason, true);
+    logger.info('notification.skipped', { noticeId: notice.id, kind: notice.kind, reason, outcome: became });
+  };
 
   /**
    * The group's members a notice to it goes to: the ACTIVE contacts, or the
@@ -337,8 +342,9 @@ export function createNoticeSender({
         await failed(notice, 'link_unavailable', false);
         return undefined;
       }
+      // Confirmed, cancelled or past its time before its email went: an expected end, logged as info (E7).
       if (link === undefined) {
-        await failed(notice, 'reset_closed', true);
+        await skipped(notice, 'reset_closed');
         return undefined;
       }
       return { link };
@@ -354,13 +360,7 @@ export function createNoticeSender({
       // Decided, expired or cancelled before its email went: nothing waits for anyone now. An expected end, not a
       // failure (E6-P9): given up at once like one, but logged as info so warn counts and alerts mean failures alone.
       if (request === undefined) {
-        const became = await outbox.failed(db, notice.id, 'request_not_waiting', true);
-        logger.info('notification.skipped', {
-          noticeId: notice.id,
-          kind: notice.kind,
-          reason: 'request_not_waiting',
-          outcome: became,
-        });
+        await skipped(notice, 'request_not_waiting');
         return undefined;
       }
       return { request };

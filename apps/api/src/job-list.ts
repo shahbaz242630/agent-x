@@ -601,7 +601,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // on still go (B2-3a-2, B2-4a).
     sweepRows('identity.flow', (most) => flows.sweep(database, most)),
     sweepRows('identity.session', (most) => sessions.sweep(database, most)),
-    // Step-up challenges past their ten minutes (B3-1, E6-P2).
+    // Step-up challenges past their ten minutes and five more, so a late return reads as run out (B3-1, E6-P2, E7).
     sweepRows('identity.step_up_challenge', (most) => challenges.sweep(database, most)),
     // The security events past the retention the config names (B2-5a).
     sweepRows('security.event', (most) => securityEvents.sweep(database, most)),

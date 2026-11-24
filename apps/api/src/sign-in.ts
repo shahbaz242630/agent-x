@@ -97,6 +97,7 @@ import {
   SignInBusy,
   SignInFailed,
   type SignInFailure,
+  STEP_UP_FLOW_SECONDS,
   StepUpFailed,
   type Subject,
 } from '@agentx/core/modules/identity';
@@ -119,7 +120,7 @@ export const SESSION_COOKIE = '__Host-agentx-session';
 /** How long the flow cookie lasts: the flow's own ten minutes (LOGIN_FLOW_SECONDS). */
 const FLOW_COOKIE_SECONDS = 600;
 /** A step-up's: its flow's fifteen (STEP_UP_FLOW_SECONDS, E6-P2), so a late return reads as its time run out. */
-const STEP_UP_FLOW_COOKIE_SECONDS = 900;
+const STEP_UP_FLOW_COOKIE_SECONDS = STEP_UP_FLOW_SECONDS;
 
 /** A value one of our cookies can hold: 32 random bytes as base64url. */
 const COOKIE_VALUE = /^[A-Za-z0-9_-]{43}$/;

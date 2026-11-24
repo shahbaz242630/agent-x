@@ -318,7 +318,7 @@ describe('a policy’s refusals (6D3b)', () => {
     [new ApiError(409, 'IDEMPOTENCY_KEY_BUSY'), /still working on your first try/],
     [new ApiError(409, 'IDEMPOTENCY_KEY_REUSED'), /couldn't tell this try apart/],
     [new ApiError(403, 'PASSKEY_REQUIRED'), /signed in with your passkey/],
-    [new ApiError(403, 'SECOND_FACTOR_REMOVED'), /removed recently/],
+    [new ApiError(403, 'SECOND_FACTOR_REMOVED'), /removed, or a passkey added beside one you had, recently/],
     [new ApiError(400, 'ORGANIZATION_INVALID'), /which organisation/],
     [new ApiError(409, 'STATEMENT_CHANGED'), /words you confirmed with have changed/],
     [new ApiError(403, 'STEP_UP_FAILED'), /didn't match it/],

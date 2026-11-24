@@ -41,7 +41,7 @@
 //
 // Each runs on the handle it is given, so the caller decides the transaction:
 // `hold` one statement, the rest a read and then a write of only the row as it
-// was read. `sweep` deletes challenges past their time a batch at a time, in a
+// was read. `sweep` deletes challenges five minutes past their time (STEP_UP_KEPT_SECONDS) a batch at a time, in a
 // transaction of its own with a statement timeout (hourly, from the API). A
 // challenge goes with its session. The times are the Clock's (ADR-006 §3), so
 // tests can move them.
@@ -71,6 +71,14 @@ import type { IdentityTables } from './tables.ts';
  * real step-ups (login name, password and passkey, and the login service waking from idle).
  */
 export const STEP_UP_SECONDS = 600;
+
+/**
+ * How long past its time a challenge waits for the sweep: five minutes, so a sign-in back late still reads
+ * `challenge_expired`, not one never asked (E7, S215: a sweep at the API's start took it first). Its flow, begun
+ * later than the challenge opened, can outlast that: a return later still reads as never asked. It can't be used
+ * meanwhile: every use asks for one still in time.
+ */
+export const STEP_UP_KEPT_SECONDS = 300;
 
 /** What a challenge is for: the session it binds to, the action, and the pending change's SHA-256. */
 export interface StepUpBinding {
@@ -153,7 +161,7 @@ export interface StepUpChallenges {
     binding: StepUpBinding,
     need: { readonly passkeyRequired: boolean },
   ): Promise<ConsumedStepUp | undefined>;
-  /** Deletes up to `most` challenges past their time, and says how many. */
+  /** Deletes up to `most` challenges past their time and STEP_UP_KEPT_SECONDS more, and says how many. */
   sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
 
@@ -548,7 +556,7 @@ export function createStepUpChallenges({
         const ended = tx
           .selectFrom('identity.step_up_challenges')
           .select('id')
-          .where('ends_at', '<=', now)
+          .where('ends_at', '<=', new Date(now.getTime() - STEP_UP_KEPT_SECONDS * 1000))
           .orderBy('id')
           .limit(most)
           .forUpdate()

@@ -19,6 +19,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { createSessions } from './sessions.ts';
 import {
   createStepUpChallenges,
+  STEP_UP_KEPT_SECONDS,
   STEP_UP_SECONDS,
   type StepUpBinding,
   type StepUpChallenges,
@@ -377,7 +378,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     const locked = await challenges.open(app, binding);
     const free = await challenges.open(app, binding);
     if (locked === undefined || free === undefined) throw new Error('both should open');
-    clock.advanceBy(STEP_UP_SECONDS * SECOND);
+    clock.advanceBy((STEP_UP_SECONDS + STEP_UP_KEPT_SECONDS) * SECOND);
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
@@ -395,7 +396,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     const { clock, challenges, binding } = await setUp();
     const old = await challenges.open(app, binding);
     if (old === undefined) throw new Error('it should open');
-    clock.advanceBy(STEP_UP_SECONDS * SECOND);
+    clock.advanceBy((STEP_UP_SECONDS + STEP_UP_KEPT_SECONDS) * SECOND);
     await app.transaction().execute(async (tx) => {
       await challenges.hold(tx, binding.sessionId);
       // The sweep skips a locked challenge: this one is gone only if the hold left it.
@@ -445,10 +446,28 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     expect(await rowsFor(binding.sessionId)).toEqual([]);
   });
 
+  it('keeps a challenge past its time for five minutes, still read as expired, then sweeps it (E7)', async () => {
+    const { clock, challenges, binding } = await setUp();
+    const opened = await challenges.open(app, binding);
+    if (opened === undefined) throw new Error('no challenge');
+
+    expect(STEP_UP_KEPT_SECONDS).toBe(300);
+    clock.advanceBy((STEP_UP_SECONDS + STEP_UP_KEPT_SECONDS) * SECOND - 1);
+    await challenges.sweep(app, 10_000);
+    expect(await challenges.expired(app, opened.challengeId, binding.sessionId)).toBe(true);
+    expect(await challenges.pending(app, opened.challengeId, binding.sessionId)).toBeUndefined();
+    expect(await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE)).toBe(false);
+
+    clock.advanceBy(1);
+    await challenges.sweep(app, 10_000);
+    expect(await challenges.expired(app, opened.challengeId, binding.sessionId)).toBe(false);
+    expect(await rowsFor(binding.sessionId)).toEqual([]);
+  });
+
   it('sweeps challenges out of time, a batch at a time, and leaves the rest', async () => {
     const { clock, challenges, binding } = await setUp();
     const old = await Promise.all([1, 2, 3].map(() => challenges.open(app, binding)));
-    clock.advanceBy(STEP_UP_SECONDS * SECOND);
+    clock.advanceBy((STEP_UP_SECONDS + STEP_UP_KEPT_SECONDS) * SECOND);
     const fresh = await challenges.open(app, binding);
 
     const before = await challenges.sweep(app, 2);

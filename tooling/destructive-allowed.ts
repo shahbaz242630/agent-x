@@ -335,12 +335,12 @@ export const ALLOWED: readonly Allowed[] = [
   {
     file: 'packages/core/src/modules/identity/infrastructure/step-up-challenges.ts',
     match: ".deleteFrom('identity.step_up_challenges')",
-    guard: ".where('ends_at', '<=', now)",
+    guard: ".where('ends_at', '<=', new Date(now.getTime() - STEP_UP_KEPT_SECONDS * 1000))",
     proof: {
       file: 'packages/core/src/modules/identity/infrastructure/step-up-challenges.db.test.ts',
-      title: 'sweeps challenges out of time, a batch at a time, and leaves the rest',
+      title: 'keeps a challenge past its time for five minutes, still read as expired, then sweeps it (E7)',
     },
-    why: 'a verified challenge consumed once for its own session, and the sweep of those out of time',
+    why: 'a verified challenge consumed once for its own session, and the sweep of those five minutes past their time',
     lines: 2,
   },
   {

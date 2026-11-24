@@ -27,6 +27,7 @@ import { type Kysely, sql } from 'kysely';
 import { type Clock, UUID } from '../../../shared-kernel/index.ts';
 import { isReturnPath } from '../domain/sign-in.ts';
 import type { LoginFlow } from './oidc-client.ts';
+import { STEP_UP_KEPT_SECONDS, STEP_UP_SECONDS } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** How long a browser has to come back from the login service. */
@@ -36,7 +37,7 @@ export const LOGIN_FLOW_SECONDS = 600;
  * How long a step-up's flow lasts: five minutes past its challenge's ten (E6-P2), so a person back too late is told
  * their time ran out (`challenge_expired`), not a flow gone. It grants nothing alone: the challenge decides.
  */
-export const STEP_UP_FLOW_SECONDS = 900;
+export const STEP_UP_FLOW_SECONDS = STEP_UP_SECONDS + STEP_UP_KEPT_SECONDS;
 
 /**
  * The sign-ins under way, every network together, past which only a quiet network's start (S206 V8): the table's
