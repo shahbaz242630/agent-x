@@ -546,7 +546,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
-  it('sweeps the step-up challenges past their five minutes once it listens, keeping the rest (B3-1)', async () => {
+  it('sweeps the step-up challenges five minutes past their time once it listens, keeping the rest (B3-1, E7)', async () => {
     const admin = database.as('admin');
     const userId = '0199a0f0-0000-7000-8000-0000000b3101';
     const sessionId = '0199a0f0-0000-7000-8000-0000000b3102';
@@ -563,8 +563,9 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       [sessionId, userId],
     );
     const challenges = [
-      ['0199a0f0-0000-7000-8000-0000000b3111', '6 minutes'],
-      ['0199a0f0-0000-7000-8000-0000000b3112', '1 minute'],
+      // Ended 6 minutes ago, past the 5 kept for a late return (E7), and ended 4 minutes ago, still kept.
+      ['0199a0f0-0000-7000-8000-0000000b3111', '11 minutes'],
+      ['0199a0f0-0000-7000-8000-0000000b3112', '9 minutes'],
     ] as const;
     for (const [id, age] of challenges) {
       await admin.query(
