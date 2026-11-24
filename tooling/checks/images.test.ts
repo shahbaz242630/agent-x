@@ -134,9 +134,9 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(text).toMatch(/^COPY --from=k6 \/usr\/bin\/k6 \/usr\/local\/bin\/k6$/m);
   });
 
-  it('builds on the Node major the repository runs (.nvmrc)', () => {
-    const major = readFileSync('.nvmrc', 'utf8').trim();
-    expect(dockerfile[0]).toMatch(new RegExp(`^node:${major}\\.[0-9]+\\.[0-9]+-`));
+  it('builds on the exact Node the repository runs (.nvmrc)', () => {
+    const version = readFileSync('.nvmrc', 'utf8').trim();
+    expect(dockerfile[0]?.startsWith(`node:${version}-`)).toBe(true);
   });
 
   it('runs the compose stack on the newest Postgres the database tests run on', () => {

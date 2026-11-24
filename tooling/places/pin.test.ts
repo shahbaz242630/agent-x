@@ -34,8 +34,12 @@ describe('the place file’s pin (L4b)', () => {
     expect(moved).toContain('City Lite, January 2027');
     const changed = moved.split('\n').filter((line, index) => line !== DOCKERFILE.split('\n')[index]);
     expect(changed).toHaveLength(3);
+    // The checksum moved is the place file's, never another download's (Corepack's comes first, DT2).
+    expect(moved).toMatch(
+      new RegExp(`--checksum=sha256:${SHA} \\\\\\r?\\n\\s+https://\\S*geoip-dbip-city-lite-2027-01/`),
+    );
     // Moved back, it is the file it was.
-    const sha = /--checksum=sha256:([0-9a-f]{64})/.exec(DOCKERFILE)?.[1] ?? '';
+    const sha = /--checksum=sha256:([0-9a-f]{64}) \\\r?\n\s+https:\/\/\S*geoip-dbip/.exec(DOCKERFILE)?.[1] ?? '';
     const name = /City Lite, ([A-Z][a-z]+ \d{4})/.exec(DOCKERFILE)?.[1] ?? '';
     expect(pinned(moved, MONTH, sha).replace(/City Lite, [A-Z][a-z]+ \d{4}/, `City Lite, ${name}`)).toBe(DOCKERFILE);
   });
@@ -49,7 +53,7 @@ describe('the place file’s pin (L4b)', () => {
 
   it.each([
     ['release URL', DOCKERFILE.replace(/releases\/download/, 'releases/latest')],
-    ['checksum', DOCKERFILE.replace('ADD --checksum', 'ADD')],
+    ['checksum', DOCKERFILE.replace(/ADD --checksum=sha256:[0-9a-f]{64}(?= \\\r?\n\s+https:\/\/\S*geoip)/, 'ADD')],
     ['comment naming the month', DOCKERFILE.replace(/City Lite, /, 'City Lite ')],
   ])('refuses a Dockerfile with no %s to move', (what, text) => {
     expect(() => pinned(text, '2027-01', SHA)).toThrow(`the Dockerfile has no ${what} to move`);

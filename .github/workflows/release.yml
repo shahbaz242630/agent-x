@@ -42,7 +42,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # The runner image's own Node 24, as in the release job. It installs no packages.
+      # The exact Node .nvmrc pins, as in the release job. It installs no packages.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -128,7 +128,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # The runner image's own Node 24, as in CI's image-publish. It installs no packages.
+      # The exact Node .nvmrc pins, as in CI's image-publish. It installs no packages.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -213,7 +213,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # The runner image's own Node 24, as in CI's image-publish. It installs no packages.
+      # The exact Node .nvmrc pins, as in CI's image-publish. It installs no packages.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -248,7 +248,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # The runner image's own Node 24, as in CI's image-publish. It installs no packages.
+      # The exact Node .nvmrc pins, as in CI's image-publish. It installs no packages.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -297,7 +297,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # The runner image's own Node 24, as in the release job. It installs no packages.
+      # The exact Node .nvmrc pins, as in the release job. It installs no packages.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -383,7 +383,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # The runner image's own Node 24, as in the release job. It installs no packages.
+      # The exact Node .nvmrc pins, as in the release job. It installs no packages.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -500,7 +500,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # The runner image's own Node 24, as in the release job. It installs no packages.
+      # The exact Node .nvmrc pins, as in the release job. It installs no packages.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc

@@ -44,7 +44,7 @@ describe(`a read alone's one trip (4D2e C5, Postgres ${server.version})`, () => 
           near.write(Buffer.concat(wire.held));
         }
       });
-      far.on('data', (data) => {
+      far.on('data', (data: Buffer) => {
         if (wire.holding) wire.held.push(data);
         else near.write(data);
       });

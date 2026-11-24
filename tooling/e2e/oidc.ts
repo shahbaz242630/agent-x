@@ -3,7 +3,7 @@
 // code exchange, and an ID token check against the issuer's keys. Only what
 // the tests need to prove the login service's behaviour; the product's own
 // client comes in Phase 1.
-import { createHash, createPublicKey, type JsonWebKey, randomBytes, verify } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, verify, type webcrypto } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 
 interface Discovery {
@@ -182,7 +182,7 @@ export interface IdTokenClaims {
 }
 
 /** A published key: Node's JWK shape, which names the key (`kid`) and its type (`kty`). */
-type Jwk = JsonWebKey & { readonly kid?: string };
+type Jwk = webcrypto.JsonWebKey & { readonly kid?: string };
 
 const decodeSegment = (segment: string): unknown => JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
 

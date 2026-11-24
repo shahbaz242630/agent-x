@@ -34,7 +34,9 @@ const MONTH_NAMES = [
 
 const RELEASE_URL =
   /(\/releases\/download\/geoip-dbip-city-lite-)\d{4}-\d{2}(\/dbip-city-lite-)\d{4}-\d{2}(\.mmdb\.gz)/;
-const CHECKSUM = /(ADD --checksum=sha256:)[0-9a-f]{64}/;
+// The place file's own ADD, not the first in the file: Corepack's comes earlier (DT2).
+const CHECKSUM =
+  /(ADD --checksum=sha256:)[0-9a-f]{64}(?=[ \t]*\\\r?\n[ \t]*https:\/\/\S*\/releases\/download\/geoip-dbip-city-lite-)/;
 const COMMENT_MONTH = /(City Lite, )[A-Z][a-z]+ \d{4}/;
 
 /** The month the Dockerfile's place file is, or undefined when it pins none. */

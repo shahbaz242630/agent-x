@@ -45,8 +45,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-          # The newest Node 24, so it always meets package.json engines.
-          check-latest: true
+          # Exactly the Node .nvmrc pins (package.json engines' floor). No runner image
+          # caches Node 26, so setup-node downloads that one release.
           package-manager-cache: false
 
       - name: Which month is due
@@ -58,7 +58,9 @@ jobs:
 
       - name: Enable pnpm through Corepack
         if: steps.due.outputs.month != ''
-        run: corepack enable pnpm
+        run: |
+          sh tooling/corepack/install.sh
+          corepack enable pnpm
 
       - name: Install the API's packages (the place finder reads the file)
         if: steps.due.outputs.month != ''

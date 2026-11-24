@@ -55,12 +55,14 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-          # The newest Node 24, so it always meets package.json engines (>=24.19.0).
-          check-latest: true
+          # Exactly the Node .nvmrc pins (package.json engines' floor). No runner image
+          # caches Node 26, so setup-node downloads that one release.
           package-manager-cache: false
 
       - name: Enable pnpm through Corepack
-        run: corepack enable pnpm
+        run: |
+          sh tooling/corepack/install.sh
+          corepack enable pnpm
 
       # The clients are dev dependencies, pinned in the lockfile; the image installs production ones alone.
       - name: Install (frozen lockfile)
