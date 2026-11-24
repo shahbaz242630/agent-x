@@ -3,10 +3,10 @@
 // every monthly total and rolling window is computed here, by these two
 // functions alone, so no two places can draw a boundary differently.
 //
-// Built on Intl's time-zone data (Node 24 has no Temporal without a flag). A
-// month starts at the first instant whose local date is its 1st: where the
-// clocks skip midnight that is the end of the gap, and where midnight happens
-// twice, the earlier one.
+// Built on Intl's time-zone data (written when Node 24 had no Temporal without a
+// flag; Node 26 has it, and moving to it is its own change). A month starts at
+// the first instant whose local date is its 1st: where the clocks skip midnight
+// that is the end of the gap, and where midnight happens twice, the earlier one.
 import { HOUR_MS } from './clock.ts';
 
 /** A lineage's default time zone: AED's (PRD §3.1). */

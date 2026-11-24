@@ -154,6 +154,26 @@ describe('SEC-SC-01 pnpm supply-chain settings are enforced', () => {
     expect(rootManifest.packageManager).toMatch(/^pnpm@\d+\.\d+\.\d+\+sha512\.[0-9a-f]{128}$/);
   });
 
+  it('pins Corepack, which checks that sha512, to one release and its SHA-256 in CI and both images (DT2)', () => {
+    const script = readFileSync('tooling/corepack/install.sh', 'utf8').replaceAll('\r\n', '\n');
+    const version = /^version=(\d+\.\d+\.\d+)$/m.exec(script)?.[1];
+    const sha256 = /^sha256=([0-9a-f]{64})$/m.exec(script)?.[1];
+    expect(version).toBeDefined();
+    expect(sha256).toBeDefined();
+    // Checked before anything installs it, and installed with no scripts.
+    expect(script).toMatch(/sha256sum --check --strict -\nnpm install --global --ignore-scripts /);
+    const add = `ADD --checksum=sha256:${sha256 ?? ''} \\\n  https://registry.npmjs.org/corepack/-/corepack-${version ?? ''}.tgz /tmp/corepack.tgz\n`;
+    for (const [file, stages] of [
+      ['Dockerfile', 2],
+      ['tooling/load/Dockerfile', 1],
+    ] as const) {
+      const text = readFileSync(file, 'utf8').replaceAll('\r\n', '\n');
+      // Every stage that enables pnpm first installs exactly this file.
+      expect(text.split('corepack enable pnpm').length - 1, file).toBe(stages);
+      expect(text.split(`${add}RUN npm install --global --ignore-scripts`).length - 1, file).toBe(stages);
+    }
+  });
+
   it("keeps the lockfile one YAML document, so GitHub's dependency graph sees every package", () => {
     const documents = parseAllDocuments(readFileSync('pnpm-lock.yaml', 'utf8'));
     expect(documents).toHaveLength(1);
@@ -210,15 +230,33 @@ describe('SEC-SC-01 pnpm supply-chain settings are enforced', () => {
       expect(unguarded.map(({ label }) => label)).toEqual([]);
     });
 
-    it('installs the newest Node 24, so package.json engines always holds', () => {
-      const stale = pnpmJobs.filter(({ job }) => {
-        const setupNode = ((job.steps ?? []) as Json[]).find((step) =>
-          String(step.uses).startsWith('actions/setup-node@'),
-        );
-        return (setupNode?.with as Json | undefined)?.['check-latest'] !== true;
+    it('installs the pinned Corepack (Node 26 ships none) before enabling pnpm', () => {
+      const unpinned = pnpmJobs.filter(({ job }) => {
+        const enable = ((job.steps ?? []) as Json[]).find((step) => runsCorepack(step))?.run;
+        return enable !== 'sh tooling/corepack/install.sh\ncorepack enable pnpm\n';
       });
-      expect(stale.map(({ label }) => label)).toEqual([]);
+      expect(unpinned.map(({ label }) => label)).toEqual([]);
     });
+  });
+
+  it('runs every workflow on the exact Node .nvmrc pins, the floor of package.json engines', () => {
+    const pinned = readFileSync('.nvmrc', 'utf8').trim();
+    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/);
+    expect((rootManifest.engines as Json).node).toBe(`>=${pinned} <${String(Number(pinned.split('.')[0]) + 1)}`);
+    const elsewhere = workflowFiles.flatMap((file) =>
+      Object.entries((readYaml(file).jobs ?? {}) as Record<string, Json>).flatMap(([name, job]) =>
+        ((job.steps ?? []) as Json[])
+          .filter((step) => String(step.uses).startsWith('actions/setup-node@'))
+          .filter((step) => {
+            const options = (step.with ?? {}) as Json;
+            return (
+              options['node-version-file'] !== '.nvmrc' || 'node-version' in options || options['check-latest'] === true
+            );
+          })
+          .map(() => `${file}: ${name}`),
+      ),
+    );
+    expect(elsewhere).toEqual([]);
   });
 
   it('lets Dependabot propose only npm versions old enough to install', () => {

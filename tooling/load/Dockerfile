@@ -14,7 +14,7 @@
 # same Node base by digest, pnpm by its sha512, the lockfile frozen, and k6
 # the same pinned image the laptop's run uses (compose.load.yaml).
 
-FROM node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS dependencies
+FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS dependencies
 
 ENV COREPACK_ENV_FILE=0
 WORKDIR /app
@@ -27,13 +27,17 @@ COPY packages/testing/package.json packages/testing/
 
 # Not --prod: the seed's world reaches @agentx/testing, a development
 # dependency of the API. The filter keeps the root's tools (Vitest, lint) out.
-RUN corepack enable pnpm \
+# Node 26 ships no Corepack: the pinned release, by its SHA-256 (tooling/corepack/install.sh).
+ADD --checksum=sha256:9128cfe26aee0c99f4fc68c15c6b8b12309a68be0de2c012cdfea2a463cb722f \
+  https://registry.npmjs.org/corepack/-/corepack-0.36.0.tgz /tmp/corepack.tgz
+RUN npm install --global --ignore-scripts --no-audit --no-fund /tmp/corepack.tgz && rm /tmp/corepack.tgz \
+  && corepack enable pnpm \
   && pnpm install --frozen-lockfile --filter "@agentx/api..." --filter "@agentx/testing..."
 
 # k6 is one static binary; only it is taken from its image.
 FROM grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276 AS k6
 
-FROM node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0
+FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc
 
 ARG AGENTX_RELEASE=local
 LABEL org.opencontainers.image.source="https://github.com/shahbaz242630/agent-x" \
