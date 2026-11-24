@@ -453,8 +453,10 @@ describe('suppliers’ and bank accounts’ brakes (6B2)', () => {
   it('reaches both lists from More', async () => {
     signedIn();
     open('/more');
-    expect(await screen.findByRole('link', { name: 'Suppliers' })).toBeDefined();
-    expect(screen.getByRole('link', { name: 'Bank accounts' }).getAttribute('href')).toBe('/more/sources');
+    expect(await within(await screen.findByRole('main')).findByRole('link', { name: 'Suppliers' })).toBeDefined();
+    expect(within(screen.getByRole('main')).getByRole('link', { name: 'Bank accounts' }).getAttribute('href')).toBe(
+      '/more/sources',
+    );
   });
 });
 

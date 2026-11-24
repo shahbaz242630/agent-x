@@ -1,6 +1,7 @@
 // The console's entry (6A1): the fonts and styles, then the app in #root,
 // with its errors reported to the API (6A2).
 import '@fontsource/ibm-plex-sans/400.css';
+import '@fontsource/ibm-plex-sans/500.css';
 import '@fontsource/ibm-plex-sans/600.css';
 import '@fontsource/ibm-plex-sans/700.css';
 import '@fontsource/ibm-plex-mono/400.css';

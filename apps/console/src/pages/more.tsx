@@ -10,6 +10,9 @@ import { useActing } from '../session.tsx';
 import { forgetAll } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Freeze } from './freeze.tsx';
+import { Icon } from './icons.tsx';
+import { placesFor } from './places.ts';
+import { markSignedOut } from './signed-out.tsx';
 
 const UNTIL = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
@@ -35,66 +38,50 @@ export function More() {
     dropAllTries();
     dropKept();
     forgetAll();
+    markSignedOut();
     goTo('/');
   };
   return (
     <section className="stack">
       <h1>{t('more.title')}</h1>
       <Freeze />
-      <nav className="stack" aria-label={t('members.people')}>
-        <h2>{t('members.people')}</h2>
-        <Link to="/more/members">{t('members.title')}</Link>
-      </nav>
-      <nav className="stack" aria-label={t('policies.more')}>
-        <h2>{t('policies.more')}</h2>
-        <Link to="/more/policy">{t('policies.title.organization')}</Link>
-      </nav>
-      <nav className="stack" aria-label={t('more.brakes')}>
-        <h2>{t('more.brakes')}</h2>
-        <Link to="/more/suppliers">{t('brakes.suppliers.title')}</Link>
-        <Link to="/more/sources">{t('brakes.sources.title')}</Link>
-      </nav>
-      <nav className="stack" aria-label={t('mandates.title')}>
-        <h2>{t('mandates.title')}</h2>
-        <Link to="/more/mandates">{t('mandates.title')}</Link>
-      </nav>
-      {/* The logs are an admin's alone (decisions 24, 26): no one else is shown a way to them. */}
-      {organization.role === 'admin' && (
-        <nav className="stack" aria-label={t('more.records')}>
-          <h2>{t('more.records')}</h2>
-          <Link to="/more/audit-log">{t('logs.audit.title')}</Link>
-          <Link to="/more/access-log">{t('logs.access.title')}</Link>
-          <Link to="/more/security-events">{t('securityEvents.title')}</Link>
-        </nav>
-      )}
-      {/* The integrity hold is an admin's alone (the API's access): no one else is shown a way to it (6D4a). */}
-      {organization.role === 'admin' && (
-        <nav className="stack" aria-label={t('hold.title')}>
-          <h2>{t('hold.title')}</h2>
-          <Link to="/more/integrity-hold">{t('hold.moreLink')}</Link>
-        </nav>
-      )}
-      {/* Everyone's own activity, whatever their role (decision 26's L8). */}
-      <nav className="stack" aria-label={t('myActivity.title')}>
-        <h2>{t('myActivity.title')}</h2>
-        <Link to="/more/my-activity">{t('myActivity.link')}</Link>
-      </nav>
-      <h2>{t('more.sessionHeading')}</h2>
-      {/* Both ends (E2E6 F8): the one a person away meets first, moved on by each request, and the latest. */}
-      <p className="muted">
-        {t('more.session', {
-          idle: UNTIL.format(new Date(session.idleExpiresAt)),
-          time: UNTIL.format(new Date(session.expiresAt)),
-        })}
-      </p>
-      <button type="button" className="secondary" disabled={leaving} onClick={() => void signOut()}>
-        {t('more.signOut')}
-      </button>
-      {failed && (
-        <p className="notice" role="alert">
-          {t('more.signOutFailed')}
+      {/* Every other place, in the sidebar's groups, as cards: on a phone this page is where they live (CO11). Who is
+          shown what is the sidebar's own rule (places.ts): the logs and the integrity hold an admin's alone. */}
+      {placesFor(organization.role)
+        .filter((group) => group.label !== 'nav.group.work' && group.label !== 'nav.group.organisation')
+        .map((group) => (
+          <nav key={group.label} className="stack" aria-label={t(group.label)}>
+            <h2>{t(group.label)}</h2>
+            <div className="place-cards">
+              {group.places
+                .filter((place) => place.tab !== true)
+                .map((place) => (
+                  <Link key={place.to} to={place.to} className="place-card">
+                    <Icon name={place.icon} />
+                    <span>{t(place.label)}</span>
+                  </Link>
+                ))}
+            </div>
+          </nav>
+        ))}
+      <section className="stack session-card" aria-labelledby="session-heading">
+        <h2 id="session-heading">{t('more.sessionHeading')}</h2>
+        {/* Both ends (E2E6 F8): the one a person away meets first, moved on by each request, and the latest. */}
+        <p className="muted">
+          {t('more.session', {
+            idle: UNTIL.format(new Date(session.idleExpiresAt)),
+            time: UNTIL.format(new Date(session.expiresAt)),
+          })}
         </p>
-      )}
+        <button type="button" className="secondary" disabled={leaving} onClick={() => void signOut()}>
+          {t('more.signOut')}
+        </button>
+        {failed && (
+          <p className="notice" role="alert">
+            {t('more.signOutFailed')}
+          </p>
+        )}
+      </section>
     </section>
   );
 }

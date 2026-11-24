@@ -5,7 +5,7 @@
 // inside an organisation is that organisation's log; it lists Agent X's
 // exports of their log; and it downloads as CSV or NDJSON, no organisation named.
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -102,7 +102,7 @@ describe('My activity (6E1a)', () => {
   it('is reached from More by anyone signed in, whatever their role', async () => {
     answers.set('GET /v1/auth/activity', page([]));
     open('/more');
-    await userEvent.click(await screen.findByRole('link', { name: 'My activity' }));
+    await userEvent.click(await within(await screen.findByRole('main')).findByRole('link', { name: 'My activity' }));
     expect(await screen.findByRole('heading', { name: 'My activity', level: 1 })).toBeDefined();
     expect(await screen.findByText('Nothing in this range matches these filters.')).toBeDefined();
     expect(await screen.findByText('Agent X has never exported your activity.')).toBeDefined();
