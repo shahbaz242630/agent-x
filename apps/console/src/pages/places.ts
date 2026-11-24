@@ -41,7 +41,7 @@ export interface PlaceGroup {
   readonly places: readonly Place[];
 }
 
-export const PLACES: readonly PlaceGroup[] = [
+const PLACES: readonly PlaceGroup[] = [
   {
     label: 'nav.group.work',
     places: [
