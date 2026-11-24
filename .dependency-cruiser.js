@@ -19,6 +19,8 @@ const CORE = `${ROOT}packages/core/src/`;
 const MODULES = `${CORE}modules/`;
 /** Test files may also import the test framework, so the purity rules skip them. */
 const TEST_FILE = '\\.test\\.tsx?$';
+/** The console's test setup (vitest's setupFiles): it runs only under the console's tests, so it may use their tools. */
+const TEST_SETUP = '(?:^|/)apps/console/src/jsdom-setup\\.ts$';
 /** A build tool's own config beside the app it builds (the console's vite.config.ts): it runs at build time, never ships. */
 const BUILD_CONFIG = '(?:^|/)apps/[^/]+/vite\\.config\\.ts$';
 /**
@@ -230,7 +232,7 @@ export default {
       comment:
         "Product code imports only packages in its own package.json dependencies: not a devDependency, and not a tool that only resolves from the repository root's devDependencies.",
       severity: 'error',
-      from: { path: `${ROOT}(?:packages|apps)/`, pathNot: [TEST_FILE, BUILD_CONFIG] },
+      from: { path: `${ROOT}(?:packages|apps)/`, pathNot: [TEST_FILE, TEST_SETUP, BUILD_CONFIG] },
       to: { dependencyTypes: ['npm-dev', 'npm-no-pkg', 'npm-unknown'] },
     },
   ],
