@@ -160,8 +160,11 @@ describe('SEC-SC-01 pnpm supply-chain settings are enforced', () => {
     const sha256 = /^sha256=([0-9a-f]{64})$/m.exec(script)?.[1];
     expect(version).toBeDefined();
     expect(sha256).toBeDefined();
-    // Checked before anything installs it, and installed with no scripts.
-    expect(script).toMatch(/sha256sum --check --strict -\nnpm install --global --ignore-scripts /);
+    // Checked before anything installs it, the install tied to the check passing, and with no scripts.
+    expect(script).toMatch(/^set -eu$/m);
+    expect(script).toMatch(
+      /sha256sum --check --strict - \|\| \{ rm -rf "\$dir"; exit 1; \}\nnpm install --global --ignore-scripts /,
+    );
     const add = `ADD --checksum=sha256:${sha256 ?? ''} \\\n  https://registry.npmjs.org/corepack/-/corepack-${version ?? ''}.tgz /tmp/corepack.tgz\n`;
     for (const [file, stages] of [
       ['Dockerfile', 2],

@@ -10,8 +10,11 @@
 set -eu
 version=0.36.0
 sha256=9128cfe26aee0c99f4fc68c15c6b8b12309a68be0de2c012cdfea2a463cb722f
-file="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/corepack-${version}.tgz"
+# A folder of its own (mktemp): no other user can swap the file between the check and the install.
+dir=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/corepack.XXXXXX")
+file="${dir}/corepack-${version}.tgz"
 curl --fail --silent --show-error --location --output "$file" "https://registry.npmjs.org/corepack/-/corepack-${version}.tgz"
-echo "${sha256}  ${file}" | sha256sum --check --strict -
+# A mismatch stops here with an error, whether or not `set -e` is in force: nothing is installed.
+echo "${sha256}  ${file}" | sha256sum --check --strict - || { rm -rf "$dir"; exit 1; }
 npm install --global --ignore-scripts --no-audit --no-fund "$file"
-rm -f "$file"
+rm -rf "$dir"
