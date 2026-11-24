@@ -152,6 +152,7 @@ const EXPECTED_HEADERS = {
   'referrer-policy': 'same-origin',
   'cross-origin-opener-policy': 'same-origin',
   'cross-origin-resource-policy': 'same-origin',
+  'x-robots-tag': 'noindex, nofollow',
 };
 
 function expectSecurityHeaders(response: LightMyRequestResponse): void {

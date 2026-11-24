@@ -6,6 +6,8 @@ import { signInAddress } from '../api.ts';
 import { goTo } from '../navigate.ts';
 import { t } from '../text.ts';
 import { Icon, type IconName } from './icons.tsx';
+import { LAUNCHED } from '../launch.ts';
+import { Panel } from './panel.tsx';
 import { cameBackLate, withoutSignInLate } from './sign-in-late.tsx';
 
 /** Where this tab notes, across the page load sign-out ends with, that the person signed out themselves. */
@@ -93,17 +95,61 @@ function HeroCards() {
   );
 }
 
+/** Said above the way in: a sign-in that came back late, a session that ended, or the person's own sign-out. */
+function Notes({ ended }: { readonly ended: boolean }) {
+  const late = cameBackLate(window.location.search);
+  const [signedOut] = useState(tookSignedOut);
+  return (
+    <>
+      {late && (
+        <p className="notice" role="alert">
+          {t('signIn.late')}
+        </p>
+      )}
+      {signedOut && !ended && (
+        <p className="notice good" role="status">
+          {t('signedOut.done')}
+        </p>
+      )}
+      {ended && (
+        <p className="notice" role="status">
+          {t('signedOut.ended')}
+        </p>
+      )}
+    </>
+  );
+}
+
 /**
- * No one signed in (CO11): the public front page, in the Glass Vault manner (soft light behind frosted cards, the
- * passkey moment as the picture) in Calm Ledger's colours. One way in, back to the page they asked for; a late
- * sign-in or an ended session is said at the top.
+ * Before launch (partner S216: no one sees the pilot unless we decide): the way in alone, saying nothing of the
+ * product. Only a person we gave an account can go further: there is no sign-up (ADR-003, ADR-005).
  */
+function PrivateSignIn({ ended, signIn }: { readonly ended: boolean; readonly signIn: () => void }) {
+  return (
+    <Panel id="signed-out" title={t('private.title')} narrow>
+      <Notes ended={ended} />
+      <p className="muted">{t('private.body')}</p>
+      <button type="button" className="primary" onClick={signIn}>
+        {t('signedOut.button')}
+      </button>
+    </Panel>
+  );
+}
+
+/** No one signed in: the private way in until launch, then the front page; either goes back to the page asked for. */
 export function SignedOut({ ended }: { readonly ended: boolean }) {
   const signIn = () => {
     goTo(signInAddress(withoutSignInLate(window.location.pathname, window.location.search)));
   };
-  const late = cameBackLate(window.location.search);
-  const [signedOut] = useState(tookSignedOut);
+  return LAUNCHED ? <FrontPage ended={ended} signIn={signIn} /> : <PrivateSignIn ended={ended} signIn={signIn} />;
+}
+
+/**
+ * The public front page (CO11), shown once launched: the Glass Vault manner (soft light behind frosted cards, the
+ * passkey moment as the picture) in Calm Ledger's colours. One way in, back to the page they asked for; a late
+ * sign-in or an ended session is said at the top.
+ */
+function FrontPage({ ended, signIn }: { readonly ended: boolean; readonly signIn: () => void }) {
   return (
     <div className="landing">
       <div className="aurora" aria-hidden="true">
@@ -130,21 +176,7 @@ export function SignedOut({ ended }: { readonly ended: boolean }) {
       <main>
         <section className="hero" aria-labelledby="signed-out">
           <div className="hero-copy">
-            {late && (
-              <p className="notice" role="alert">
-                {t('signIn.late')}
-              </p>
-            )}
-            {signedOut && !ended && (
-              <p className="notice good" role="status">
-                {t('signedOut.done')}
-              </p>
-            )}
-            {ended && (
-              <p className="notice" role="status">
-                {t('signedOut.ended')}
-              </p>
-            )}
+            <Notes ended={ended} />
             <span className="eyebrow">{t('landing.eyebrow')}</span>
             <h1 id="signed-out">
               {t('landing.title')} <em>{t('landing.titleAccent')}</em>
