@@ -62,7 +62,7 @@ function HeroCards() {
         </span>
         <span className="line">
           <span>{t('landing.card.paid')}</span>
-          <span className="mono">AED 100.05</span>
+          <span className="mono">{t('landing.card.paidAmount')}</span>
         </span>
       </div>
       <div className="glass main-card">
@@ -74,7 +74,7 @@ function HeroCards() {
           <span className="tag warn">{t('landing.card.waiting')}</span>
         </span>
         <span className="hero-amount mono">
-          <small>AED</small> 2,000.00
+          <small>{t('landing.card.currency')}</small> {t('landing.card.amount')}
         </span>
         <span className="muted">{t('landing.card.supplier')}</span>
         <span className="fp">

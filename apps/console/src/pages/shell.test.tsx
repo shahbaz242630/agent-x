@@ -217,6 +217,70 @@ describe('the command bar (CO11)', () => {
   });
 });
 
+describe('the command bar beside other modals and keyboards (S216 review)', () => {
+  it('never opens over another open modal (the shared confirm), so the page behind stays inert', async () => {
+    signedInAs('admin');
+    open('/approvals');
+    await sections();
+    const confirm = document.createElement('dialog');
+    confirm.setAttribute('open', '');
+    document.body.append(confirm);
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+    expect(screen.queryByRole('dialog', { name: 'Go to' })).toBeNull();
+    confirm.remove();
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+    expect(await screen.findByRole('dialog', { name: 'Go to' })).toBeDefined();
+  });
+
+  it('gives focus back to its button when the shortcut closes it', async () => {
+    signedInAs('admin');
+    open('/approvals');
+    await sections();
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+    await screen.findByRole('dialog', { name: 'Go to' });
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /Go to a page/ }));
+  });
+
+  it('names the key a Mac has', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)');
+    signedInAs('admin');
+    open('/approvals');
+    await sections();
+    expect(screen.getByRole('button', { name: /Go to a page/ }).textContent).toContain('⌘ K');
+    vi.restoreAllMocks();
+  });
+
+  it('lets a member of several organisations switch from More, as a phone has no sidebar switch', async () => {
+    answers = {
+      'GET /v1/auth/session': { status: 200, body: SESSION },
+      'GET /v1/auth/organizations': {
+        status: 200,
+        body: {
+          organizations: [
+            org('admin'),
+            { ...org('viewer'), id: '0199a0f0-0000-7000-8000-00000000bbbb', name: 'Other Org' },
+          ],
+          unreadable: [],
+        },
+      },
+    };
+    localStorage.setItem('agentx.organization', '0199a0f0-0000-7000-8000-00000000aaaa');
+    open('/more');
+    await userEvent.click(
+      await within(await screen.findByRole('main')).findByRole('button', { name: 'Switch organisation' }),
+    );
+    expect(await screen.findByText('Choose an organisation')).toBeDefined();
+  });
+
+  it('offers no switch on More to a member of one organisation', async () => {
+    signedInAs('admin');
+    open('/more');
+    await screen.findByRole('heading', { name: 'More' });
+    expect(screen.queryByRole('button', { name: 'Switch organisation' })).toBeNull();
+  });
+});
+
 describe('the front page (CO11)', () => {
   it('has one Sign in, plus the hero and closing ways in, each back to the page asked for', async () => {
     signedOut();

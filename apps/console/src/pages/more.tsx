@@ -18,7 +18,7 @@ const UNTIL = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyl
 
 /** Everything that isn't a main section yet: the organisation's freeze, the other brakes, the logs, the session and signing out. */
 export function More() {
-  const { session, organization } = useActing();
+  const { session, organization, choose, canSwitch } = useActing();
   const queries = useQueryClient();
   const [leaving, setLeaving] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -44,6 +44,18 @@ export function More() {
   return (
     <section className="stack">
       <h1>{t('more.title')}</h1>
+      {/* A member of several organisations switches here too: on a phone the sidebar's switch is hidden (S216 review). */}
+      {canSwitch && (
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => {
+            choose(null);
+          }}
+        >
+          {t('nav.switch')}
+        </button>
+      )}
       <Freeze />
       {/* Every other place, in the sidebar's groups, as cards: on a phone this page is where they live (CO11). Who is
           shown what is the sidebar's own rule (places.ts): the logs and the integrity hold an admin's alone. */}

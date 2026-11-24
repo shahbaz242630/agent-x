@@ -5,7 +5,7 @@
 // (a new key not yet saved) still asks first. It is the browser's own modal
 // (<dialog> with showModal, as the shared confirm): Escape closes it.
 import { useNavigate } from '@tanstack/react-router';
-import { type KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { type KeyboardEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
@@ -108,7 +108,7 @@ function Palette({ onClose }: { readonly onClose: () => void }) {
           }}
           onKeyDown={onKey}
         />
-        <kbd>Esc</kbd>
+        <kbd>{t('command.esc')}</kbd>
       </div>
       <ul id={`${id}-list`} role="listbox" aria-label={t('command.places')} className="palette-list">
         {found.map((item, index) => (
@@ -136,27 +136,36 @@ function Palette({ onClose }: { readonly onClose: () => void }) {
   );
 }
 
-/** The top bar's search button, and Ctrl+K anywhere in the signed-in console. */
+/** A Mac's keyboard says ⌘ where others say Ctrl: the hint names the key the person has. */
+const onMac = (): boolean => /Mac|iPhone|iPad/.test(navigator.userAgent);
+
+/** The top bar's search button, and Ctrl+K (⌘K) anywhere in the signed-in console. */
 export function CommandBar() {
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLButtonElement>(null);
 
+  // Closed by any way out (Escape, the backdrop, a place chosen, the shortcut again): focus goes back to the button,
+  // as React removes the dialog rather than closing it, so the browser's own return isn't relied on.
+  const close = useCallback(() => {
+    setOpen(false);
+    opener.current?.focus();
+  }, []);
+
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (!isOpenKey(event)) return;
+      // Another modal open (the shared confirm, perhaps sending a change): the page behind it stays inert, so the
+      // command bar never opens over it and leads away mid-change (S216 review: a new key not yet shown was lost).
+      if (document.querySelector('dialog[open]:not(.palette)') !== null) return;
       event.preventDefault();
-      setOpen((was) => !was);
+      if (document.querySelector('dialog.palette[open]') === null) setOpen(true);
+      else close();
     };
     window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('keydown', onKey);
     };
-  }, []);
-
-  const close = () => {
-    setOpen(false);
-    opener.current?.focus();
-  };
+  }, [close]);
 
   return (
     <>
@@ -172,7 +181,7 @@ export function CommandBar() {
       >
         <Icon name="search" size={15} />
         <span>{t('command.open')}</span>
-        <kbd>Ctrl K</kbd>
+        <kbd>{t(onMac() ? 'command.keysMac' : 'command.keys')}</kbd>
       </button>
       {open && <Palette onClose={close} />}
     </>
