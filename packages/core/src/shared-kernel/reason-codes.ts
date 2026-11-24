@@ -286,7 +286,7 @@ export const REASON_CODES = {
   SOURCE_NOT_SUSPENDED:
     'The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link.',
   SOURCE_NOT_USABLE:
-    "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it. Nothing was changed, and nothing is held for a request on it.",
+    "The funding source can't fund payments now (it is suspended, unavailable or ended, or its bank consent has expired), or an admin cancelled the requests waiting on it, by suspending it or by reactivating it with a fresh start. No mandate or request can draw on it while it can't fund payments, and nothing is held for a request on it.",
   STATEMENT_CHANGED:
     "The words this change is confirmed with aren't the ones Agent X confirms it with now (they changed, or none were named), so this request changed nothing. Read them again (GET /v1/statements) and confirm with the version shown. A retry sent after a release changed the words is refused this way even if its first try went through: check what was done before trying again.",
   STEP_UPS_SPENT:
@@ -315,7 +315,7 @@ export const REASON_CODES = {
   SUPPLIER_NOT_UNVERIFIED:
     'The supplier is verified or suspended, so there is nothing to verify. Nothing was changed. Look at the supplier again.',
   SUPPLIER_NOT_VERIFIED:
-    "The supplier is not one of the organisation's verified suppliers: it is unknown or not yet verified. So the request is refused. Nothing is held for the request.",
+    "The supplier is not one of the organisation's verified suppliers: it is unknown or not yet verified, or an admin cancelled the requests waiting on it by reactivating it with a fresh start. So the request is refused. Nothing is held for the request.",
   SUPPLIER_NO_CHANGE_WAITING:
     "No change of this supplier's bank details is waiting, so there is nothing to confirm or withdraw. Nothing was changed. Look at the supplier again.",
   SUPPLIER_NO_PAYEE:
