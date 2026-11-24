@@ -143,7 +143,7 @@ describe('the command bar (CO11)', () => {
     await sections();
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     const search = await screen.findByRole('combobox', { name: 'Search pages' });
-    expect(within(screen.getByRole('listbox')).getAllByRole('option').length).toBe(14);
+    expect(within(screen.getByRole('listbox')).getAllByRole('option')).toHaveLength(14);
     await userEvent.type(search, 'audit');
     const options = within(screen.getByRole('listbox')).getAllByRole('option');
     expect(options.map((option) => option.textContent)).toEqual(['Audit logRecords']);
