@@ -163,7 +163,7 @@ describe('SEC-SC-01 pnpm supply-chain settings are enforced', () => {
     // Checked before anything installs it, the install tied to the check passing, and with no scripts.
     expect(script).toMatch(/^set -eu$/m);
     expect(script).toMatch(
-      /sha256sum --check --strict - \|\| \{ rm -rf "\$dir"; exit 1; \}\nnpm install --global --ignore-scripts /,
+      /sha256sum --check --strict - \|\| \{ rm -f "\$file"; rmdir "\$dir"; exit 1; \}\nnpm install --global --ignore-scripts /,
     );
     const add = `ADD --checksum=sha256:${sha256 ?? ''} \\\n  https://registry.npmjs.org/corepack/-/corepack-${version ?? ''}.tgz /tmp/corepack.tgz\n`;
     for (const [file, stages] of [
