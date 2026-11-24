@@ -378,7 +378,7 @@ describe('a member’s page (6D4b)', () => {
   it.each([
     ['OWN_MEMBERSHIP', 409, /another admin must/],
     ['ROLE_UNCHANGED', 409, /already have this role/],
-    ['SECOND_FACTOR_REMOVED', 403, /removed in the last 7 days/],
+    ['SECOND_FACTOR_REMOVED', 403, /removed, or a passkey added beside one you had, in the last 7 days/],
     ['SOMETHING_NEW', 409, /reason SOMETHING_NEW/],
     ['INTEGRITY_FAILED', 503, /failed its integrity check/],
   ])('says a role change refused with %s plainly', async (code, status, said) => {
