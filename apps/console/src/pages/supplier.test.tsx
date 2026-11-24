@@ -234,7 +234,7 @@ describe('a supplier’s page (6D2)', () => {
     as('viewer');
     open(page);
     expect(await screen.findByText('Only an admin or an approver can verify a supplier.')).toBeDefined();
-    expect(screen.queryByRole('button')).toBeNull();
+    expect(within(screen.getByRole('main')).queryByRole('button')).toBeNull();
   });
 
   it('offers a developer no way to verify a supplier', async () => {

@@ -128,7 +128,7 @@ describe('the hold’s banner and page (6D4a)', () => {
     as('approver');
     open('/more');
     expect(await screen.findByRole('heading', { name: 'More' })).toBeDefined();
-    expect(screen.queryByRole('link', { name: 'See the integrity hold' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Integrity hold' })).toBeNull();
     open(page);
     expect(await screen.findByText('Only an admin can see and clear the integrity hold.')).toBeDefined();
     expect(holdReads()).toHaveLength(0);
@@ -137,7 +137,7 @@ describe('the hold’s banner and page (6D4a)', () => {
   it('is linked from More for an admin', async () => {
     as('admin');
     const history = open('/more');
-    await userEvent.click(await screen.findByRole('link', { name: 'See the integrity hold' }));
+    await userEvent.click(await within(await screen.findByRole('main')).findByRole('link', { name: 'Integrity hold' }));
     expect(history.location.pathname).toBe(page);
   });
 

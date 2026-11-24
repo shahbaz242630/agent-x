@@ -3,7 +3,7 @@
 // the sign-in page, choosing an organisation, or the shell; a session ending
 // mid-use goes back to sign-in, saying so; a failure says so with a retry.
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -119,7 +119,7 @@ describe('the console’s frame (6A1)', () => {
   it('opens the one organisation straight away, on approvals, with the tabs', async () => {
     signedIn([ORG_A]);
     const router = open('/');
-    expect(await screen.findByText('Staging-Test-Org-1')).toBeDefined();
+    expect(within(await screen.findByRole('complementary')).getByText('Staging-Test-Org-1')).toBeDefined();
     expect(screen.getByRole('heading', { name: 'Approvals' })).toBeDefined();
     expect(router.state.location.pathname).toBe('/approvals');
     expect(screen.getByRole('link', { name: 'Approvals' }).getAttribute('aria-current')).toBe('page');
@@ -142,7 +142,7 @@ describe('the console’s frame (6A1)', () => {
     localStorage.setItem('agentx.organization', ORG_B.id);
     signedIn([ORG_A, ORG_B]);
     open('/payments');
-    expect(await screen.findByText(/Glide Logistics LLC/)).toBeDefined();
+    expect(within(await screen.findByRole('complementary')).getByText(/Glide Logistics LLC/)).toBeDefined();
     expect(screen.getByRole('heading', { name: 'Payments' })).toBeDefined();
   });
 
@@ -168,7 +168,7 @@ describe('the console’s frame (6A1)', () => {
     };
     open('/');
     await userEvent.click(await screen.findByRole('button', { name: 'Try again' }, { timeout: 5000 }));
-    expect(await screen.findByText('Staging-Test-Org-1')).toBeDefined();
+    expect(within(await screen.findByRole('complementary')).getByText('Staging-Test-Org-1')).toBeDefined();
   });
 
   it('says the organisations couldn’t load when they can’t', async () => {
