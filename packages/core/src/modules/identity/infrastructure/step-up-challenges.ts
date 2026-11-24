@@ -73,9 +73,10 @@ import type { IdentityTables } from './tables.ts';
 export const STEP_UP_SECONDS = 600;
 
 /**
- * How long past its time a challenge waits for the sweep: five minutes, till its step-up's flow ends
- * (STEP_UP_FLOW_SECONDS), so a sign-in back late still reads `challenge_expired`, not one never asked (E7, S215: a
- * sweep at the API's start took it first). It can't be used meanwhile: every use asks for one still in time.
+ * How long past its time a challenge waits for the sweep: five minutes, so a sign-in back late still reads
+ * `challenge_expired`, not one never asked (E7, S215: a sweep at the API's start took it first). Its flow, begun
+ * later than the challenge opened, can outlast that: a return later still reads as never asked. It can't be used
+ * meanwhile: every use asks for one still in time.
  */
 export const STEP_UP_KEPT_SECONDS = 300;
 
