@@ -26,4 +26,7 @@ export const SECURITY_HEADERS = {
   'referrer-policy': 'same-origin',
   'cross-origin-opener-policy': 'same-origin',
   'cross-origin-resource-policy': 'same-origin',
+  // Before launch (partner S216: no one sees the pilot unless we decide): no search engine lists any page or follows
+  // a link from it. A page's own <meta name="robots"> says the same for a crawler that reads only the HTML.
+  'x-robots-tag': 'noindex, nofollow',
 } as const;

@@ -282,18 +282,16 @@ describe('the command bar beside other modals and keyboards (S216 review)', () =
   });
 });
 
-describe('the front page (CO11)', () => {
-  it('has one Sign in, plus the hero and closing ways in, each back to the page asked for', async () => {
+describe('before launch (partner S216)', () => {
+  it('shows a visitor only the private way in, nothing of the product, back to the page asked for', async () => {
     signedOut();
     open('/payments');
-    expect(await screen.findByRole('heading', { level: 1, name: /Your agents pay suppliers/ })).toBeDefined();
-    expect(screen.getAllByRole('button', { name: 'Sign in' })).toHaveLength(1);
-    await userEvent.click(screen.getByRole('button', { name: /Sign in to the console/ }));
-    await userEvent.click(screen.getByRole('button', { name: /Go to the console/ }));
-    expect(vi.mocked(goTo).mock.calls.every(([to]) => to.startsWith('/v1/auth/sign-in?returnTo='))).toBe(true);
-    expect(goTo).toHaveBeenCalledTimes(2);
-    expect(screen.getByText(/accounts are by invitation/)).toBeDefined();
-    expect(screen.queryByRole('status')).toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Agent X' })).toBeDefined();
+    expect(screen.getByText(/private pilot/)).toBeDefined();
+    expect(screen.queryByText(/Your agents pay suppliers/)).toBeNull();
+    expect(screen.queryByRole('navigation')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(goTo).toHaveBeenCalledWith(expect.stringMatching(/^\/v1\/auth\/sign-in\?returnTo=/));
   });
 
   it('says once that the person signed out, after a sign-out', async () => {
@@ -309,17 +307,15 @@ describe('the front page (CO11)', () => {
 
   it('goes on without the note where the tab keeps nothing', async () => {
     signedOut();
-    const stored = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('blocked');
     });
-    const read = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('blocked');
     });
     markSignedOut();
     open('/');
     await screen.findByRole('button', { name: 'Sign in' });
     expect(screen.queryByText(/You've signed out/)).toBeNull();
-    stored.mockRestore();
-    read.mockRestore();
   });
 });
