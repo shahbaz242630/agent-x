@@ -642,15 +642,29 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     await withTenant(app, ORG, (tx) => outbox.add(tx, [resetLinkTo(OTHER_CONTACT), resetLinkTo(CONTACT)]));
     const { sent, service } = notifier();
 
-    await sender(
+    const { capture, run } = sender(
       service,
       addressBook(),
       audience(),
       contactAddresses(),
       resetLinks((_reset, contact) => (contact === CONTACT ? new Error('tampered') : undefined)),
-    ).run.run();
+    );
+    await run.run();
 
     expect(sent).toEqual([]);
+    // A reset ended before its email went is an expected end: info, not a warn (E7); an unreadable link still warns.
+    const notified = capture.lines().filter(({ event }) => String(event).startsWith('notification.'));
+    expect(notified.filter(({ event }) => event === 'notification.skipped')).toEqual([
+      expect.objectContaining({
+        level: 'info',
+        kind: 'factor_reset_link',
+        reason: 'reset_closed',
+        outcome: 'given_up',
+      }),
+    ]);
+    expect(notified.filter(({ event }) => event === 'notification.failed')).toEqual([
+      expect.objectContaining({ level: 'warn', failure: 'link_unavailable' }),
+    ]);
     const outboxRows = await app
       .selectFrom('notifications.outbox')
       .select(['recipient_contact_id', 'sent_at', 'given_up_at', 'last_failure'])
