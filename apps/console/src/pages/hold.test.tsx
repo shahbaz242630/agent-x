@@ -163,6 +163,7 @@ describe('the hold’s banner and page (6D4a)', () => {
   it.each([
     ['records failing their check', refused(503, 'INTEGRITY_FAILED'), /still fail Agent X's integrity check/],
     ['a role taken away', refused(403, 'FORBIDDEN'), /Only an admin can see/],
+    ['an admin in the 7 days after a sign-in change', refused(403, 'SECOND_FACTOR_REMOVED'), /in the last 7 days/],
     ['no answer', { status: 500 }, /Try again/],
   ])('says a hold that can’t be read for %s', { timeout: 10_000 }, async (_what, given, said) => {
     as('admin');

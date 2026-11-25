@@ -175,6 +175,20 @@ describe('the members (6D4b)', () => {
     await press('Try again');
     expect(await screen.findByRole('link', { name: 'Approver' })).toBeDefined();
   }, 15_000);
+
+  it.each([
+    ['registered contacts', 'GET /v1/registered-contacts', '/more/contacts'],
+    ['second-factor resets', 'GET /v1/factor-resets', '/more/factor-resets'],
+  ])(
+    'says an admin in the 7 days after a sign-in change why the %s are shut, with no retry (S217)',
+    async (_what, read, page) => {
+      as('admin');
+      answer(read, refused(403, 'SECOND_FACTOR_REMOVED'));
+      open(page);
+      expect(await screen.findByText(/in the last 7 days, so until then you can't do this/)).toBeDefined();
+      expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    },
+  );
 });
 
 describe('an admin sees their members by name (S212 F3, decision 27)', () => {

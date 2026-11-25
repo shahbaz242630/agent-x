@@ -73,8 +73,8 @@ describe('6A1 the console in a real browser, served by the API', () => {
     const headers = response?.headers() ?? {};
     expect(headers['content-security-policy']).toContain("script-src 'self'");
     expect(headers['cache-control']).toBe('no-store');
-    // Before launch (launch.ts, partner S216): the private way in, its heading the name alone.
-    await page.getByRole('heading', { level: 1, name: 'Agent X' }).waitFor({ timeout: 15_000 });
+    // Before launch (launch.ts, partner S216): the private way in, its heading "Private pilot" (CO11d).
+    await page.getByRole('heading', { level: 1, name: 'Private pilot' }).waitFor({ timeout: 15_000 });
     expect(headers['x-robots-tag']).toBe('noindex, nofollow');
     expect(assets.length).toBeGreaterThan(0);
     for (const asset of assets) expect(asset.cacheControl, asset.url).toBe('public, max-age=31536000, immutable');

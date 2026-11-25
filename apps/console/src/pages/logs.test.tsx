@@ -189,6 +189,28 @@ describe('reaching the logs (6C2)', () => {
     expect(await screen.findByText(/Only an admin can see this organisation's logs/)).toBeDefined();
     expect(sent.filter((one) => one.path.includes('-log'))).toHaveLength(0);
   });
+
+  it('says an admin in the 7 days after a sign-in change why the log is shut, in words, never by its code (S217)', async () => {
+    signedIn();
+    answer('GET /v1/audit-log', { status: 403, body: { error: { code: 'SECOND_FACTOR_REMOVED' } } });
+    open('/more/audit-log');
+    expect(await screen.findByText(/in the last 7 days, so until then you can't do this/)).toBeDefined();
+    expect(screen.queryByText(/SECOND_FACTOR_REMOVED/)).toBeNull();
+  });
+
+  it('says it for the access log and its long ranges too, with no retry that could never pass (S217)', async () => {
+    signedIn();
+    answer('GET /v1/access-log', { status: 403, body: { error: { code: 'SECOND_FACTOR_REMOVED' } } });
+    answer('GET /v1/access-log/background-exports', {
+      status: 403,
+      body: { error: { code: 'SECOND_FACTOR_REMOVED' } },
+    });
+    open('/more/access-log');
+    await waitFor(() => {
+      expect(screen.getAllByText(/in the last 7 days, so until then you can't do this/)).toHaveLength(2);
+    });
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
 });
 
 describe('the audit log (6C2, CO7)', () => {

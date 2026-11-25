@@ -1,9 +1,13 @@
 import { Link } from '@tanstack/react-router';
 import type { ReactNode } from 'react';
 
-import { isIntegrityFailed } from '../api.ts';
+import { isIntegrityFailed, isRefusal } from '../api.ts';
+import { RESTRICTED } from '../refusals.ts';
 import { t } from '../text.ts';
 import { Panel } from './panel.tsx';
+
+/** The 7-day restriction after a sign-in method changes (B6-3d). */
+export const isRestricted = (error: unknown): boolean => isRefusal(error) && error.code === RESTRICTED;
 
 /** A page, or a part of one, still loading. */
 export function Loading() {
@@ -26,8 +30,15 @@ export function Failed({ onRetry }: { readonly onRetry: () => void }) {
   );
 }
 
-/** A part of a page that couldn't load, inside the shell: said in place, with a retry. */
-export function Retry({ onRetry }: { readonly onRetry: () => void }) {
+/** A part of a page that couldn't load, inside the shell: said in place, with a retry (none for the 7-day restriction: it can't pass on a retry). */
+export function Retry({ onRetry, error }: { readonly onRetry: () => void; readonly error?: unknown }) {
+  if (isRestricted(error)) {
+    return (
+      <p className="notice" role="alert">
+        {t('error.restricted')}
+      </p>
+    );
+  }
   return (
     <div className="notice" role="alert">
       <p>{t('error.body')}</p>

@@ -186,8 +186,8 @@ describe('the approvals lists (6B1)', () => {
 
     await userEvent.click(screen.getByRole('link', { name: 'All requests' }));
 
-    const row = await screen.findByRole('link', { name: /With the bank/ });
-    expect(row.textContent).toContain(`Phase 4 demo agent ${AGENT} · With the bank ·`);
+    const row = await screen.findByRole('link', { name: /Handed to the bank/ });
+    expect(row.textContent).toContain(`Phase 4 demo agent ${AGENT} · Handed to the bank ·`);
     expect(screen.getByRole('link', { name: 'All requests' }).getAttribute('aria-current')).toBe('page');
   });
 
@@ -308,7 +308,7 @@ describe('one request’s page (6B1)', () => {
     open(`/approvals/${ID}`);
 
     // The request's own status stays as it is; the payment row says it was paid.
-    expect(await screen.findByText('With the bank')).toBeDefined();
+    expect(await screen.findByText('Handed to the bank')).toBeDefined();
     expect(screen.getByText('Payment')).toBeDefined();
     expect(screen.getByText('Paid', { exact: false })).toBeDefined();
     const link = screen.getByRole('link', { name: 'See the payment' });
@@ -548,6 +548,7 @@ describe('one request’s page (6B1)', () => {
     ['RECHECK_REQUIRED', 409, /approved only checked again/],
     ['ORG_FROZEN', 409, /This organisation is frozen, so nothing can be approved/],
     ['SOMETHING_NEW', 409, /didn't make this change \(reason SOMETHING_NEW\)/],
+    ['SECOND_FACTOR_REMOVED', 403, /in the last 7 days, so until then you can't do this/],
     ['UNREADABLE', 503, /couldn't be reached/],
   ])('says a refused or failed approve plainly: %s', async (code, status, words) => {
     signedIn();

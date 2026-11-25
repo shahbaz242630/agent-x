@@ -467,7 +467,7 @@ export function PolicyPage({ target }: { readonly target: Target }) {
   const { names } = useSupplierNames(organization.id);
   const back =
     target.kind === 'organization' ? (
-      <Link to="/more" className="back">
+      <Link to="/more" className="back to-more">
         {t('policies.back')}
       </Link>
     ) : (

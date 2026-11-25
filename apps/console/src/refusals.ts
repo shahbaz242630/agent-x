@@ -7,6 +7,9 @@ import { isRefusal } from './api.ts';
 import { StepUpStorageBlocked } from './step-up.ts';
 import { t, type TextKey } from './text.ts';
 
+/** The API's code for the 7 days after a sign-in method is removed or a passkey added (B6-3d). */
+export const RESTRICTED = 'SECOND_FACTOR_REMOVED';
+
 export function refusalText(
   error: unknown,
   known: ReadonlySet<string>,
@@ -33,7 +36,8 @@ export function refusalText(
   if (!isRefusal(error)) return t('request.failed');
   const own = ownWords[error.code];
   if (own !== undefined) return t(own);
-  return known.has(error.code)
-    ? t(`${prefix}.${error.code}` as TextKey)
-    : t('request.refused.other', { code: error.code });
+  if (known.has(error.code)) return t(`${prefix}.${error.code}` as TextKey);
+  // The 7-day restriction after a sign-in method changes refuses reads too: said in words, never by its code.
+  if (error.code === RESTRICTED) return t('error.restricted');
+  return t('request.refused.other', { code: error.code });
 }
