@@ -324,8 +324,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // directly could fake.
   const trust = proxyTrust(config.http.trustedProxies);
   const securityEvents = options.securityEvents ?? NO_SECURITY_EVENTS;
-  const countRequest = createCounter(trust, (ip) => {
-    securityEvents.note({ kind: 'rate_limited', reason: 'per_address', ip });
+  // This copy's share of the address's limit, as registered below (registerRateLimit).
+  const addressShare = shareOfCopies(config.http.rateLimitPerMinute, config.http.webCopies);
+  const countRequest = createCounter(trust, addressShare, (ip, reason) => {
+    securityEvents.note({ kind: 'rate_limited', reason, ip });
   });
 
   /** A failure's lines, once its answer is decided: the error path's own, and an MCP tool's whose twin failed. */

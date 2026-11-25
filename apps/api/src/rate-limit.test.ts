@@ -113,6 +113,7 @@ describe('the callers a counter remembers', () => {
   const requestFrom = (app: FastifyInstance, address: string, orgId: string) =>
     ({
       server: app,
+      headers: {},
       agent: { orgId },
       routeOptions: { config: {} },
       raw: { headers: {}, socket: { remoteAddress: address } },
@@ -130,7 +131,7 @@ describe('the callers a counter remembers', () => {
     const app = Fastify();
     const trust = proxyTrust([]);
     await registerRateLimit(app, 1, trust);
-    const byAddress = createCounter(trust, () => undefined);
+    const byAddress = createCounter(trust, 1, () => undefined);
     const byOrganisation = createOrganisationCounter(app, 1, trust, () => undefined);
     const first = requestFrom(app, '198.51.100.1', 'org-first');
     expect(await refused(byAddress, first)).toBe(false);

@@ -154,15 +154,48 @@ function counterOf(
 }
 
 /**
- * The hook that counts each request against its address's limit and sets the
- * limit headers. Over the limit, it tells `limited` the client's address, then
- * throws a 429 error, which the error handler answers with `RATE_LIMITED`.
+ * The part of an address's limit its agents can never use (S219): a fifth, at least one. An agent on its people's own
+ * laptop or office network shares their address; flooding, it used the whole limit and refused their Suspend press
+ * (S219's timed kill-switch test on staging). So the console and the brakes always keep this much.
  */
-export function createCounter(trust: ProxyTrust, limited: (ip: string | undefined) => void): CountRequest {
+export const reservedForPeople = (perMinute: number): number => Math.max(1, Math.ceil(perMinute / 5));
+
+/**
+ * An agent's request as the access hook tells it (access.ts): any Authorization header, or none on the MCP endpoint,
+ * whose only callers are agents' tools.
+ */
+const fromAgentSide = (request: FastifyRequest): boolean =>
+  request.headers.authorization !== undefined || request.routeOptions.config.toolCalls === true;
+
+/**
+ * The hook that counts each request against its address's limit and sets the
+ * limit headers. Over the limit, it tells `limited` the client's address and
+ * which limit, then throws a 429 error, which the error handler answers with `RATE_LIMITED`.
+ *
+ * An agent's request first meets the agents' share of the address's limit (`perMinute` less `reservedForPeople`),
+ * keyed the same, and only one it lets through goes on to the address's own count. So agents from one address count
+ * at most their share there, and its people always have the rest; the address's total stays `perMinute`, so its
+ * request lines still can't fill the log (rateLimitProblems). `perMinute` is this copy's share, as registered.
+ */
+export function createCounter(
+  trust: ProxyTrust,
+  perMinute: number,
+  limited: (ip: string | undefined, reason: 'per_address' | 'per_address_agents') => void,
+): CountRequest {
+  const agentsShare = Math.max(1, perMinute - reservedForPeople(perMinute));
+  // Made on first use: the plugin is registered after this hook is made (server.ts). One counter, so one count.
+  let agents: Limiter | undefined;
   return async (request, reply) => {
+    if (fromAgentSide(request)) {
+      agents ??= counterOf(request.server, agentsShare, (counted) => clientKey(rawClientIp(counted, trust)));
+      if (await overLimit(agents, request, reply, 'when-refused')) {
+        limited(rawClientIp(request, trust), 'per_address_agents');
+        throw new RateLimited('rate limit exceeded');
+      }
+    }
     // The address's limit is the plugin's own, set at registration.
     if (await overLimit(request.server.createRateLimit(), request, reply, 'always')) {
-      limited(rawClientIp(request, trust));
+      limited(rawClientIp(request, trust), 'per_address');
       throw new RateLimited('rate limit exceeded');
     }
   };
