@@ -286,8 +286,9 @@ describe('before launch (partner S216)', () => {
   it('shows a visitor only the private way in, nothing of the product, back to the page asked for', async () => {
     signedOut();
     open('/payments');
-    expect(await screen.findByRole('heading', { level: 1, name: 'Agent X' })).toBeDefined();
-    expect(screen.getByText(/private pilot/)).toBeDefined();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Private pilot' })).toBeDefined();
+    expect(screen.getAllByText('Agent X')).toHaveLength(1);
+    expect(screen.getByText(/invitation only/)).toBeDefined();
     expect(screen.queryByText(/Your agents pay suppliers/)).toBeNull();
     expect(screen.queryByRole('navigation')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Sign in' }));
