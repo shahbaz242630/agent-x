@@ -185,7 +185,7 @@ describe('the members (6D4b)', () => {
       as('admin');
       answer(read, refused(403, 'SECOND_FACTOR_REMOVED'));
       open(page);
-      expect(await screen.findByText(/in the last 7 days, so until then you can't see or change this/)).toBeDefined();
+      expect(await screen.findByText(/in the last 7 days, so until then you can't do this/)).toBeDefined();
       expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
     },
   );

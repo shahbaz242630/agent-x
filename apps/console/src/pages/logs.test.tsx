@@ -194,8 +194,22 @@ describe('reaching the logs (6C2)', () => {
     signedIn();
     answer('GET /v1/audit-log', { status: 403, body: { error: { code: 'SECOND_FACTOR_REMOVED' } } });
     open('/more/audit-log');
-    expect(await screen.findByText(/in the last 7 days, so until then you can't see or change this/)).toBeDefined();
+    expect(await screen.findByText(/in the last 7 days, so until then you can't do this/)).toBeDefined();
     expect(screen.queryByText(/SECOND_FACTOR_REMOVED/)).toBeNull();
+  });
+
+  it('says it for the access log and its long ranges too, with no retry that could never pass (S217)', async () => {
+    signedIn();
+    answer('GET /v1/access-log', { status: 403, body: { error: { code: 'SECOND_FACTOR_REMOVED' } } });
+    answer('GET /v1/access-log/background-exports', {
+      status: 403,
+      body: { error: { code: 'SECOND_FACTOR_REMOVED' } },
+    });
+    open('/more/access-log');
+    await waitFor(() => {
+      expect(screen.getAllByText(/in the last 7 days, so until then you can't do this/)).toHaveLength(2);
+    });
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
   });
 });
 

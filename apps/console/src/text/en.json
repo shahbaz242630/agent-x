@@ -96,7 +96,7 @@
   "error.title": "Something went wrong",
   "error.body": "Agent X couldn't load this page. Try again in a moment.",
   "error.retry": "Try again",
-  "error.restricted": "A sign-in method of yours was removed, or a passkey added beside one you had, in the last 7 days, so until then you can't see or change this. Nothing was changed. Another admin can.",
+  "error.restricted": "A sign-in method of yours was removed, or a passkey added beside one you had, in the last 7 days, so until then you can't do this. Nothing was changed. Someone else in your organisation with the same role can.",
   "notFound.title": "Page not found",
   "notFound.home": "Go to approvals",
   "confirm.choose": "Choose what happens. Nothing is chosen for you.",

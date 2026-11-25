@@ -548,6 +548,7 @@ describe('one request’s page (6B1)', () => {
     ['RECHECK_REQUIRED', 409, /approved only checked again/],
     ['ORG_FROZEN', 409, /This organisation is frozen, so nothing can be approved/],
     ['SOMETHING_NEW', 409, /didn't make this change \(reason SOMETHING_NEW\)/],
+    ['SECOND_FACTOR_REMOVED', 403, /in the last 7 days, so until then you can't do this/],
     ['UNREADABLE', 503, /couldn't be reached/],
   ])('says a refused or failed approve plainly: %s', async (code, status, words) => {
     signedIn();

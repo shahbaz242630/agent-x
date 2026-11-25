@@ -161,7 +161,7 @@ function Background({ filters, format }: { readonly filters: Filters; readonly f
   }
   let list;
   if (downloads.isError) {
-    list = <Retry onRetry={() => void downloads.refetch()} />;
+    list = <Retry error={downloads.error} onRetry={() => void downloads.refetch()} />;
   } else if (downloads.isPending) {
     list = <Loading />;
   } else if (downloads.data.downloads.length === 0) {
