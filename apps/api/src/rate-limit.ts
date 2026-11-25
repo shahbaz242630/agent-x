@@ -161,21 +161,33 @@ function counterOf(
 export const reservedForPeople = (perMinute: number): number => Math.max(1, Math.ceil(perMinute / 5));
 
 /**
- * An agent's request as the access hook tells it (access.ts): any Authorization header, or none on the MCP endpoint,
- * whose only callers are agents' tools.
+ * An agent's tools' request, as the access hook tells it (access.ts): any Authorization header; none on the MCP
+ * endpoint (`toolCalls`); and an OAuth client's own calls, keyless by nature: discovery (`/.well-known/…`) and the
+ * token, revoke, register and device endpoints (`oauthClient`). Not `/v1/oauth/authorize`: that is the person's browser.
  */
-const fromAgentSide = (request: FastifyRequest): boolean =>
-  request.headers.authorization !== undefined || request.routeOptions.config.toolCalls === true;
+const fromAgentSide = (request: FastifyRequest): boolean => {
+  const { config, url } = request.routeOptions;
+  return (
+    request.headers.authorization !== undefined ||
+    config.toolCalls === true ||
+    config.oauthClient === true ||
+    (config.oauth === true && url?.startsWith('/.well-known/') === true)
+  );
+};
 
 /**
  * The hook that counts each request against its address's limit and sets the
  * limit headers. Over the limit, it tells `limited` the client's address and
  * which limit, then throws a 429 error, which the error handler answers with `RATE_LIMITED`.
  *
- * An agent's request first meets the agents' share of the address's limit (`perMinute` less `reservedForPeople`),
- * keyed the same, and only one it lets through goes on to the address's own count. So agents from one address count
- * at most their share there, and its people always have the rest; the address's total stays `perMinute`, so its
- * request lines still can't fill the log (rateLimitProblems). `perMinute` is this copy's share, as registered.
+ * An agent's request is refused, uncounted, once the address's own count this minute has reached the agents' share
+ * (`perMinute` less `reservedForPeople`), read from the same count, so the same window: agents can never take the
+ * last fifth, and its people (the console, the brakes) always have it (S219). A second count of agents' own would run
+ * its own window, and agents past it near one window's end got a second share in the address's next (S219 review).
+ * The read and the count are two steps, so agents sending at once can pass the share by a few, never the address's
+ * limit. The address's total stays `perMinute`, so its request lines still can't fill the log (rateLimitProblems).
+ * `perMinute` is this copy's share, as registered. A rogue agent sending keyless requests to people's routes counts as
+ * people: no split by headers can tell, so this holds against an agent flooding by mistake, not one aimed at the brakes.
  */
 export function createCounter(
   trust: ProxyTrust,
@@ -183,18 +195,23 @@ export function createCounter(
   limited: (ip: string | undefined, reason: 'per_address' | 'per_address_agents') => void,
 ): CountRequest {
   const agentsShare = Math.max(1, perMinute - reservedForPeople(perMinute));
-  // Made on first use: the plugin is registered after this hook is made (server.ts). One counter, so one count.
-  let agents: Limiter | undefined;
   return async (request, reply) => {
+    // The address's limit is the plugin's own, set at registration.
+    const address = request.server.createRateLimit();
     if (fromAgentSide(request)) {
-      agents ??= counterOf(request.server, agentsShare, (counted) => clientKey(rawClientIp(counted, trust)));
-      if (await overLimit(agents, request, reply, 'when-refused')) {
+      const seen = await address(request, { increment: false });
+      if (!seen.isAllowed && seen.max - seen.remaining >= agentsShare) {
+        void reply.headers({
+          'x-ratelimit-limit': agentsShare,
+          'x-ratelimit-remaining': 0,
+          'x-ratelimit-reset': seen.ttlInSeconds,
+          'retry-after': seen.ttlInSeconds,
+        });
         limited(rawClientIp(request, trust), 'per_address_agents');
         throw new RateLimited('rate limit exceeded');
       }
     }
-    // The address's limit is the plugin's own, set at registration.
-    if (await overLimit(request.server.createRateLimit(), request, reply, 'always')) {
+    if (await overLimit(address, request, reply, 'always')) {
       limited(rawClientIp(request, trust), 'per_address');
       throw new RateLimited('rate limit exceeded');
     }
