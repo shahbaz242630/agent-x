@@ -292,9 +292,10 @@ describe(`SEC-AG-01 V7 (PL-67) an outsider holding only a key's ID, over HTTP (P
       for (let request = 0; request < 8; request += 1) {
         statuses.push((await sent(limited, agentKeyText(ids.next(), wrongSecret), OUTSIDER)).status);
       }
-      expect(statuses).toEqual([401, 401, 401, 401, 401, 429, 429, 429]);
+      // Keys sent are agents' traffic: four of the address's five, its last fifth kept for its people (S219).
+      expect(statuses).toEqual([401, 401, 401, 401, 429, 429, 429, 429]);
       // Past its address's limit, no key is looked up: the directory isn't read for the flood.
-      expect(checked.count).toBe(5);
+      expect(checked.count).toBe(4);
       expect((await sent(limited, agent.text)).status).toBe(200);
     } finally {
       await limited.close();
