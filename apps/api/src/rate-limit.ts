@@ -158,7 +158,7 @@ function counterOf(
  * laptop or office network shares their address; flooding, it used the whole limit and refused their Suspend press
  * (S219's timed kill-switch test on staging). So the console and the brakes always keep this much.
  */
-export const reservedForPeople = (perMinute: number): number => Math.max(1, Math.ceil(perMinute / 5));
+const reservedForPeople = (perMinute: number): number => Math.max(1, Math.ceil(perMinute / 5));
 
 /**
  * An agent's tools' request, as the access hook tells it (access.ts): any Authorization header; none on the MCP
