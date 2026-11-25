@@ -109,6 +109,32 @@ describe('the panel', () => {
     expect(shownText()).toContain('AGENTX_KEY environment variable');
   });
 
+  it('says how each tool takes its key: VS Code asks, PowerShell writes $env, no button for a key', async () => {
+    render(<ConnectAgent agent={AGENT} />);
+    await userEvent.click(screen.getByRole('radio', { name: /With a key/ }));
+    expect(shownText()).toContain('In PowerShell, write $env:AGENTX_KEY');
+    await userEvent.click(tab('Codex'));
+    expect(shownText()).not.toContain('PowerShell');
+    await userEvent.click(tab('VS Code'));
+    expect(shownText()).toContain('VS Code asks for this agent');
+    expect(shownText()).not.toContain('Add to VS Code');
+    await userEvent.click(tab('Cursor'));
+    expect(shownText()).toContain("Put these settings in Cursor's mcp.json.");
+    expect(shownText()).not.toContain('Add to Cursor');
+  });
+
+  it('clears "Copied." when another line is shown', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: () => Promise.resolve() },
+      configurable: true,
+    });
+    render(<ConnectAgent agent={AGENT} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Copy the Claude Code command' }));
+    expect(await screen.findByRole('status')).toBeTruthy();
+    await userEvent.click(tab('Codex'));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
   it('shows every tab with no key-shaped text, in either form', async () => {
     render(<ConnectAgent agent={AGENT} />);
     for (const way of [/Sign in with Agent X/, /With a key/]) {

@@ -1543,5 +1543,9 @@
   "connectAgent.web.claude": "Claude (web, desktop or phone): Customize, Connectors, +, Add custom connector, and paste the address. On a Team or Enterprise plan an owner adds it in Organization settings, Connectors.",
   "connectAgent.web.chatgpt": "ChatGPT: Plugins, +, Add custom MCP server, paste the address and create it (your workspace may need an admin to allow it).",
   "connectAgent.web.noKey": "These apps sign in with Agent X only: no key is needed or used.",
-  "connectAgent.after": "Once connected, the tool shows under Connected apps below, where it can be revoked. It can only ask for payments; a person or your policy still decides each one."
+  "connectAgent.after": "Once connected, the tool shows under Connected apps below, where it can be revoked. It can only ask for payments; a person or your policy still decides each one.",
+  "connectAgent.stepKey.cursor": "Put these settings in Cursor's mcp.json.",
+  "connectAgent.stepKey.vscode": "Put these settings in your mcp.json.",
+  "connectAgent.keyStep.vscode": "VS Code asks for this agent's key the first time it starts agentx and keeps it in its own secret store. A key is shown once, when it is made or rotated, above under Keys.",
+  "connectAgent.keyShell": "The line is for bash or zsh. In PowerShell, write $env:{variable} in place of ${variable}."
 }

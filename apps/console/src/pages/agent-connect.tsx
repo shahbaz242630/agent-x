@@ -15,6 +15,9 @@ import { t } from '../text.ts';
 
 type Copied = 'not yet' | 'copied' | 'failed';
 
+/** The tools whose key line has `$AGENTX_KEY` filled in by the shell (Codex reads the variable itself). */
+const SHELL_FILLED: readonly Client[] = ['claude-code', 'gemini', 'other'];
+
 /** A line to copy, with its Copy button: said copied only once the clipboard has it, and said when it can't. */
 function Copyable({ text, label }: { readonly text: string; readonly label: string }) {
   const [copied, setCopied] = useState<Copied>('not yet');
@@ -64,11 +67,12 @@ function ClientPanel({
 }) {
   const line = command(client, way, url);
   const keyed = way === 'key';
+  const editor = client === 'cursor' || client === 'vscode';
   return (
     <div className="stack">
       {client === 'web' ? (
         <>
-          <Copyable text={url} label={t('connectAgent.address')} />
+          <Copyable key={url} text={url} label={t('connectAgent.address')} />
           <ol className="steps">
             <li>{t('connectAgent.web.claude')}</li>
             <li>{t('connectAgent.web.chatgpt')}</li>
@@ -78,18 +82,27 @@ function ClientPanel({
         </>
       ) : (
         <>
-          {(client === 'cursor' || client === 'vscode') && !keyed && (
+          {editor && !keyed && (
             <p>
               <a className="button primary" href={installLink(client, url)}>
                 {t(`connectAgent.install.${client}`)}
               </a>
             </p>
           )}
-          {line !== undefined && <Copyable text={line} label={t(`connectAgent.line.${client}`)} />}
+          {line !== undefined && <Copyable key={line} text={line} label={t(`connectAgent.line.${client}`)} />}
           <ol className="steps">
-            <li>{t(`connectAgent.step.${client}`)}</li>
+            <li>{t(keyed && editor ? `connectAgent.stepKey.${client}` : `connectAgent.step.${client}`)}</li>
             {keyed ? (
-              <li>{t('connectAgent.keyStep', { variable: KEY_VARIABLE })}</li>
+              <>
+                {/* VS Code asks for the key itself (its settings' prompt); the others read it from the environment. */}
+                <li>
+                  {t(client === 'vscode' ? 'connectAgent.keyStep.vscode' : 'connectAgent.keyStep', {
+                    variable: KEY_VARIABLE,
+                  })}
+                </li>
+                {/* A line the shell fills in: PowerShell names an environment variable its own way. */}
+                {SHELL_FILLED.includes(client) && <li>{t('connectAgent.keyShell', { variable: KEY_VARIABLE })}</li>}
+              </>
             ) : (
               <>
                 <li>{t(`connectAgent.signIn.${client}`)}</li>

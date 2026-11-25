@@ -3,7 +3,8 @@
 // which serves the API too (`/v1/mcp`), so staging's page shows staging's
 // address and production's its own. No snippet ever holds a key: the sign-in
 // form has none (the person signs in to Agent X and picks the agent), and the
-// key form names the `AGENTX_KEY` environment variable, never a key itself.
+// key form names the `AGENTX_KEY` environment variable (VS Code's asks for
+// the key and keeps it in its secret store), never a key itself.
 // Command shapes as each tool's own docs gave them on 25 Nov 2026 (MCP-Guide §3);
 // "other" is Neon's add-mcp, which writes the config of each tool it finds.
 
