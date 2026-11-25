@@ -184,8 +184,10 @@ const fromAgentSide = (request: FastifyRequest): boolean => {
  * (`perMinute` less `reservedForPeople`), read from the same count, so the same window: agents can never take the
  * last fifth, and its people (the console, the brakes) always have it (S219). A second count of agents' own would run
  * its own window, and agents past it near one window's end got a second share in the address's next (S219 review).
- * The read and the count are two steps, so agents sending at once can pass the share by a few, never the address's
- * limit. The address's total stays `perMinute`, so its request lines still can't fill the log (rateLimitProblems).
+ * The read and the count are two awaited steps, and requests pipelined on one connection start in the same tick: so
+ * each address's agents' requests read but not yet counted are held here (`inFlight`, synchronous) and added to what
+ * is read; without it one pipelined burst took the whole limit (S219 review). Held twice for a moment, they can only
+ * refuse a little early. The address's total stays `perMinute`, so its request lines still can't fill the log (rateLimitProblems).
  * `perMinute` is this copy's share, as registered. A rogue agent sending keyless requests to people's routes counts as
  * people: no split by headers can tell, so this holds against an agent flooding by mistake, not one aimed at the brakes.
  */
@@ -195,12 +197,27 @@ export function createCounter(
   limited: (ip: string | undefined, reason: 'per_address' | 'per_address_agents') => void,
 ): CountRequest {
   const agentsShare = Math.max(1, perMinute - reservedForPeople(perMinute));
+  /** Per address key: its agents' requests read and not yet counted. An entry lives only while one is. */
+  const inFlight = new Map<string, number>();
+  const overAddress = async (address: Limiter, request: FastifyRequest, reply: FastifyReply) => {
+    if (await overLimit(address, request, reply, 'always')) {
+      limited(rawClientIp(request, trust), 'per_address');
+      throw new RateLimited('rate limit exceeded');
+    }
+  };
   return async (request, reply) => {
     // The address's limit is the plugin's own, set at registration.
     const address = request.server.createRateLimit();
-    if (fromAgentSide(request)) {
+    if (!fromAgentSide(request)) {
+      await overAddress(address, request, reply);
+      return;
+    }
+    const key = clientKey(rawClientIp(request, trust));
+    const others = inFlight.get(key) ?? 0;
+    inFlight.set(key, others + 1);
+    try {
       const seen = await address(request, { increment: false });
-      if (!seen.isAllowed && seen.max - seen.remaining >= agentsShare) {
+      if (!seen.isAllowed && seen.max - seen.remaining + others >= agentsShare) {
         void reply.headers({
           'x-ratelimit-limit': agentsShare,
           'x-ratelimit-remaining': 0,
@@ -210,10 +227,11 @@ export function createCounter(
         limited(rawClientIp(request, trust), 'per_address_agents');
         throw new RateLimited('rate limit exceeded');
       }
-    }
-    if (await overLimit(address, request, reply, 'always')) {
-      limited(rawClientIp(request, trust), 'per_address');
-      throw new RateLimited('rate limit exceeded');
+      await overAddress(address, request, reply);
+    } finally {
+      const left = (inFlight.get(key) ?? 1) - 1;
+      if (left > 0) inFlight.set(key, left);
+      else inFlight.delete(key);
     }
   };
 }

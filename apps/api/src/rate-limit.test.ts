@@ -212,4 +212,26 @@ describe("S219 an address's agents never take its people's fifth, across windows
     expect(await ask('/v1/oauth/authorize')).toBe(429);
     await app.close();
   });
+  it('keeps the people their fifth when agents send all at once (requests pipelined on one connection)', async () => {
+    const app = Fastify();
+    const trust = proxyTrust([]);
+    await registerRateLimit(app, 10, trust);
+    app.addHook(
+      'onRequest',
+      createCounter(trust, 10, () => undefined),
+    );
+    app.get('/p', () => 'ok');
+    await app.ready();
+    const from = { url: '/p', remoteAddress: '198.51.100.1' };
+    const burst = await Promise.all(
+      Array.from({ length: 30 }, () => app.inject({ ...from, headers: { authorization: 'Bearer x' } })),
+    );
+    const allowed = burst.filter((answer) => answer.statusCode === 200).length;
+
+    expect(allowed).toBeGreaterThan(0);
+    expect(allowed).toBeLessThanOrEqual(8);
+    expect((await app.inject(from)).statusCode).toBe(200);
+    expect((await app.inject(from)).statusCode).toBe(200);
+    await app.close();
+  });
 });
