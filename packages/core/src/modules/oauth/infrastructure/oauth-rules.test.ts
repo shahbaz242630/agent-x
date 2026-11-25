@@ -363,6 +363,31 @@ describe('SEC-OAUTH-09 a client named by its metadata document (6E3c, CIMD)', ()
     });
   });
 
+  it('takes Claude Code’s own document, as published (read 25 Nov 2026), trusted by Claude’s /oauth/ prefix (S218)', () => {
+    const CODE_ID = 'https://claude.ai/oauth/claude-code-client-metadata';
+    const published = {
+      client_id: CODE_ID,
+      client_name: 'Claude Code',
+      client_uri: 'https://claude.ai',
+      redirect_uris: ['http://localhost/callback', 'http://127.0.0.1/callback'],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',
+    };
+    expect(isTrustedMetadataClientId(CODE_ID, ['https://claude.ai/oauth/'])).toBe(true);
+    expect(isTrustedMetadataClientId(CLIENT_ID, ['https://claude.ai/oauth/'])).toBe(true);
+    expect(isTrustedMetadataClientId('https://claude.ai/artifact/x', ['https://claude.ai/oauth/'])).toBe(false);
+    expect(checkClientMetadataDocument(CODE_ID, published)).toEqual({
+      outcome: 'valid',
+      document: {
+        clientId: CODE_ID,
+        name: 'Claude Code',
+        redirectUris: ['http://localhost/callback', 'http://127.0.0.1/callback'],
+        grantTypes: ['authorization_code', 'refresh_token'],
+      },
+    });
+  });
+
   it.each([
     ['not an object', [], 'not_an_object'],
     ['another client’s ID', { ...DOCUMENT, client_id: 'https://claude.ai/other' }, 'client_id_mismatch'],

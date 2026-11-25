@@ -57,7 +57,7 @@ describe('the MCP clients list (AG5)', () => {
     // Its exact address (claude.ai serves people's own content too, so never the whole origin), and no client behind
     // Cloudflare, whose shared ranges would open the way out to every site there: ChatGPT registers (DCR) until a
     // name-aware way out exists (AZ22).
-    expect(CLIENTS.map((each) => each.metadata)).toEqual(['https://claude.ai/oauth/mcp-oauth-client-metadata']);
+    expect(CLIENTS.map((each) => each.metadata)).toEqual(['https://claude.ai/oauth/']);
     expect(CLIENTS.flatMap((each) => each.prefixes).some((prefix) => prefix.startsWith('104.16.'))).toBe(false);
     const entries = setting(
       { AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: CLIENTS.map((each) => each.metadata).join(',') },
