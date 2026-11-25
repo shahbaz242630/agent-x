@@ -1440,3 +1440,83 @@ a.secondary {
 .session-card > h2 {
   margin-top: 0;
 }
+
+/* CN1a: connecting an agent. The tools as tabs in the sub-tabs' look, scrolling on their own on a phone; each line to
+   copy whole in mono, wrapping anywhere so the page never scrolls sideways; the two ways as a quiet radio pair. */
+.connect-agent .tabs {
+  display: flex;
+  gap: 18px;
+  border-bottom: 1px solid var(--rule);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.connect-agent [role='tab'] {
+  padding: 8px 2px;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 0.8438rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.connect-agent [role='tab']:hover {
+  color: var(--ink);
+}
+
+.connect-agent [role='tab'][aria-selected='true'] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.snippet {
+  display: grid;
+  gap: 8px;
+}
+
+.snippet pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.snippet .actions {
+  justify-content: flex-start;
+  align-items: center;
+}
+
+.ways {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.way {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.way input {
+  accent-color: var(--accent);
+}
+
+.steps {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 4px;
+}
