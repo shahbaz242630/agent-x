@@ -65,7 +65,7 @@ export function Members() {
   const admin = organization.role === 'admin';
   return (
     <section className="stack">
-      <Link to="/more" className="back">
+      <Link to="/more" className="back to-more">
         {t('members.backToMore')}
       </Link>
       <h1>{t('members.title')}</h1>

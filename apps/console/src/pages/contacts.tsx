@@ -101,7 +101,7 @@ function ContactList() {
   const { busy, said, run } = useChange(contactRefusal);
   const [seen, setSeen] = useState<Contact | null>(null);
   if (contacts.isPending) return <Loading />;
-  if (contacts.isError) return <Retry onRetry={() => void contacts.refetch()} />;
+  if (contacts.isError) return <Retry error={contacts.error} onRetry={() => void contacts.refetch()} />;
   const close = () => {
     setSeen(null);
   };

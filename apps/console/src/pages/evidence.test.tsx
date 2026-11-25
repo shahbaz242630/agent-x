@@ -386,7 +386,7 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     open(`/approvals/${ID}/evidence`);
     await screen.findByRole('heading', { name: 'The request' });
     expect(screen.getByText('As it stood at audit event #42.')).toBeDefined();
-    expect(fact('The request', 'Where it stands')).toBe('With the bank');
+    expect(fact('The request', 'Where it stands')).toBe('Handed to the bank');
     expect(fact('The request', 'Invoice or order')).toBe('INV-2026-0042');
     expect(fact('The request', 'The agent wrote')).toBe('Printer toner for the Dubai office');
     expect(fact('The request', "Agent's idempotency key")).toBe('agent-key-0042');

@@ -44,7 +44,7 @@ export function MandateList() {
   const unchecked = pages.reduce((count, page) => count + page.unchecked.length, 0);
   return (
     <section className="stack">
-      <Link to="/more" className="back">
+      <Link to="/more" className="back to-more">
         {t('mandates.backToMore')}
       </Link>
       <h1>{t('mandates.title')}</h1>

@@ -43,7 +43,7 @@ import { t } from '../text.ts';
 import { memberText } from './agent.tsx';
 import { Said, useChange } from './change.tsx';
 import { Choices } from './choices.tsx';
-import { Loading, Retry } from './failed.tsx';
+import { isRestricted, Loading, Retry } from './failed.tsx';
 import { LineField } from './line-field.tsx';
 
 /** Across the console, for an admin, while the organisation is held. */
@@ -362,6 +362,7 @@ function Held({ hold, reread }: { readonly hold: Hold; readonly reread: () => Pr
 /** Why the hold can't be shown: the admin's role gone, its records failing their check, or a failure to retry. */
 function Unread({ error, onRetry }: { readonly error: unknown; readonly onRetry: () => void }) {
   if (isIntegrityFailed(error)) return <p className="notice">{t('hold.integrity')}</p>;
+  if (isRestricted(error)) return <p className="notice">{t('error.restricted')}</p>;
   if (error instanceof ApiError && error.status === 403) return <p className="notice">{t('hold.viewOnly')}</p>;
   return <Retry onRetry={onRetry} />;
 }
@@ -392,7 +393,7 @@ export function HoldPage() {
   }
   return (
     <section className="stack request">
-      <Link to="/more" className="back">
+      <Link to="/more" className="back to-more">
         {t('hold.back')}
       </Link>
       {(!admin || shown.data === undefined) && <h1>{t('hold.title')}</h1>}

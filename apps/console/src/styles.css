@@ -946,6 +946,13 @@ a.row:hover::after {
   color: var(--ink);
 }
 
+/* "Back to More" only where More holds the page (phone); on a wide screen the sidebar shows it. */
+@media (min-width: 56.0625rem) {
+  .back.to-more {
+    display: none;
+  }
+}
+
 .facts {
   margin: 0;
   display: grid;

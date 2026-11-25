@@ -90,7 +90,7 @@ export function ResetList({ person }: { readonly person?: string }) {
   const endStepped = useEndStepped();
   const me = session.userId.toLowerCase();
   if (resets.isPending) return <Loading />;
-  if (resets.isError) return <Retry onRetry={() => void resets.refetch()} />;
+  if (resets.isError) return <Retry error={resets.error} onRetry={() => void resets.refetch()} />;
   const shown = resets.data.filter((reset) => person === undefined || reset.person === person);
   const close = () => {
     setSeen(null);
