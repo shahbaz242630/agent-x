@@ -115,7 +115,10 @@ const SERVER_METADATA = z
     authorization_response_iss_parameter_supported: z.boolean(),
     client_id_metadata_document_supported: z
       .boolean()
-      .describe('A client may name itself by its metadata document’s https address, from an allowlisted origin.'),
+      .describe(
+        'Always false: every client registers itself (S218). A client on Agent X’s short trusted list that names ' +
+          'itself by its metadata document’s https address is still taken.',
+      ),
   })
   .register(API_SCHEMAS, {
     id: 'AuthorizationServerMetadata',

@@ -486,10 +486,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   );
   // The OAuth server's routes, 404s while it is off, before anyone is asked who they are (6E3a).
   const oauthOn = config.http.mcpOauth;
-  const capabilities = capabilitiesOf(
-    config.http.publicOrigin,
-    (config.http.oauthClientMetadataOrigins ?? []).length > 0,
-  );
+  const capabilities = capabilitiesOf(config.http.publicOrigin);
   registerOauthSwitch(app, oauthOn);
   registerAccess(app, {
     findSession: signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie),

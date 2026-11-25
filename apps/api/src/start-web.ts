@@ -156,7 +156,7 @@ export async function startWeb(
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
   // Where clients name themselves by a metadata document (6E3c, AG6): none while the OAuth server is off.
   const metadataOrigins = config.http.oauthClientMetadataOrigins ?? [];
-  const capabilities = capabilitiesOf(config.http.publicOrigin, metadataOrigins.length > 0);
+  const capabilities = capabilitiesOf(config.http.publicOrigin);
   const oauthClients = createOauthClients({
     database,
     keys,

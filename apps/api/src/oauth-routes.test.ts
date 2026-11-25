@@ -271,10 +271,15 @@ describe('the metadata documents (RFC 9728, RFC 8414): one capabilities object, 
     expect(JSON.stringify(one.json())).not.toMatch(/jwks|id_token|userinfo|openid"/);
   });
 
-  it('SEC-OAUTH-09 says client metadata documents are taken only while some origin is allowed for them', async () => {
+  it('SEC-OAUTH-09 never says client metadata documents are taken, even with some trusted (S218: clients then register)', async () => {
     const { app } = await oauthServer(true, { clientMetadataOrigins: ['https://claude.ai'] });
-    const response = await app.inject({ method: 'GET', url: '/.well-known/oauth-authorization-server' });
-    expect(response.json()).toMatchObject({ client_id_metadata_document_supported: true });
+    for (const url of ['/.well-known/oauth-authorization-server', '/.well-known/openid-configuration']) {
+      const response = await app.inject({ method: 'GET', url });
+      expect(response.json()).toMatchObject({
+        client_id_metadata_document_supported: false,
+        registration_endpoint: `${PUBLIC_ORIGIN}/v1/oauth/register`,
+      });
+    }
   });
 
   it('names the metadata on the MCP endpoint’s 401, and an issuer from an origin with no trailing slash', async () => {

@@ -82,8 +82,6 @@ export interface Capabilities {
   readonly verificationUri: string;
   readonly scopes: readonly string[];
   readonly grantTypes: readonly string[];
-  /** Clients named by a metadata document are taken (6E3c): some origin is allowed for them. */
-  readonly clientMetadataDocuments: boolean;
 }
 
 /** The origin with no slash at its end: the issuer is compared as text, exactly (RFC 8414 §3.3). */
@@ -93,8 +91,7 @@ function withoutTrailingSlash(origin: string): string {
   return origin.slice(0, end);
 }
 
-/** `clientMetadataDocuments`: some origin is allowed for clients named by a document (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS). */
-export function capabilitiesOf(publicOrigin: string, clientMetadataDocuments = false): Capabilities {
+export function capabilitiesOf(publicOrigin: string): Capabilities {
   const issuer = withoutTrailingSlash(publicOrigin);
   return {
     issuer,
@@ -108,7 +105,6 @@ export function capabilitiesOf(publicOrigin: string, clientMetadataDocuments = f
     verificationUri: `${issuer}${DEVICE_PATH}`,
     scopes: SCOPES_SUPPORTED,
     grantTypes: ['authorization_code', 'refresh_token', DEVICE_CODE_GRANT],
-    clientMetadataDocuments,
   };
 }
 
@@ -138,7 +134,12 @@ export const serverMetadataOf = (capabilities: Capabilities) => ({
   token_endpoint_auth_methods_supported: ['none'],
   revocation_endpoint_auth_methods_supported: ['none'],
   authorization_response_iss_parameter_supported: true,
-  client_id_metadata_document_supported: capabilities.clientMetadataDocuments,
+  // Never said, even where some clients' documents are trusted (S218): a client that reads it names itself by its own
+  // document and never falls back to registering, so every client off the short trusted list was refused
+  // (`unknown_client`) before the person could sign in: Claude Code, Codex and Hermes Agent, found connecting each to
+  // staging. Not said, each registers itself (RFC 7591), which every client does; a listed client that names itself by
+  // its document anyway is still taken. Said again once any client's document can be fetched (AZ22).
+  client_id_metadata_document_supported: false,
 });
 
 /** The OAuth error answers a route with `config.oauthWire` declares, beside the one error body for the rest. */
