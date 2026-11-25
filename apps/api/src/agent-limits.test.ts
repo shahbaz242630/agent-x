@@ -100,6 +100,12 @@ async function server({ perAddress = 100, perAgent = 10, perOrganisation = 100_0
     return reply();
   });
   app.get('/test/open-traffic', { ...traffic, config: { access: ['public'] } }, reply);
+  // An MCP-shaped route (`toolCalls`): only agents' tools call it, with or without a key (S219).
+  app.post(
+    '/test/tools',
+    { ...traffic, bodyLimit: 1024, config: { access: ['agent'], agentScopes: [], toolCalls: true } },
+    reply,
+  );
   app.get('/test/supplier', answer, () => ({
     supplierId: '0199a0f0-0000-7000-8000-0000000000e1',
     name: 'Gulf Supplies LLC',
@@ -123,7 +129,6 @@ describe('several web copies: each allows its share of every limit, rounded up (
   });
 
   it.each([
-    ["an address's", { perAddress: 10, perAgent: 1000, perOrganisation: 1000 }, ['a', 'd', 'k']],
     ["an agent's", { perAddress: 1000, perAgent: 10, perOrganisation: 1000 }, ['a', 'c', 'a']],
     ["an organisation's", { perAddress: 1000, perAgent: 1000, perOrganisation: 10 }, ['a', 'd', 'a']],
   ])('holds %s limit of ten at four a copy of three', async (_whose, limits, letters) => {
@@ -132,6 +137,19 @@ describe('several web copies: each allows its share of every limit, rounded up (
     const refused = await app.inject(ask('a'));
     expect(refused.statusCode).toBe(429);
     expect(refused.headers['x-ratelimit-limit']).toBe('4');
+  });
+
+  it("holds an address's limit of ten at four a copy of three, its agents at three of them (S219)", async () => {
+    const { app } = await server({ perAddress: 10, perAgent: 1000, perOrganisation: 1000, copies: 3 });
+    for (const letter of ['a', 'd', 'k']) expect((await app.inject(ask(letter))).statusCode).toBe(200);
+    const agentRefused = await app.inject(ask('a'));
+    expect(agentRefused.statusCode).toBe(429);
+    expect(agentRefused.headers['x-ratelimit-limit']).toBe('3');
+    const asPerson = { url: '/test/open-traffic', remoteAddress: '198.51.100.1' };
+    expect((await app.inject(asPerson)).statusCode).toBe(200);
+    const personRefused = await app.inject(asPerson);
+    expect(personRefused.statusCode).toBe(429);
+    expect(personRefused.headers['x-ratelimit-limit']).toBe('4');
   });
 });
 
@@ -271,10 +289,44 @@ describe("SEC-AG-06 C2-2 each agent's own rate limit, beside its address's", () 
 
   it("leaves the address's own limit first: a refused address checks no key", async () => {
     const { app, noted, checked } = await server({ perAddress: 10, perAgent: 100 });
-    for (let i = 0; i < 11; i += 1) await app.inject(asAgent('a'));
+    // Agents have the address's limit less its people's fifth (S219): 8 of 10.
+    for (let i = 0; i < 9; i += 1) await app.inject(asAgent('a'));
 
-    expect(checked).toHaveLength(10);
-    expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_address', ip: '198.51.100.1' }]);
+    expect(checked).toHaveLength(8);
+    expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_address_agents', ip: '198.51.100.1' }]);
+  });
+
+  it("keeps a fifth of the address's limit for its people, however its agents flood (S219)", async () => {
+    const { app, noted } = await server({ perAddress: 10, perAgent: 100 });
+    const statuses: number[] = [];
+    for (let i = 0; i < 30; i += 1) statuses.push((await app.inject(asAgent('a'))).statusCode);
+    const asPerson = { url: '/test/open-traffic', remoteAddress: '198.51.100.1' };
+
+    expect(statuses.filter((status) => status === 200)).toHaveLength(8);
+    expect(statuses.slice(8).every((status) => status === 429)).toBe(true);
+    // The console and the brakes, from the same address: still through, then the address's own limit.
+    expect((await app.inject(asPerson)).statusCode).toBe(200);
+    expect((await app.inject(asPerson)).statusCode).toBe(200);
+    expect((await app.inject(asPerson)).statusCode).toBe(429);
+    expect(noted.filter((note) => note.reason === 'per_address')).toEqual([
+      { kind: 'rate_limited', reason: 'per_address', ip: '198.51.100.1' },
+    ]);
+    // Another address's agents are not touched.
+    expect((await app.inject(asAgent('a', '203.0.113.9'))).statusCode).toBe(200);
+  });
+
+  it("counts a refused key and a keyless MCP call in the agents' share too, never in its people's (S219)", async () => {
+    const { app } = await server({ perAddress: 10, perAgent: 100 });
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i += 1) statuses.push((await app.inject(asAgent('e'))).statusCode);
+    for (let i = 0; i < 6; i += 1) {
+      const keyless = { method: 'POST' as const, url: '/test/tools', payload: {}, remoteAddress: '198.51.100.1' };
+      statuses.push((await app.inject(keyless)).statusCode);
+    }
+
+    expect(statuses.filter((status) => status === 401)).toHaveLength(8);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(4);
+    expect((await app.inject({ url: '/test/open-traffic', remoteAddress: '198.51.100.1' })).statusCode).toBe(200);
   });
 });
 

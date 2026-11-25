@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   clientAddress,
@@ -113,6 +113,7 @@ describe('the callers a counter remembers', () => {
   const requestFrom = (app: FastifyInstance, address: string, orgId: string) =>
     ({
       server: app,
+      headers: {},
       agent: { orgId },
       routeOptions: { config: {} },
       raw: { headers: {}, socket: { remoteAddress: address } },
@@ -130,7 +131,7 @@ describe('the callers a counter remembers', () => {
     const app = Fastify();
     const trust = proxyTrust([]);
     await registerRateLimit(app, 1, trust);
-    const byAddress = createCounter(trust, () => undefined);
+    const byAddress = createCounter(trust, 1, () => undefined);
     const byOrganisation = createOrganisationCounter(app, 1, trust, () => undefined);
     const first = requestFrom(app, '198.51.100.1', 'org-first');
     expect(await refused(byAddress, first)).toBe(false);
@@ -142,6 +143,95 @@ describe('the callers a counter remembers', () => {
     }
     expect(await refused(byAddress, first)).toBe(true);
     expect(await refused(byOrganisation, first)).toBe(true);
+    await app.close();
+  });
+});
+
+describe("S219 an address's agents never take its people's fifth, across windows", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps the people their fifth when the agents start sending late in a minute and flood on into the next', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: 1_000_000 });
+    const app = Fastify();
+    const trust = proxyTrust([]);
+    await registerRateLimit(app, 10, trust);
+    const notes: string[] = [];
+    app.addHook(
+      'onRequest',
+      createCounter(trust, 10, (_ip, reason) => notes.push(reason)),
+    );
+    app.get('/p', () => 'ok');
+    await app.ready();
+    const from = { remoteAddress: '198.51.100.1' };
+    const statuses = async (times: number, agent: boolean) => {
+      const answers: number[] = [];
+      for (let i = 0; i < times; i += 1) {
+        const headers = agent ? { authorization: 'Bearer x' } : {};
+        answers.push((await app.inject({ url: '/p', headers, ...from })).statusCode);
+      }
+      return answers;
+    };
+
+    expect(await statuses(1, false)).toEqual([200]);
+    vi.advanceTimersByTime(10_000);
+    expect(await statuses(1, true)).toEqual([200]);
+    vi.advanceTimersByTime(55_000);
+    // The address's new minute: agents get 8 of 10.
+    expect((await statuses(10, true)).filter((status) => status === 200)).toHaveLength(8);
+    vi.advanceTimersByTime(5_000);
+    expect((await statuses(10, true)).filter((status) => status === 200)).toHaveLength(0);
+    vi.advanceTimersByTime(1_000);
+    // The Suspend press, and one more: the people's fifth.
+    expect(await statuses(2, false)).toEqual([200, 200]);
+    expect(await statuses(1, false)).toEqual([429]);
+    expect(notes.filter((reason) => reason === 'per_address')).toEqual(['per_address']);
+    await app.close();
+  });
+  it("counts an OAuth client's keyless calls as its agents', and the person's authorize as theirs", async () => {
+    const app = Fastify();
+    const trust = proxyTrust([]);
+    await registerRateLimit(app, 10, trust);
+    app.addHook(
+      'onRequest',
+      createCounter(trust, 10, () => undefined),
+    );
+    app.get('/.well-known/oauth-protected-resource', { config: { oauth: true } }, () => 'ok');
+    app.get('/v1/oauth/token', { config: { oauth: true, oauthClient: true } }, () => 'ok');
+    app.get('/v1/oauth/authorize', { config: { oauth: true } }, () => 'ok');
+    await app.ready();
+    const ask = async (url: string) => (await app.inject({ url, remoteAddress: '198.51.100.1' })).statusCode;
+    const clients: number[] = [];
+    for (let i = 0; i < 5; i += 1)
+      clients.push(await ask('/.well-known/oauth-protected-resource'), await ask('/v1/oauth/token'));
+
+    expect(clients.filter((status) => status === 200)).toHaveLength(8);
+    expect(await ask('/v1/oauth/authorize')).toBe(200);
+    expect(await ask('/v1/oauth/authorize')).toBe(200);
+    expect(await ask('/v1/oauth/authorize')).toBe(429);
+    await app.close();
+  });
+  it('keeps the people their fifth when agents send all at once (requests pipelined on one connection)', async () => {
+    const app = Fastify();
+    const trust = proxyTrust([]);
+    await registerRateLimit(app, 10, trust);
+    app.addHook(
+      'onRequest',
+      createCounter(trust, 10, () => undefined),
+    );
+    app.get('/p', () => 'ok');
+    await app.ready();
+    const from = { url: '/p', remoteAddress: '198.51.100.1' };
+    const burst = await Promise.all(
+      Array.from({ length: 30 }, () => app.inject({ ...from, headers: { authorization: 'Bearer x' } })),
+    );
+    const allowed = burst.filter((answer) => answer.statusCode === 200).length;
+
+    expect(allowed).toBeGreaterThan(0);
+    expect(allowed).toBeLessThanOrEqual(8);
+    expect((await app.inject(from)).statusCode).toBe(200);
+    expect((await app.inject(from)).statusCode).toBe(200);
     await app.close();
   });
 });
