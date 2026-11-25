@@ -73,7 +73,7 @@ function ClientPanel({
       {client === 'web' ? (
         <>
           <Copyable key={url} text={url} label={t('connectAgent.address')} />
-          <ol className="steps">
+          <ol className="connect-steps">
             <li>{t('connectAgent.web.claude')}</li>
             <li>{t('connectAgent.web.chatgpt')}</li>
             <li>{t('connectAgent.signInPick', { name: agent })}</li>
@@ -90,7 +90,7 @@ function ClientPanel({
             </p>
           )}
           {line !== undefined && <Copyable key={line} text={line} label={t(`connectAgent.line.${client}`)} />}
-          <ol className="steps">
+          <ol className="connect-steps">
             <li>{t(keyed && editor ? `connectAgent.stepKey.${client}` : `connectAgent.step.${client}`)}</li>
             {keyed ? (
               <>

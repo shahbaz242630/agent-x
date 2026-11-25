@@ -395,6 +395,20 @@ describe('scrub: properties that hold for any text', () => {
     );
   });
 
+  it('leaves a registered client ID on its own as it is, and only that shape (S218)', () => {
+    // S218: `axcl_cf04…` read as an IBAN (letters, two digits, right check digits) in a tamper alarm's objectId.
+    expect(scrub('axcl_cf044150c3c5421d5dee011029b89458')).toBe('axcl_cf044150c3c5421d5dee011029b89458');
+    fc.assert(
+      fc.property(fc.uint8Array({ minLength: 16, maxLength: 16 }), (bytes) => {
+        const id = `axcl_${Buffer.from(bytes).toString('hex')}`;
+        expect(scrub(id)).toBe(id);
+      }),
+      { ...RUNS, numRuns: 5000 },
+    );
+    // Only the whole value: inside other text, an IBAN-shaped tail is still hidden.
+    expect(scrub('id axcl_cf044150c3c5421d5dee011029b89458')).toBe('id axcl_[iban]');
+  });
+
   it("leaves an audit export's file name on its own as it is, and only that shape (E10c)", () => {
     // S125: an export ID's middle groups (`0098-7535-9564`) read as a phone number.
     const file = '01a14ed8-003e-76b9-b88a-967faf994642/01a14ed8-0098-7535-9564-b844fd333854.ndjson';
