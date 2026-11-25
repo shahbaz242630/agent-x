@@ -9,7 +9,8 @@
 // makes a new one. Each goes by passkey (the shared step-up); a new key is
 // shown once on the way back (stepped-up.tsx, key-once.tsx). Buttons show by
 // role (rotating: an admin, or the developer who owns it); the API checks again.
-// Below the keys, the apps connected as the agent (6E3b, agent-connections.tsx).
+// Above the keys, how to connect an AI tool as it (CN1a, agent-connect.tsx);
+// below them, the apps connected as the agent (6E3b, agent-connections.tsx).
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 
@@ -34,6 +35,7 @@ import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { byPasskey } from '../step-up.ts';
 import { t } from '../text.ts';
+import { ConnectAgent } from './agent-connect.tsx';
 import { Connections } from './agent-connections.tsx';
 import { Said, useChange } from './change.tsx';
 import { Loading, NotShown } from './failed.tsx';
@@ -241,6 +243,7 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
           <Scopes scopes={agent.scopes} />
         </dd>
       </dl>
+      <ConnectAgent agent={agent} />
       <section className="stack" aria-labelledby="keys-title">
         <h2 id="keys-title">{t('agents.keys')}</h2>
         <p className="muted">{t('agents.keysIntro')}</p>
