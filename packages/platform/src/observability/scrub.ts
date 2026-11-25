@@ -192,6 +192,13 @@ const UUID = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-
 const WHOLE_UUID = new RegExp(`^${UUID}$`);
 
 /**
+ * A registered MCP client's ID on its own (6E3b: `axcl_` and 32 hex), public as a UUID is (RFC 7591's client_id, no
+ * secret): its hex after the `_` read as an IBAN in about one in 1,700 (S218, `axcl_cf04…` in a test's tamper alarm).
+ * A key's or token's own prefixes (`axk_`, `axa_`, `axr_`) are not this shape, so they stay hidden.
+ */
+const WHOLE_CLIENT_ID = /^axcl_[0-9a-f]{32}$/;
+
+/**
  * An export's file name on its own, as the operator logs it: an audit export's
  * `<organisation ID>/<export ID>.ndjson` (E10c) or an activity log's
  * `<organisation ID>/activity-<export ID>.ndjson` (L7; S197, a random ID's
@@ -324,7 +331,9 @@ function cleanIpv4(candidate: string): string {
 
 /** Returns the text with every secret, personal detail and payment detail replaced by a label. */
 export function scrub(text: string): string {
-  if (WHOLE_HASH.test(text) || WHOLE_UUID.test(text) || WHOLE_EXPORT_FILE.test(text)) return text;
+  if (WHOLE_HASH.test(text) || WHOLE_UUID.test(text) || WHOLE_CLIENT_ID.test(text) || WHOLE_EXPORT_FILE.test(text)) {
+    return text;
+  }
   return (
     text
       // URLs first: their credentials and whole query go, before anything else changes their text.
