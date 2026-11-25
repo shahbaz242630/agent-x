@@ -1539,13 +1539,13 @@
   "connectAgent.signIn.vscode": "Start the agentx server in VS Code: your browser opens Agent X (or press Authenticate in the server's actions).",
   "connectAgent.signIn.other": "When the tool first uses Agent X, your browser opens Agent X.",
   "connectAgent.signInPick": "Sign in with your passkey and pick {name}.",
-  "connectAgent.keyStep": "Put this agent's key in the {variable} environment variable where the tool runs, never in the command or a file you share. A key is shown once, when it is made or rotated, above under Keys.",
+  "connectAgent.keyStep": "Put this agent's key in the {variable} environment variable where the tool runs, never in the command or a file you share. Get the key under Keys below: it is shown once, when the agent is registered or one of its keys is rotated (Rotate, then your passkey).",
   "connectAgent.web.claude": "Claude (web, desktop or phone): Customize, Connectors, +, Add custom connector, and paste the address. On a Team or Enterprise plan an owner adds it in Organization settings, Connectors.",
   "connectAgent.web.chatgpt": "ChatGPT: Plugins, +, Add custom MCP server, paste the address and create it (your workspace may need an admin to allow it).",
   "connectAgent.web.noKey": "These apps sign in with Agent X only: no key is needed or used.",
   "connectAgent.after": "Once connected, the tool shows under Connected apps below, where it can be revoked. It can only ask for payments; a person or your policy still decides each one.",
   "connectAgent.stepKey.cursor": "Put these settings in Cursor's mcp.json.",
   "connectAgent.stepKey.vscode": "Put these settings in your mcp.json.",
-  "connectAgent.keyStep.vscode": "VS Code asks for this agent's key the first time it starts agentx and keeps it in its own secret store. A key is shown once, when it is made or rotated, above under Keys.",
+  "connectAgent.keyStep.vscode": "VS Code asks for this agent's key the first time it starts agentx and keeps it in its own secret store. Get the key under Keys below: it is shown once, when the agent is registered or one of its keys is rotated (Rotate, then your passkey).",
   "connectAgent.keyShell": "The line is for bash or zsh. In PowerShell, write $env:{variable} in place of ${variable}."
 }
