@@ -9,7 +9,7 @@
 // "other" is Neon's add-mcp, which writes the config of each tool it finds.
 
 /** The name each tool lists Agent X under. */
-export const SERVER_NAME = 'agentx';
+const SERVER_NAME = 'agentx';
 /** The environment variable a key form reads its key from. */
 export const KEY_VARIABLE = 'AGENTX_KEY';
 
