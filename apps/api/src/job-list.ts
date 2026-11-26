@@ -31,6 +31,7 @@ import {
   LONGEST_ABSOLUTE_SECONDS,
   membersFor,
   resetLinkFor,
+  sweepPasskeyAdditions,
 } from '@agentx/core/modules/identity';
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
@@ -603,6 +604,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     sweepRows('identity.session', (most) => sessions.sweep(database, most)),
     // Step-up challenges past their ten minutes and five more, so a late return reads as run out (B3-1, E6-P2, E7).
     sweepRows('identity.step_up_challenge', (most) => challenges.sweep(database, most)),
+    // Passkeys added inside Agent X left unfinished, past their minutes (SA6), whether or not adding is on.
+    sweepRows('identity.passkey_addition', (most) => sweepPasskeyAdditions(database, systemClock, most)),
     // The security events past the retention the config names (B2-5a).
     sweepRows('security.event', (most) => securityEvents.sweep(database, most)),
     // Each organisation's own security events past the same retention, inside its own transaction (6E1b, CO7b).

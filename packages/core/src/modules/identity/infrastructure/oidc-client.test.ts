@@ -7,7 +7,14 @@ import { FixedClock } from '@agentx/testing';
 import { exportJWK, type JWTPayload, SignJWT } from 'jose';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { createOidcClient, type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
+import {
+  createOidcClient,
+  type LoginFlow,
+  type OidcClient,
+  SignInFailed,
+  type SignInFailure,
+  ZITADEL_API_SCOPE,
+} from './oidc-client.ts';
 
 const ISSUER = 'https://auth.example.test';
 const CLIENT = '338719472394810051@agentx';
@@ -861,5 +868,74 @@ describe('B4-6c the login service’s break-glass admin never signs in', () => {
     service.userinfo = { ...admin, ...(loginName !== undefined && { preferred_username: loginName }) };
 
     await expect(signIn()).resolves.toMatchObject({ verifiedEmail: 'sara.khan@example.test' });
+  });
+});
+
+describe('SA6 a step-up for adding a passkey: the login service API and its token', () => {
+  it('asks for the login service API only when told to', async () => {
+    const plain = new URL((await client.start({ prompt: 'login' })).url).searchParams.get('scope');
+    const api = new URL((await client.start({ prompt: 'login', zitadelApi: true })).url).searchParams.get('scope');
+
+    expect(plain).toBe('openid email profile');
+    expect(api).toBe(`openid email profile ${ZITADEL_API_SCOPE}`);
+  });
+
+  it('hands the access token back only when asked to keep it', async () => {
+    expect(await signIn()).not.toHaveProperty('accessToken');
+
+    const { flow } = await client.start({ zitadelApi: true });
+    service.expect(flow);
+    const kept = await client.finish(flow, { code: CODE, state: flow.state }, { keepAccessToken: true });
+    expect(kept.accessToken).toBe(ACCESS);
+  });
+
+  it('takes a token back at the revocation endpoint with the client’s own credentials', async () => {
+    service.discovery = { ...service.discovery, revocation_endpoint: `${ISSUER}/oauth/v2/revoke` };
+    const fetch = service.fetch;
+    const revoking = createOidcClient({
+      settings: { issuer: ISSUER, clientId: CLIENT, clientSecret: PASS, redirectUri: REDIRECT },
+      fetch: async (url, init) => {
+        if (String(url) === `${ISSUER}/oauth/v2/revoke`) {
+          service.calls.push({ url: String(url), init: init ?? {} });
+          return new Response('', { status: 200 });
+        }
+        return fetch(url, init);
+      },
+      clock,
+    });
+
+    expect(await revoking.revoke(ACCESS)).toBe(true);
+
+    const [call] = service.callsTo('/oauth/v2/revoke');
+    expect(new Headers(call?.init.headers).get('authorization')).toBe(
+      `Basic ${Buffer.from(`${encodeURIComponent(CLIENT)}:${encodeURIComponent(PASS)}`).toString('base64')}`,
+    );
+    expect(Object.fromEntries(new URLSearchParams(call?.init.body as string))).toEqual({
+      token: ACCESS,
+      token_type_hint: 'access_token',
+    });
+  });
+
+  it('says no, never throwing, where it can’t take a token back', async () => {
+    // No revocation endpoint named: nothing asked.
+    expect(await client.revoke(ACCESS)).toBe(false);
+    expect(service.callsTo('/oauth/v2/revoke')).toEqual([]);
+    // Named, and answering otherwise than 200, or a token that isn't one.
+    service.discovery = { ...service.discovery, revocation_endpoint: `${ISSUER}/oauth/v2/revoke` };
+    const named = createOidcClient({
+      settings: { issuer: ISSUER, clientId: CLIENT, clientSecret: PASS, redirectUri: REDIRECT },
+      fetch: service.fetch,
+      clock,
+    });
+    expect(await named.revoke(ACCESS)).toBe(false);
+    expect(await named.revoke('not a token')).toBe(false);
+    // A revocation endpoint on another origin fails discovery, which revoke says as no.
+    service.discovery = { ...service.discovery, revocation_endpoint: 'https://elsewhere.example.test/revoke' };
+    const elsewhere = createOidcClient({
+      settings: { issuer: ISSUER, clientId: CLIENT, clientSecret: PASS, redirectUri: REDIRECT },
+      fetch: service.fetch,
+      clock,
+    });
+    expect(await elsewhere.revoke(ACCESS)).toBe(false);
   });
 });

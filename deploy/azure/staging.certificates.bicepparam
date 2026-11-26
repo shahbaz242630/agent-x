@@ -9,3 +9,5 @@ param environment = 'staging'
 param location = 'uaenorth'
 param authHost = readEnvironmentVariable('AGENTX_AZURE_AUTH_HOST')
 param appHost = readEnvironmentVariable('AGENTX_AZURE_APP_HOST')
+// SA6: the add-a-passkey page's host, from the same shell; unset leaves adding a passkey inside Agent X off.
+param addPasskeyHost = readEnvironmentVariable('AGENTX_AZURE_ADD_PASSKEY_HOST', '')

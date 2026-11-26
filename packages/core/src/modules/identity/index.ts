@@ -275,3 +275,18 @@ export {
 export type { IdentityTables } from './infrastructure/tables.ts';
 export { type KeptPerson, keptPeopleOf, keptPersonReader } from './infrastructure/user-contacts.ts';
 export { isUser, subjectOfUser, userForSubject, userOfSubject, UserUnbelieved } from './infrastructure/users.ts';
+export {
+  OWN_PASSKEY_REGISTERED,
+  OWN_KEY_WINDOW_MS,
+  PASSKEY_ADD_ACTION,
+  TICKET_SECONDS,
+} from './domain/passkey-addition.ts';
+export { createOwnPasskeys, OwnPasskeysUnavailable } from './infrastructure/idp-passkeys.ts';
+export {
+  type AdditionAnswer,
+  type AdditionRefusal,
+  type AdditionStatus,
+  createPasskeyAdditions,
+  type PasskeyAdditions,
+  sweepPasskeyAdditions,
+} from './infrastructure/passkey-additions.ts';

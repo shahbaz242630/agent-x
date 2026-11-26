@@ -1671,6 +1671,51 @@ describe('config: removing second factors once a reset has cooled off (B6-3c)', 
   });
 });
 
+describe('config: adding a passkey inside Agent X (SA6)', () => {
+  const ISSUER = 'https://auth.agentx.example';
+  const SIGN_IN: Env = {
+    ...MINIMAL,
+    AGENTX_OUTBOUND_ALLOWED_ORIGINS: ISSUER,
+    AGENTX_OIDC_ISSUER: ISSUER,
+    AGENTX_OIDC_CLIENT_ID: 'agentx-api',
+    AGENTX_OIDC_CLIENT_SECRET: CLIENT_PASS,
+  };
+  const BELOW = "must be on a host just below the login service's own (addkey.<its host>)";
+
+  it('is off unless its page’s origin is set, and on with one just below the login service’s host', () => {
+    expect(loadConfig(SIGN_IN).addPasskey).toBeUndefined();
+    expect(
+      loadConfig({ ...SIGN_IN, AGENTX_ADD_PASSKEY_ORIGIN: 'https://addkey.auth.agentx.example' }).addPasskey,
+    ).toEqual({ origin: 'https://addkey.auth.agentx.example' });
+  });
+
+  it('is refused without sign-in, whose login service holds the passkeys', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_ADD_PASSKEY_ORIGIN: 'https://addkey.auth.agentx.example' })).toEqual([
+      'AGENTX_ADD_PASSKEY_ORIGIN: set only with sign-in (AGENTX_OIDC_ISSUER), whose login service holds the passkeys',
+    ]);
+  });
+
+  it.each([
+    ['the login service’s own host', 'https://auth.agentx.example'],
+    ['a host beside it', 'https://addkey.agentx.example'],
+    ['a host that only ends the same', 'https://addkeyauth.agentx.example'],
+    ['another site', 'https://addkey.auth.agentx.example.evil.test'],
+  ])('refuses %s', (_name, origin) => {
+    expect(problemsWith({ ...SIGN_IN, AGENTX_ADD_PASSKEY_ORIGIN: origin })).toEqual([
+      `AGENTX_ADD_PASSKEY_ORIGIN: ${BELOW}`,
+    ]);
+  });
+
+  it('refuses plain http outside development and test, and a path', () => {
+    expect(problemsWith({ ...SIGN_IN, AGENTX_ADD_PASSKEY_ORIGIN: 'http://addkey.auth.agentx.example' })).toContain(
+      'AGENTX_ADD_PASSKEY_ORIGIN: plain http is allowed only in development and test; production must use https',
+    );
+    expect(problemsWith({ ...SIGN_IN, AGENTX_ADD_PASSKEY_ORIGIN: 'https://addkey.auth.agentx.example/page' })).toEqual([
+      expect.stringContaining('AGENTX_ADD_PASSKEY_ORIGIN'),
+    ]);
+  });
+});
+
 describe('config: our own routine login changes, from the vault (SA2b)', () => {
   // Obviously fake IDs: Zitadel's are 18 digits; no real one is ever written in this repository.
   const ACTOR = '900000000000000001';

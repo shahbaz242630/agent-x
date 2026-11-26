@@ -30,6 +30,7 @@
   "identity.login_flows",
   "identity.membership_grants",
   "identity.memberships",
+  "identity.passkey_additions",
   "identity.registered_contacts",
   "identity.session_emails",
   "identity.sessions",

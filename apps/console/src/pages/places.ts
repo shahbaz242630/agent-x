@@ -22,7 +22,8 @@ type To =
   | '/more/access-log'
   | '/more/security-events'
   | '/more/integrity-hold'
-  | '/more/my-activity';
+  | '/more/my-activity'
+  | '/more/passkeys';
 
 export interface Place {
   readonly to: To;
@@ -71,6 +72,7 @@ const PLACES: readonly PlaceGroup[] = [
       { to: '/more/security-events', label: 'securityEvents.title', icon: 'shield', admin: true },
       { to: '/more/integrity-hold', label: 'hold.title', icon: 'sign', admin: true },
       { to: '/more/my-activity', label: 'myActivity.title', icon: 'user' },
+      { to: '/more/passkeys', label: 'passkeys.title', icon: 'fingerprint' },
     ],
   },
   {

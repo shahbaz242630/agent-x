@@ -27,6 +27,12 @@
 //   text, kept with the verified address so the audit log can say who did
 //   what when the login service can't (user-contacts.ts). The rest of the
 //   profile is never kept.
+// - SA6: a step-up for adding a passkey asks for the login service's own API
+//   too (`zitadelApi`: Zitadel's scope for its API's audience), and its
+//   access token is handed back (`keepAccessToken`), for the person's own
+//   passkey to be registered as them (passkey-additions.ts), kept sealed for
+//   minutes and then taken back (`revoke`, RFC 7009, where the login service
+//   names a revocation endpoint). No other flow asks for either.
 //
 // Every call to the login service goes through the outbound fetch, so only
 // the allowlist's origins are reached and no redirect is followed
@@ -94,7 +100,12 @@ export interface VerifiedSignIn {
   readonly verifiedEmail: string | undefined;
   /** The person's name as their profile gives it, one line of text, if it gives one (decision 25). */
   readonly name: string | undefined;
+  /** The access token, only when `finish` was asked to keep it (SA6): never logged, never shown. */
+  readonly accessToken?: string;
 }
+
+/** Zitadel's scope for an access token its own API takes (SA6: a person's own passkey registered as them). */
+export const ZITADEL_API_SCOPE = 'urn:zitadel:iam:org:project:id:zitadel:aud';
 
 /** Why a sign-in failed, for its answer and its security event (B2-5). */
 export type SignInFailure =
@@ -138,9 +149,26 @@ export interface OidcClient {
    * the ID token must then carry (B3). Throws RangeError for a nonce that
    * isn't 32 random bytes in base64url.
    */
-  start(options?: { readonly prompt?: 'login'; readonly nonce?: string }): Promise<SignInStart>;
-  /** Trades the returned code for a checked ID token. Throws SignInFailed. */
-  finish(flow: LoginFlow, returned: { readonly code: string; readonly state: string }): Promise<VerifiedSignIn>;
+  start(options?: {
+    readonly prompt?: 'login';
+    readonly nonce?: string;
+    /** Asks for the login service's own API too (SA6, ZITADEL_API_SCOPE). */
+    readonly zitadelApi?: boolean;
+  }): Promise<SignInStart>;
+  /**
+   * Trades the returned code for a checked ID token; with `keepAccessToken`, hands the access token back too (SA6).
+   * Throws SignInFailed.
+   */
+  finish(
+    flow: LoginFlow,
+    returned: { readonly code: string; readonly state: string },
+    options?: { readonly keepAccessToken?: boolean },
+  ): Promise<VerifiedSignIn>;
+  /**
+   * Takes an access token back at the login service (RFC 7009), where it names a revocation endpoint: whether it
+   * said so. Never throws: a token left is one that runs out on its own.
+   */
+  revoke(accessToken: string): Promise<boolean>;
 }
 
 /** The only signature algorithm taken: Zitadel's, and never `none` or a MAC with a public key. */
@@ -171,6 +199,8 @@ interface Discovery {
   readonly tokenEndpoint: string;
   readonly jwksUri: string;
   readonly userinfoEndpoint: string;
+  /** RFC 7009's, when the discovery document names one on the issuer's origin. */
+  readonly revocationEndpoint: string | undefined;
 }
 
 const random = (): string => randomBytes(RANDOM_BYTES).toString('base64url');
@@ -230,6 +260,10 @@ export function createOidcClient({
   const { issuer, clientId, clientSecret, redirectUri, internalOrigin } = settings;
   const issuerOrigin = new URL(issuer).origin;
 
+  /** The client's own credentials for the token and revocation endpoints (RFC 6749 §2.3.1: each part form-encoded first). */
+  const basicAuthorization = (): string =>
+    `Basic ${Buffer.from(`${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`).toString('base64')}`;
+
   /** A call to the login service, bounded in time; a network failure is the provider's. */
   async function call(url: string, init: RequestInit = {}): Promise<Response> {
     // Where the call goes: the URL itself, or, with an internal origin, the
@@ -272,6 +306,8 @@ export function createOidcClient({
         tokenEndpoint: endpoint(document, 'token_endpoint'),
         jwksUri: endpoint(document, 'jwks_uri'),
         userinfoEndpoint: endpoint(document, 'userinfo_endpoint'),
+        revocationEndpoint:
+          document.revocation_endpoint === undefined ? undefined : endpoint(document, 'revocation_endpoint'),
       };
     })();
     // A failed discovery is tried again next time, not held for the life of the process.
@@ -447,7 +483,10 @@ export function createOidcClient({
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('client_id', clientId);
       url.searchParams.set('redirect_uri', redirectUri);
-      url.searchParams.set('scope', 'openid email profile');
+      url.searchParams.set(
+        'scope',
+        options.zitadelApi === true ? `openid email profile ${ZITADEL_API_SCOPE}` : 'openid email profile',
+      );
       url.searchParams.set('state', flow.state);
       url.searchParams.set('nonce', flow.nonce);
       url.searchParams.set('code_challenge', createHash('sha256').update(flow.verifier).digest('base64url'));
@@ -456,7 +495,7 @@ export function createOidcClient({
       return { url: url.toString(), flow };
     },
 
-    async finish(flow, { code, state }) {
+    async finish(flow, { code, state }, options = {}) {
       if (typeof state !== 'string' || !RETURNED.test(state) || !sameText(state, flow.state)) {
         throw new SignInFailed('state_mismatch', 'the state returned is not the flow’s');
       }
@@ -464,15 +503,11 @@ export function createOidcClient({
         throw new SignInFailed('code_rejected', 'the code returned is not 1 to 2048 visible ASCII characters');
       }
       const { tokenEndpoint } = await discover();
-      // RFC 6749 §2.3.1: each part form-encoded before the pair is base64'd.
-      const basic = Buffer.from(`${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`).toString(
-        'base64',
-      );
       const response = await call(tokenEndpoint, {
         method: 'POST',
         headers: {
           accept: 'application/json',
-          authorization: `Basic ${basic}`,
+          authorization: basicAuthorization(),
           'content-type': 'application/x-www-form-urlencoded',
         },
         body: new URLSearchParams({
@@ -499,7 +534,27 @@ export function createOidcClient({
       }
       // The ID token first: nothing is asked of the userinfo endpoint for a sign-in that doesn't stand.
       const signedIn = await verified(tokens.id_token, flow.nonce);
-      return { ...signedIn, ...(await profileOf(tokens.access_token, signedIn.subject.subject)) };
+      return {
+        ...signedIn,
+        ...(await profileOf(tokens.access_token, signedIn.subject.subject)),
+        ...(options.keepAccessToken === true && { accessToken: tokens.access_token }),
+      };
+    },
+
+    async revoke(accessToken) {
+      try {
+        const { revocationEndpoint } = await discover();
+        if (revocationEndpoint === undefined || !ACCESS_TOKEN.test(accessToken)) return false;
+        const response = await call(revocationEndpoint, {
+          method: 'POST',
+          headers: { authorization: basicAuthorization(), 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ token: accessToken, token_type_hint: 'access_token' }).toString(),
+        });
+        await response.body?.cancel();
+        return response.ok;
+      } catch {
+        return false;
+      }
     },
   };
 }

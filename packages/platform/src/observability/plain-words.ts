@@ -1281,6 +1281,22 @@ export const PLAIN_WORDS = {
     broke: 'Nobody can use the console on this copy of the server for now.',
     next: 'It is tried again within a minute. Check the database, then follow the incident runbook.',
   },
+  'identity.passkey_login_service_failed': {
+    happened: 'While someone added a passkey in Agent X, the login service failed or refused our call.',
+    broke: 'That passkey was not added, and the page asked them to start again; nothing else changed.',
+    next: 'Nothing if rare. If it repeats, check the login service is up; this line says which step failed.',
+  },
+  'identity.passkey_token_kept': {
+    happened: 'After a passkey was added in Agent X, the login service did not take back the access token we used.',
+    broke: 'Nothing: we no longer hold the token, and it runs out on its own.',
+    next: 'Nothing if rare. If it repeats, check the login service answers token revocation.',
+  },
+  'identity.passkey_addition_sweep_failed': {
+    happened: 'The clean-up of passkey additions left unfinished failed.',
+    broke:
+      'Unfinished additions wait a little longer before they are deleted; nobody can use them, as each is past its time.',
+    next: 'Nothing if the next run succeeds. If it keeps failing, read the error on this line; the database may be busy.',
+  },
   'identity.sign_out_unwitnessed': {
     happened: 'Someone signed out, but the record of it did not reach the witness store in time.',
     broke: 'Nothing: they are signed out. The record is still queued and goes out as soon as the store answers.',

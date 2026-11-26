@@ -45,19 +45,32 @@ param authHost string
 @minLength(4)
 param appHost string
 
+@description('SA6: the add-a-passkey page host, the addkey door; empty (the default) when adding a passkey inside Agent X is off, with no certificate for it.')
+param addPasskeyHost string = ''
+
 var names = resourceNames(environment, nameSuffix)
 
 // Each door by its name in apps.bicep, with the host it serves.
-var doorHosts = [
-  {
-    door: 'app'
-    host: appHost
-  }
-  {
-    door: 'auth'
-    host: authHost
-  }
-]
+var doorHosts = concat(
+  [
+    {
+      door: 'app'
+      host: appHost
+    }
+    {
+      door: 'auth'
+      host: authHost
+    }
+  ],
+  empty(addPasskeyHost)
+    ? []
+    : [
+        {
+          door: 'addkey'
+          host: addPasskeyHost
+        }
+      ]
+)
 
 // The environment the foundation created (G2b), which holds the doors.
 resource appsEnvironment 'Microsoft.App/managedEnvironments@2026-01-01' existing = {

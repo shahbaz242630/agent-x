@@ -7516,7 +7516,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // A door PUBLIC_DOORS doesn't name, beside the ones it does.
     expect(
       doorProblems(withExtra({ ...structuredClone(appDoor), id: `${String(appDoor?.id)}x`, name: `${app}x` })),
-    ).toEqual([`${app}x: isn't a door PUBLIC_DOORS names (app, auth), so it may route nothing`]);
+    ).toEqual([`${app}x: isn't a door PUBLIC_DOORS names (app, auth, addkey), so it may route nothing`]);
     // The same door, but another environment's.
     expect(
       doorProblems(
@@ -7726,6 +7726,28 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(doorProblems(withExtra(structuredClone(appDoor) as unknown as Mutable))).toEqual([
       'the deployment: needs the app door once; the snapshot has 2',
     ]);
+  });
+
+  it('SA6 public-doors and door-certificates: the add-a-passkey door, once with its certificate where its host is given', () => {
+    const problems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter((problem) => problem.rule === 'public-doors' || problem.rule === 'door-certificates')
+        .map((problem) => `${problem.resource}: ${problem.message}`);
+    // Off, the default: no door, no certificate, nothing missing.
+    expect(staging.predictedResources.filter(named(/\/(rtagentxstgaddkey|mc-agentx-stg-addkey)$/))).toEqual([]);
+    const on = inCopy((dir) =>
+      environmentSnapshot(dir, 'staging', { AGENTX_AZURE_ADD_PASSKEY_HOST: 'addkey.auth.example.invalid' }),
+    ).together;
+    const door = on.predictedResources.find(named(/\/rtagentxstgaddkey$/));
+    expect(at(door, 'properties', 'customDomains')).toEqual([
+      { name: 'addkey.auth.example.invalid', bindingType: 'Auto' },
+    ]);
+    expect(on.predictedResources.find(named(/\/mc-agentx-stg-addkey$/))).toBeDefined();
+    expect(problems(on)).toEqual([]);
+    // There twice is refused, as any door is.
+    expect(
+      problems({ ...on, predictedResources: [...on.predictedResources, structuredClone(door) as never] }),
+    ).toContain('the deployment: needs the addkey door once; the snapshot has 2');
   });
 
   it('door-certificates: a door host without its one certificate, one elsewhere, for no door, or not validated by HTTP', () => {

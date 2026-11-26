@@ -18,6 +18,7 @@ import { APP_KEYS, PUBLIC_HALVES } from './app-keys.ts';
 /** The app's keys and the operator's key's public half (PL-57), each created once. */
 const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()];
 import {
+  addPasskeyHostOf,
   ACTION_GROUP,
   hostShapeProblem,
   ALERTING,
@@ -3035,6 +3036,8 @@ describe('deploy apps', () => {
       AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
       AGENTX_AZURE_API_OIDC_CLIENT_ID: CLIENT_ID,
       AGENTX_AZURE_APP_MIN_REPLICAS: '0',
+      // SA6: off unless the operator's shell names it, and always sent, checked, so the shell's own is never read raw.
+      AGENTX_AZURE_ADD_PASSKEY_HOST: '',
       // Always sent, so a value left in the shell is never what's deployed (D2c).
       AGENTX_AZURE_LOAD_RUN: 'false',
       AGENTX_AZURE_LOAD_IMAGE_DIGEST: '',
@@ -3810,7 +3813,11 @@ describe('deploy certificates', () => {
     expect(deployment?.args[deployment.args.indexOf('--name') + 1]).toBe(
       'agentx-staging-certificates-20260916T164215Z',
     );
-    expect(deployment?.values).toEqual({ AGENTX_AZURE_AUTH_HOST: AUTH_HOST, AGENTX_AZURE_APP_HOST: APP_HOST });
+    expect(deployment?.values).toEqual({
+      AGENTX_AZURE_AUTH_HOST: AUTH_HOST,
+      AGENTX_AZURE_APP_HOST: APP_HOST,
+      AGENTX_AZURE_ADD_PASSKEY_HOST: '',
+    });
     expect(done.checked).toEqual([deployment?.values]);
     expect(done.terminal.said.slice(-5)).toEqual([
       'Deployed. The certificates, and how Azure left each:',
@@ -4255,7 +4262,13 @@ describe('the tool and the deployment agree', () => {
     );
     const appsText = readFileSync(path.join(AZURE_DIR, 'staging.apps.bicepparam'), 'utf8');
     const appsRead = [...appsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
-    expect(appsRead.toSorted()).toEqual(Object.values(APP_VARIABLES).toSorted());
+    expect(appsRead.toSorted()).toEqual(
+      Object.values(APP_VARIABLES)
+        .filter((variable) => variable !== APP_VARIABLES.addPasskeyHost)
+        .toSorted(),
+    );
+    // SA6's add-a-passkey host, which apps always sets (empty: off); its default serves the policy tests alone.
+    expect(appsText).toContain(`readEnvironmentVariable('${APP_VARIABLES.addPasskeyHost}', '')`);
     // The load run's two (D2c), which apps always sets: their defaults serve the policy tests alone.
     expect(appsText).toContain(`readEnvironmentVariable('${LOAD_VARIABLES.run}', 'false')`);
     expect(appsText).toContain(`readEnvironmentVariable('${LOAD_VARIABLES.digest}', '')`);
@@ -4269,7 +4282,12 @@ describe('the tool and the deployment agree', () => {
   it('reads the certificates’ hosts from the apps’ variables, and finds the environment the foundation creates', () => {
     const certificatesText = readFileSync(path.join(AZURE_DIR, 'staging.certificates.bicepparam'), 'utf8');
     const read = [...certificatesText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
-    expect(read.toSorted()).toEqual(Object.values(CERTIFICATE_VARIABLES).toSorted());
+    expect(read.toSorted()).toEqual(
+      Object.values(CERTIFICATE_VARIABLES)
+        .filter((variable) => variable !== CERTIFICATE_VARIABLES.addPasskeyHost)
+        .toSorted(),
+    );
+    expect(certificatesText).toContain(`readEnvironmentVariable('${CERTIFICATE_VARIABLES.addPasskeyHost}', '')`);
     const environments = snapshot.predictedResources.filter(
       (resource) => resource.type === 'Microsoft.App/managedEnvironments',
     );
@@ -4691,5 +4709,30 @@ describe('unattended: CI’s approved infrastructure deploy (AZ5)', () => {
       "not a host isn't a host name (it holds a space or a line break): nothing was deployed.",
     );
     expect(done.az.deployment).toBeUndefined();
+  });
+});
+
+describe('SA6 the add-a-passkey host, from the operator’s own shell', () => {
+  it('is off, an empty value, unless the shell names it', () => {
+    expect(addPasskeyHostOf({}, 'auth.example.invalid')).toBe('');
+    expect(addPasskeyHostOf(undefined, 'auth.example.invalid')).toBe('');
+    expect(addPasskeyHostOf({ AGENTX_AZURE_ADD_PASSKEY_HOST: '  ' }, 'auth.example.invalid')).toBe('');
+  });
+
+  it('takes a host just below the sign-in host, in lower case', () => {
+    expect(
+      addPasskeyHostOf({ AGENTX_AZURE_ADD_PASSKEY_HOST: 'AddKey.Auth.Example.Invalid' }, 'auth.example.invalid'),
+    ).toBe('addkey.auth.example.invalid');
+  });
+
+  it.each([
+    'auth.example.invalid',
+    'addkey.example.invalid',
+    'addkeyauth.example.invalid',
+    'addkey.auth.example.invalid/x',
+  ])('refuses %s, deploying nothing', (host) => {
+    expect(() => addPasskeyHostOf({ AGENTX_AZURE_ADD_PASSKEY_HOST: host }, 'auth.example.invalid')).toThrow(
+      'must be a host just below the sign-in host (addkey.auth.example.invalid): nothing was deployed',
+    );
   });
 });

@@ -26,6 +26,7 @@ import {
   type PlatformControlsTables,
   type PlatformTransaction,
 } from '../../platform-controls/index.ts';
+import { PASSKEY_ADD_ACTION } from '../domain/passkey-addition.ts';
 import type { SignInEvidence, Subject } from '../domain/sign-in.ts';
 import { createLoginFlows, MOST_OPEN_SIGN_INS_A_NETWORK } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts';
@@ -42,6 +43,7 @@ import {
   sessionsEndedAt,
   sessionsEndedEvent,
 } from './sessions.ts';
+import type { PasskeyAdditions } from './passkey-additions.ts';
 import { PERSON_CHAIN_LOCK, sessionsSpent } from './person-chain-caps.ts';
 import { createSignIn, SessionsSpent, type SignIn, SignInBusy, StepUpFailed } from './sign-in-flow.ts';
 import { createSignedEnds } from './signed-ends.ts';
@@ -69,6 +71,9 @@ const evidence: SignInEvidence = {
   amr: ['pwd', 'otp', 'mfa'],
 };
 
+/** The person's access token a passkey step-up keeps (SA6): a stand-in built at run time, as every one for a secret. */
+const PERSON_TOKEN = ['person', 'token', 'stand', 'in'].join('-');
+
 /** Every flow any stand-in made, so each has its own values. */
 let flowsMade = 0;
 
@@ -87,7 +92,11 @@ class StandInClient implements OidcClient {
   failWith: SignInFailed | undefined;
 
   /** What each start was asked for. */
-  startedWith: ({ prompt?: 'login'; nonce?: string } | undefined)[] = [];
+  startedWith: ({ prompt?: 'login'; nonce?: string; zitadelApi?: boolean } | undefined)[] = [];
+  /** What each finish was asked for (SA6: whether to hand the access token back). */
+  finishedWith: ({ keepAccessToken?: boolean } | undefined)[] = [];
+  /** The access token the next sign-in hands back, when asked to keep it (SA6). */
+  accessToken: string | undefined = PERSON_TOKEN;
   /** What the next sign-in proves: the usual evidence unless a test says otherwise. */
   proves: SignInEvidence = evidence;
   /** The verified address the next sign-in gives, if any. */
@@ -95,7 +104,7 @@ class StandInClient implements OidcClient {
   /** The name the next sign-in gives, if any. */
   name: string | undefined = undefined;
 
-  start(options?: { prompt?: 'login'; nonce?: string }) {
+  start(options?: { prompt?: 'login'; nonce?: string; zitadelApi?: boolean }) {
     this.started += 1;
     this.startedWith.push(options);
     flowsMade += 1;
@@ -111,8 +120,13 @@ class StandInClient implements OidcClient {
   /** Run as the code is traded: the time the person spends at the login service, say. */
   whileFinishing: (() => unknown) | undefined;
 
-  async finish(flow: LoginFlow, returned: { code: string; state: string }) {
+  revoke() {
+    return Promise.resolve(true);
+  }
+
+  async finish(flow: LoginFlow, returned: { code: string; state: string }, options?: { keepAccessToken?: boolean }) {
     this.finished.push({ flow, ...returned });
+    this.finishedWith.push(options);
     await this.whileFinishing?.();
     if (this.failWith !== undefined) throw this.failWith;
     if (returned.state !== flow.state) throw new SignInFailed('state_mismatch', 'test');
@@ -123,6 +137,7 @@ class StandInClient implements OidcClient {
       idTokenHash: Buffer.alloc(32, 7),
       verifiedEmail: this.verifiedEmail,
       name: this.name,
+      ...(options?.keepAccessToken === true && this.accessToken !== undefined && { accessToken: this.accessToken }),
     };
   }
 }
@@ -2000,5 +2015,136 @@ describe(`SEC-LIM-13 S210 TR-7 a person's sessions and step-ups held to a day's 
     expect(await two.complete({ ...theirs, code: 'a-code', previousCookie: other.cookie })).toMatchObject({
       userId: other.userId,
     });
+  });
+});
+
+describe(`SA6 a step-up for adding a passkey (Postgres ${server.version})`, () => {
+  /** A fresh sign-in ten seconds after the challenge, proved as `amr` says. */
+  const fresh = (amr: readonly string[]): SignInEvidence => ({
+    idpSessionId: 'V1_fresh',
+    authTime: new Date(START.getTime() + 10_000),
+    amr,
+  });
+  const stand: { kept: unknown[] } = { kept: [] };
+  /** The additions, as far as the step-up's return hands them the token. */
+  const additions = {
+    steppedUp: (_tx: unknown, addition: unknown) => {
+      stand.kept.push(addition);
+      return Promise.resolve();
+    },
+  } as unknown as PasskeyAdditions;
+
+  const withAdditions = (on: boolean) =>
+    createSignIn({
+      db: app,
+      oidc: client,
+      flows: createLoginFlows({ clock }),
+      sessions,
+      challenges,
+      ids: new SequentialIds(0x9a00 + subjects * 0x100),
+      clock,
+      keys,
+      logger: testLogger(capture),
+      ...(on && { additions }),
+    });
+
+  const stateOf = (url: string) => new URL(url).searchParams.get('state') ?? '';
+
+  /** A signed-in person with a pending step-up for `action`. */
+  async function asked(flow: SignIn, action = PASSKEY_ADD_ACTION) {
+    const { url, flowId } = await flow.begin(undefined, NETWORK);
+    const done = await flow.complete({ flowId, code: 'a-code', state: stateOf(url), previousCookie: undefined });
+    const challenge = await challenges.open(app, {
+      sessionId: done.sessionId,
+      action,
+      changeHash: Buffer.alloc(32, 3),
+    });
+    if (challenge === undefined) throw new Error('no challenge');
+    return { done, challenge };
+  }
+
+  const stepUp = async (flow: SignIn, sessionId: string, challengeId: string, cookie: string) => {
+    const { url, flowId } = await flow.beginStepUp(sessionId, challengeId, '/more/passkeys');
+    return flow.complete({ flowId, code: 'a-code', state: stateOf(url), previousCookie: cookie });
+  };
+
+  beforeEach(() => {
+    stand.kept = [];
+  });
+
+  it('asks for the login service API too, needs a passkey, and hands the person token to the addition', async () => {
+    const flow = withAdditions(true);
+    const { done, challenge } = await asked(flow);
+    client.proves = fresh(['pwd', 'user', 'mfa']);
+
+    await stepUp(flow, done.sessionId, challenge.challengeId, done.cookie);
+
+    expect(client.startedWith.at(-1)).toEqual({ prompt: 'login', nonce: challenge.nonce, zitadelApi: true });
+    expect(client.finishedWith.at(-1)).toEqual({ keepAccessToken: true });
+    expect(stand.kept).toEqual([
+      {
+        challengeId: challenge.challengeId,
+        sessionId: done.sessionId,
+        userId: done.userId,
+        accessToken: PERSON_TOKEN,
+      },
+    ]);
+  });
+
+  it.each([
+    ['a password and an app code', ['pwd', 'otp', 'mfa'], 'no_passkey'],
+    ['a password alone', ['pwd'], 'no_second_factor'],
+    ['a key without a second factor proved', ['user'], 'no_second_factor'],
+  ])('SEC-HA-12 refuses a step-up proved with %s, keeping no token', async (_name, amr, failure) => {
+    const flow = withAdditions(true);
+    const { done, challenge } = await asked(flow);
+    client.proves = fresh(amr);
+
+    await expect(stepUp(flow, done.sessionId, challenge.challengeId, done.cookie)).rejects.toMatchObject({ failure });
+
+    expect(stand.kept).toEqual([]);
+  });
+
+  it('refuses a passkey step-up that comes back with no token for the login service', async () => {
+    const flow = withAdditions(true);
+    const { done, challenge } = await asked(flow);
+    client.proves = fresh(['pwd', 'user', 'mfa']);
+    client.accessToken = undefined;
+
+    await expect(stepUp(flow, done.sessionId, challenge.challengeId, done.cookie)).rejects.toMatchObject({
+      failure: 'token_invalid',
+    });
+    expect(stand.kept).toEqual([]);
+  });
+
+  it('asks nothing more, and keeps no token, for any other change', async () => {
+    const flow = withAdditions(true);
+    const { done, challenge } = await asked(flow, 'members.invite');
+    client.proves = fresh(['pwd', 'otp', 'mfa']);
+
+    await stepUp(flow, done.sessionId, challenge.challengeId, done.cookie);
+
+    expect(client.startedWith.at(-1)).toEqual({ prompt: 'login', nonce: challenge.nonce });
+    expect(client.finishedWith.at(-1)).toEqual({ keepAccessToken: false });
+    expect(stand.kept).toEqual([]);
+  });
+
+  it('while adding is off, never begins one, nor finishes one begun', async () => {
+    const off = withAdditions(false);
+    const { done, challenge } = await asked(off);
+    const started = client.started;
+
+    await expect(off.beginStepUp(done.sessionId, challenge.challengeId, '/more/passkeys')).rejects.toMatchObject({
+      failure: 'challenge_missing',
+    });
+    expect(client.started).toBe(started);
+
+    // Begun while on, come back to a process where it is off.
+    const on = withAdditions(true);
+    const { url, flowId } = await on.beginStepUp(done.sessionId, challenge.challengeId, '/more/passkeys');
+    client.proves = fresh(['pwd', 'user', 'mfa']);
+    await expect(
+      off.complete({ flowId, code: 'a-code', state: stateOf(url), previousCookie: done.cookie }),
+    ).rejects.toMatchObject({ failure: 'challenge_missing' });
   });
 });
