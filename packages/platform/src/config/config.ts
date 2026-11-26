@@ -644,6 +644,12 @@ function blobStoreProblems(env: Env, checks: Settings): string[] {
   ];
 }
 
+/** SA6: the add-a-passkey page's origin against the environment and sign-in, where all three are valid. */
+const addPasskeyRuleProblems = ({ environment, addPasskeyOrigin, oidcIssuer }: Settings): string[] =>
+  environment.ok && addPasskeyOrigin.ok && oidcIssuer.ok
+    ? addPasskeyProblems(environment.value, addPasskeyOrigin.value, oidcIssuer.value)
+    : [];
+
 /** Rules between the environment and the HTTP, logging and outbound settings, where those are valid. */
 function httpRuleProblems(checks: Settings): string[] {
   const { environment, release, logLevel, httpPort, origin, trustedProxies, allowedOrigins } = checks;
@@ -755,9 +761,6 @@ function serviceRuleProblems(checks: Settings): string[] {
     ...(checks.factorResetToken.ok && checks.oidcIssuer.ok
       ? factorResetProblems(checks.factorResetToken.value, checks.oidcIssuer.value !== undefined)
       : []),
-    ...(checks.environment.ok && checks.addPasskeyOrigin.ok && checks.oidcIssuer.ok
-      ? addPasskeyProblems(checks.environment.value, checks.addPasskeyOrigin.value, checks.oidcIssuer.value)
-      : []),
     ...(checks.sessionIdle.ok && checks.sessionAbsolute.ok
       ? sessionProblems(checks.sessionIdle.value, checks.sessionAbsolute.value)
       : []),
@@ -813,6 +816,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       // so one start reports it alongside any other problem.
       ...httpRuleProblems(checks),
       ...rateLimitRuleProblems(checks),
+      ...addPasskeyRuleProblems(checks),
       ...decisionGateProblems(checks),
       ...copiesProblems(checks),
       ...serviceRuleProblems(checks),

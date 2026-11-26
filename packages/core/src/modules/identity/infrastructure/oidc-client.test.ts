@@ -907,9 +907,8 @@ describe('SA6 a step-up for adding a passkey: the login service API and its toke
     expect(await revoking.revoke(ACCESS)).toBe(true);
 
     const [call] = service.callsTo('/oauth/v2/revoke');
-    expect(new Headers(call?.init.headers).get('authorization')).toBe(
-      `Basic ${Buffer.from(`${encodeURIComponent(CLIENT)}:${encodeURIComponent(PASS)}`).toString('base64')}`,
-    );
+    const pair = `${encodeURIComponent(CLIENT)}:${encodeURIComponent(PASS)}`;
+    expect(new Headers(call?.init.headers).get('authorization')).toBe(`Basic ${Buffer.from(pair).toString('base64')}`);
     expect(Object.fromEntries(new URLSearchParams(call?.init.body as string))).toEqual({
       token: ACCESS,
       token_type_hint: 'access_token',

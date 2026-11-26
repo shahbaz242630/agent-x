@@ -261,8 +261,10 @@ export function createOidcClient({
   const issuerOrigin = new URL(issuer).origin;
 
   /** The client's own credentials for the token and revocation endpoints (RFC 6749 §2.3.1: each part form-encoded first). */
-  const basicAuthorization = (): string =>
-    `Basic ${Buffer.from(`${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`).toString('base64')}`;
+  const basicAuthorization = (): string => {
+    const pair = `${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`;
+    return `Basic ${Buffer.from(pair).toString('base64')}`;
+  };
 
   /** A call to the login service, bounded in time; a network failure is the provider's. */
   async function call(url: string, init: RequestInit = {}): Promise<Response> {
