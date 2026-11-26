@@ -37,6 +37,7 @@ param ownLogNames array
 param integrityAlertName string
 param tokenRefusedAlertName string
 param denialSurgeAlertName string
+param duplicateAttemptsAlertName string
 param holdingsCheckAlertName string
 param integrityRunsAlertName string
 param agentCancelsAlertName string
@@ -456,6 +457,73 @@ resource denialSurgeAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
           metricMeasureColumn: 'Highest'
           operator: 'GreaterThan'
           threshold: 10
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// Duplicate attempts (ADR-014; Logging-and-Monitoring.md section 5; GA3): one
+// agent asking again and again for what is already done is a retry loop gone
+// wrong, an agent replaying old orders, or one probing the duplicate checks.
+// Two signs, both counted per agent: a spend request denied as an order already
+// asked for (`spend_request.decided` whose reasons, space-separated, hold
+// DUPLICATE_ORDER_REFERENCE), and an agent's retry key reused for a different
+// request, answered 409 IDEMPOTENCY_KEY_REUSED (`idempotency.conflict`, its
+// agent as `clientId` with `clientKind` agent). A key still being worked on
+// (409 IDEMPOTENCY_KEY_BUSY) is a well-behaved retry told to wait, so it is
+// left out. Nothing is paid twice either way: each attempt was refused. The
+// query returns the highest agent's count, one number with no ID dimensions
+// (ADR-013); the saved query shows which agent. More than 5 in 15 minutes is
+// well past an agent retrying once or twice: a first number, to tune on real
+// traffic. Stateful, as above.
+var duplicateLines = 'ContainerAppConsoleLogs | extend Line = parse_json(Log) | where (tostring(Line.event) == "spend_request.decided" and set_has_element(split(tostring(Line.reasons), " "), "DUPLICATE_ORDER_REFERENCE")) or (tostring(Line.event) == "idempotency.conflict" and tostring(Line.clientKind) == "agent") | extend Agent = tolower(iff(tostring(Line.event) == "spend_request.decided", tostring(Line.agentId), tostring(Line.clientId)))'
+
+resource duplicatesByAgent 'Microsoft.OperationalInsights/workspaces/savedSearches@2025-07-01' = {
+  parent: workspace
+  name: 'agentx-duplicates-by-agent'
+  properties: {
+    category: 'Agent X'
+    displayName: 'Duplicate attempts by agent'
+    query: '${duplicateLines} | summarize Attempts = count(), Orders = countif(tostring(Line.event) == "spend_request.decided"), ReusedKeys = countif(tostring(Line.event) == "idempotency.conflict"), Latest = max(TimeGenerated) by Organisation = tostring(Line.orgId), Agent, Window = bin(TimeGenerated, 15m) | summarize Busiest15m = max(Attempts), Total = sum(Attempts), Orders = sum(Orders), ReusedKeys = sum(ReusedKeys), Latest = max(Latest) by Organisation, Agent | order by Busiest15m desc'
+    version: 2
+  }
+}
+
+resource duplicateAttemptsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: duplicateAttemptsAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Spend requests: one agent repeating what is already done'
+    description: 'SEV-2. One agent made more than 5 duplicate attempts in 15 minutes: it asked to pay an order it had already asked for (DUPLICATE_ORDER_REFERENCE), or reused a retry key for a different request (409 IDEMPOTENCY_KEY_REUSED). Nothing was paid twice, as each attempt was refused, but the agent may be looping, replaying old orders or probing the checks. The saved query "Duplicate attempts by agent" shows which agent; check it with its owner, and suspend it if it carries on. Runbook: Incident-Response-Playbook.md section F.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: '${duplicateLines} | where ingestion_time() > ago(30m) | summarize Attempts = count() by Agent | summarize Highest = max(Attempts)'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Highest'
+          operator: 'GreaterThan'
+          threshold: 5
           failingPeriods: {
             numberOfEvaluationPeriods: 1
             minFailingPeriodsToAlert: 1

@@ -330,6 +330,8 @@ module appsEnvironment 'modules/environment.bicep' = {
     securitySealAlertName: 'alert-agentx-${short}-security-seal'
     agentCancelsAlertName: 'alert-agentx-${short}-agent-cancels'
     agentCancelCapAlertName: 'alert-agentx-${short}-agent-cancel-cap'
+    // GA3: one agent's duplicate orders and reused retry keys.
+    duplicateAttemptsAlertName: 'alert-agentx-${short}-duplicate-attempts'
     decisionsSuppressedAlertName: 'alert-agentx-${short}-decisions-suppressed'
     mcpRefusalsAlertName: 'alert-agentx-${short}-mcp-refusals'
     mcpUnknownProtocolAlertName: 'alert-agentx-${short}-mcp-unknown-protocol'

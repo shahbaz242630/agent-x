@@ -33,10 +33,12 @@
 //   decision and reasons, its evaluation input's hash, the versions of the
 //   mandate, policies and supplier it was decided under, with the mandate's
 //   acceptance and the supplier version's verification as their signed events,
-//   each found exactly), the agent and the key it asked with, a person's
-//   approval, reject or a void, the limit reservation, the funding source by
-//   its holder's name and masked hint alone, and, once handed off, the
-//   instruction (route, partner and its legal-entity and licence references,
+//   each found exactly, and that version's payee reference at the partner),
+//   the agent and the key it asked with, a person's approval, reject or a void,
+//   the limit reservation, the funding source by its holder's name, masked
+//   hint and the partner's reference for its consent, and, once handed off,
+//   the instruction (route, partner and its legal-entity and licence
+//   references, the consent and payee references it was handed off with,
 //   normalized hash), the payment (the partner's reference and word, its
 //   canonical status) and where its reconciliation stands. Then every signed
 //   event about the request and its objects (its evidence downloads, its
@@ -50,11 +52,14 @@
 //   the reservation as the holdings check judges it: any that can't be is 503
 //   INTEGRITY_FAILED, the alarm raised and the organisation held, never a
 //   bundle with a part left out.
-// - Never in it: the payee's reference or account, the consent, a key's
-//   version, a keyed fingerprint or a MAC (the audit log's seals left out as on
-//   its page, and any fact of an event whose name is secret-shaped:
-//   evidenceFacts), SEC-EVD-04. The partner's legal-entity and licence
-//   references are the licensed partner's public identifiers, kept (S197).
+// - Never in it: an account number or IBAN, a masked payee account, the
+//   payee's key, a key's version, a keyed fingerprint or a MAC (the audit
+//   log's seals left out as on its page, and any fact of an event whose name
+//   is secret-shaped: evidenceFacts), SEC-EVD-04. The partner's legal-entity
+//   and licence references are the licensed partner's public identifiers, kept
+//   (S197); the partner's consent and beneficiary references are opaque IDs at
+//   the partner that grant nothing alone (calls to it go with our own
+//   credentials), kept as BR-16 and PRD §8 ask (GA2).
 //
 // ADR-006's lock order is kept by reading the rows in two transactions, the
 // request with its agent and supplier (3, 6, 8) and its holdings (10), then the
@@ -392,7 +397,7 @@ const voidingOf = (logged: LogEvent | undefined) => {
   return { eventId: logged.id, at: logged.recordedAt.toISOString(), reasons: reasonsOf(causes) };
 };
 
-/** The payment as the bundle shows it, once handed off: never its payee's reference or its consent. */
+/** The payment as the bundle shows it, once handed off: the consent and payee references by their opaque IDs alone. */
 function paymentEvidenceOf(payment: PaymentRead) {
   if (payment === null) return null;
   const { instruction, markFailed } = payment;
@@ -405,6 +410,8 @@ function paymentEvidenceOf(payment: PaymentRead) {
       partner: instruction.partner,
       partnerLegalEntityId: instruction.partnerLegalEntityId,
       partnerLicenceRef: instruction.partnerLicenceRef,
+      accountConsentId: instruction.accountConsentId,
+      beneficiaryRef: instruction.beneficiaryRef,
       paymentReference: instruction.paymentReference,
       intentHash: instruction.intentHash,
       createdAt: instruction.createdAt.toISOString(),
@@ -478,13 +485,20 @@ function bundleOf(
       version:
         version === null
           ? null
-          : { id: version.id, number: version.version, name: version.displayName, verification: logged.verification },
+          : {
+              id: version.id,
+              number: version.version,
+              name: version.displayName,
+              beneficiaryRef: version.beneficiaryRef,
+              verification: logged.verification,
+            },
     },
     fundingSource: {
       id: asked.fundingSourceId,
       holderName: source?.summary.holderName ?? null,
       hint: source?.summary.hint ?? null,
       partner: source?.partner ?? null,
+      accountConsentId: source?.accountConsentId ?? null,
     },
     approval: approved === undefined ? null : personDecisionOf(approved),
     rejection:
@@ -768,12 +782,20 @@ const PAYMENT_EVIDENCE = z
         partner: z.string().describe('The payment partner it went to.'),
         partnerLegalEntityId: z.string().describe('The licensed partner’s legal-entity reference, as sealed with it.'),
         partnerLicenceRef: z.string().describe('The licensed partner’s licence reference, as sealed with it.'),
+        accountConsentId: z
+          .string()
+          .describe('The partner’s reference for the consent it was paid under (an opaque ID), as sealed with it.'),
+        beneficiaryRef: z
+          .string()
+          .describe(
+            'The partner’s reference for the payee it was paid to (an opaque ID, never an account number), as sealed with it.',
+          ),
         paymentReference: z.string().describe('The payment reference the bank received.'),
         intentHash: z.string().describe('The normalized instruction’s hash, as sealed with it.'),
         createdAt: z.iso.datetime().describe('When it was made.'),
       })
       .describe(
-        'The instruction handed off, with the licensed partner’s public references; never its payee’s reference or its consent.',
+        'The instruction handed off, with the licensed partner’s public references and the consent and payee references by their opaque IDs; never an account number.',
       ),
     id: z.uuid().describe('The payment, by its ID.'),
     status: z.enum(TRANSACTION.states).describe('Its canonical outcome as it stands.'),
@@ -845,6 +867,13 @@ const BUNDLE = {
           id: z.uuid().describe('The supplier’s details it was decided under, by their ID.'),
           number: z.int().describe('Those details’ version number.'),
           name: z.string().describe('The name those details gave it.'),
+          beneficiaryRef: z
+            .string()
+            .nullable()
+            .describe(
+              'The partner’s reference for those details’ payee (an opaque ID, never an account number); null when no ' +
+                'payee was registered for them.',
+            ),
           verification: basisEvent(
             'The signed verification of those details, as the log holds it; null if they were never verified as such.',
           ),
@@ -852,7 +881,7 @@ const BUNDLE = {
         .nullable()
         .describe('The supplier’s details it was decided under; null when it is none of the organisation’s.'),
     })
-    .describe('The supplier, never its payee’s reference or account.'),
+    .describe('The supplier, its payee by the partner’s reference alone: never its account.'),
   fundingSource: z
     .object({
       id: z.uuid().describe('The bank account it pays from, by its ID.'),
@@ -871,9 +900,16 @@ const BUNDLE = {
         .string()
         .nullable()
         .describe('The payment partner the account is linked through; null when it is none of the organisation’s.'),
+      accountConsentId: z
+        .string()
+        .nullable()
+        .describe(
+          'The partner’s reference for the consent the account is linked under now (an opaque ID): a renewal replaces ' +
+            'it, and a payment’s instruction holds the one it was paid under. Null when it is none of the organisation’s.',
+        ),
     })
     .describe(
-      'The funding source chosen, as the console shows it: never its consent or full account number. Only its ID ' +
+      'The funding source chosen, as the console shows it: never its account number. Only its ID ' +
         'when it is none of the organisation’s (the agent named one it doesn’t have, so the request was denied).',
     ),
   approval: z
