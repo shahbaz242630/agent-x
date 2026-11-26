@@ -344,6 +344,27 @@ export const ALLOWED: readonly Allowed[] = [
     lines: 2,
   },
   {
+    file: 'packages/core/src/modules/identity/infrastructure/passkey-additions.ts',
+    match: ".deleteFrom('identity.step_up_challenges')",
+    guard: ".where('session_id', '=', sessionId)",
+    proof: {
+      file: 'packages/core/src/modules/identity/infrastructure/passkey-additions.db.test.ts',
+      title: 'is given once, for the session that stepped up, and its step-up challenge goes',
+    },
+    why: "SA6: a passkey step-up's own challenge, used once its ticket is given, its own session's alone",
+  },
+  {
+    file: 'packages/core/src/modules/identity/infrastructure/passkey-additions.ts',
+    match: ".deleteFrom('identity.passkey_additions')",
+    guard: ".where('ends_at', '<=', clock.now())",
+    proof: {
+      file: 'packages/core/src/modules/identity/infrastructure/passkey-additions.db.test.ts',
+      title: 'sweeps additions past their time, and leaves the rest',
+    },
+    why: 'SA6: an addition the login service refused the key for (its own row, still confirming), and the sweep of those past their minutes',
+    lines: 2,
+  },
+  {
     file: 'packages/core/src/modules/notifications/infrastructure/outbox.ts',
     match: "tx.deleteFrom('notifications.outbox')",
     guard: 'OUTBOX_RETENTION_DAYS',

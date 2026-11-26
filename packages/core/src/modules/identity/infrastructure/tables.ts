@@ -2,7 +2,7 @@ import type { Generated } from 'kysely';
 
 import type { TamperSign } from '../../audit/index.ts';
 
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql, 0049_user_contacts.sql, 0085_membership_grants.sql, 0106_login_flow_caps.sql, 0120_passkey_additions.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql, 0049_user_contacts.sql, 0085_membership_grants.sql, 0106_login_flow_caps.sql, 0121_passkey_additions.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
@@ -68,7 +68,7 @@ interface LoginFlowsTable {
   network_key: string | null;
 }
 
-/** A passkey added inside Agent X under way (SA6, 0120): from the step-up's return to the key confirmed. */
+/** A passkey added inside Agent X under way (SA6, 0121): from the step-up's return to the key confirmed. */
 interface PasskeyAdditionsTable {
   /** The step-up challenge's own ID. */
   id: string;

@@ -1,5 +1,5 @@
 // A passkey added inside Agent X (SA6; ADR-012 §8, SEC-OPS-04, B6-3d), from the step-up's return to the key
-// confirmed (passkey-addition.ts tells the whole flow; 0120 keeps each addition under way):
+// confirmed (passkey-addition.ts tells the whole flow; 0121 keeps each addition under way):
 //
 // - `begin`, for the console, with an idempotency key (kept under the person's own keys, as their downloads are): a
 //   step-up challenge of the session for PASSKEY_ADD_ACTION.
