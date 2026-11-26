@@ -46,7 +46,12 @@ const WARN = 40;
 export const DECISION_EVENT = 'spend_request.decided';
 export const DECISION_BUDGET_PER_MINUTE = 20_000;
 
-/** Event families whose info and debug lines are never held back, nor counted: the hand-off, payment moves, the audit trail. */
+/**
+ * Event families whose info and debug lines are never held back, nor counted: the hand-off, payment moves, the audit
+ * trail, and the money-path snapshot's (GA4), whose lines name each organisation with a payment unknown or stuck, all
+ * in one pass: a bank outage makes many at once, and that list is the one to read whole then. Its volume follows the
+ * organisations with such a payment, once each 15 minutes, never a caller.
+ */
 export const NEVER_HELD_BACK = [
   'handoff.',
   'payment.',
@@ -54,6 +59,7 @@ export const NEVER_HELD_BACK = [
   'instruction.',
   'transaction.',
   'audit.',
+  'money_path.',
 ] as const;
 
 /** An event's lines a minute at this level before any are held back; infinite for those never held back. */

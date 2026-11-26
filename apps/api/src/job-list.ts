@@ -69,6 +69,7 @@ import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { contactFillFrom } from './kept-names.ts';
 import { CARRY_REST_EVERY_MS, carryRestDue, createCarryRest } from './mandate-carry-rest.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
+import { createMoneyPathSnapshot, MONEY_PATH_EVERY_MS } from './money-path-snapshot.ts';
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { PERSON_KEYS_TENANT } from './my-activity.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
@@ -825,6 +826,13 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       }),
       SECURITY_TALLY_EVERY_MS,
       LONG_MS,
+    ),
+    // Every organisation's approvals waiting, payments unknown or stuck and money held, added up for the workbook (GA4).
+    job(
+      'money_path_snapshot',
+      createMoneyPathSnapshot({ list, database, clock: systemClock, logger }),
+      MONEY_PATH_EVERY_MS,
+      HALF_HOUR_MS,
     ),
     // Every organisation's marks of work held to what its own rows say (4D2e D6).
     job(

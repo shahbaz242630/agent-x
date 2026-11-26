@@ -1,0 +1,25 @@
+-- agentx: no transaction (concurrent index)
+-- GA4 (PRD §9.3): the money-path snapshot counts the money each organisation holds, every
+-- 15 minutes: every reservation HELD or BLOCKED_UNKNOWN, whatever its request's status, each
+-- said as held (in its agent's month now, or its request still live) or as kept past its
+-- month (an ending that kept its capacity, `capacityKept`, leaves its reservation HELD for
+-- good, counting in its own month alone: month-totals.ts).
+--
+-- None of the table's indexes keys its state alone: 0081's held_in_an_agents_month_summed
+-- (which replaced 0040's held_in_an_agents_month) keys an agent's month and keeps every state
+-- but RELEASED, FINALISED among them, and 0041's held_for_a_supplier and held_for_a_payee key
+-- the split total's windows; each grows with every payment ever made. This one keeps only
+-- reservations HELD or BLOCKED_UNKNOWN, by organisation and currency, carrying what the
+-- snapshot reads of each (its amount, agent, month and request), so its read is one range of
+-- the index alone. A row leaves it as its reservation is finalised or released; one an ending
+-- kept HELD stays in it for good, as it stays HELD, which the snapshot says apart once its
+-- month is past. No table, column or grant changes; a plain index missing is speed to the
+-- schema guard, never drift (schema-guard.ts), so the image before this migration reads on
+-- as before.
+--
+-- Built concurrently, outside a transaction (the first line; migrate.ts), as 0074's:
+-- reservations go on being made and settled while it builds. A build that fails leaves the
+-- index not valid, which the guard reads as speed, not drift, and the next run drops it and
+-- builds it again.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS reservations_holding ON limit_reservations.reservations (org_id, currency)
+  INCLUDE (amount_minor, agent_id, month, request_id) WHERE state IN ('HELD', 'BLOCKED_UNKNOWN');

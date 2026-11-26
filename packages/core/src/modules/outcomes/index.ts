@@ -33,3 +33,12 @@ export {
   markFailed,
   type MarkFailedTables,
 } from './infrastructure/mark-failed.ts';
+// Each organisation's money path in counts, for the money-path snapshot (GA4, PRD §9.3).
+export {
+  type HeldMoney,
+  type MoneyPath,
+  moneyPathOf,
+  moneyPathRead,
+  type MoneyPathRow,
+  type MoneyPathWindow,
+} from './infrastructure/money-path.ts';

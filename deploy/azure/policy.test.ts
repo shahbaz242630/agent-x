@@ -3996,6 +3996,30 @@ describe('SEC-OPS-09 each rule can fail', () => {
         inside(decisions ?? {}, 'content').query =
           'ContainerAppConsoleLogs | summarize count() by tostring(parse_json(Log).orgId)';
       }),
+      // GA4: the money path charted from its snapshot, as it stands now and over time. Without its charts, without
+      // what stands now, without its trend, or reading another event, it isn't.
+      rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter((item) => !String(item.name).startsWith('money-'));
+      }),
+      rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter(
+          (item) => !['money-now', 'money-held-now'].includes(String(item.name)),
+        );
+      }),
+      rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter((item) => item.name !== 'money-unknown-age');
+      }),
+      rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter((item) => item.name !== 'money-kept-trend');
+      }),
+      rewritten((data) => {
+        for (const item of data.items as Mutable[])
+          if (String(item.name).startsWith('money-'))
+            inside(item, 'content').query = String(inside(item, 'content').query).replace(
+              'money_path.snapshot',
+              'money_path.organisation',
+            );
+      }),
     ]) {
       expect(brokenRules(changed(WORKBOOK, change))).toEqual(['workbook']);
     }
