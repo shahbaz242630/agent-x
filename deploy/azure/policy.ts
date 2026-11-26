@@ -2108,9 +2108,9 @@ const doorOf = (rule: unknown): string =>
  * Every door the apps subnet may have out, and why it is there. The first four
  * are this deployment's own addresses, the next five Azure's service tags,
  * which Azure keeps current; then GitHub's published addresses, two sets,
- * which nothing keeps current but the refresher (github-ranges.ts); and two
- * more service tags for the apps' own outbound calls: email (B5) and the
- * activity downloads' store (L5c), in this region alone; last the MCP clients'
+ * which nothing keeps current but the refresher (github-ranges.ts); one more
+ * service tag for the apps' own outbound email (B5; the stores are reached
+ * through the endpoints subnet, AZ11 and AZ32c-2); last the MCP clients'
  * published addresses, for their metadata documents (AG5, mcp-clients.json).
  */
 const egressDoors = (
@@ -2123,7 +2123,10 @@ const egressDoors = (
   [`* to ${apps} on *`, "the environment's own traffic between its nodes (Microsoft)"],
   [`* to ${AZURE_DNS} on 53`, "Azure's DNS, which resolves the database's private name and every host below"],
   [`Tcp to ${database} on 5432`, 'Postgres, in its own subnet'],
-  [`Tcp to ${endpoints} on 443`, 'the audit-export store, through its private endpoint (AZ11)'],
+  [
+    `Tcp to ${endpoints} on 443`,
+    'the two stores, audit exports and activity downloads, through their private endpoints',
+  ],
   [`Tcp to AzureKeyVault.${region} on 443`, 'the secrets each app and job reads, in this region alone'],
   ['Tcp to AzureMonitor on 443', "the apps' console logs on their way to the workspace"],
   ['Tcp to AzureActiveDirectory on 443', 'the token an identity reads its own secrets with'],
@@ -2139,8 +2142,7 @@ const egressDoors = (
   ],
   // Broad, every Front Door site: the API's list of exact origins is the real limit.
   ['Tcp to AzureFrontDoor.Frontend on 443', "Communication Services' email endpoint, which answers behind Front Door"],
-  // Every account in the region, not ours alone: the store's own network rule is the limit.
-  [`Tcp to Storage.${region} on 443`, "the API's activity downloads, to their store"],
+  // No door to the region's Storage (AZ32c-2): it reached every account there; both stores are behind the endpoints'.
   // Only where the OAuth server is on (mcpOauthOn), each client's own published ranges.
   ...(mcpOauthOn(environment)
     ? [
@@ -2456,16 +2458,13 @@ const vault: Check = (snapshot, _expected, add) => {
 
 /**
  * What either store's account must be, each a line a problem names: shut to
- * everyone but Entra sign-ins from this deployment's apps subnet. Its copies
- * and whether it is write-once are each store's own.
+ * everyone but Entra sign-ins through its private endpoint (AZ11, AZ32c-2;
+ * `storeEndpointProblems`). Its copies and whether it is write-once are each
+ * store's own.
  */
-function storeAccountLines(
-  account: PredictedResource,
-  appsSubnets: ReadonlySet<unknown>,
-): (readonly [string, boolean])[] {
+function storeAccountLines(account: PredictedResource): (readonly [string, boolean])[] {
   const properties = account.properties;
   const acls = at(properties, 'networkAcls');
-  const subnetRules = list(at(acls, 'virtualNetworkRules'));
   return [
     ['kind StorageV2', account.kind === 'StorageV2'],
     [
@@ -2495,9 +2494,11 @@ function storeAccountLines(
         list(at(acls, 'ipRules')).length === 0 &&
         list(at(acls, 'resourceAccessRules')).length === 0,
     ],
+    // A subnet named would need that subnet's Storage endpoint, which the apps subnet no longer has (AZ32c-2).
+    ['no subnet let in', list(at(acls, 'virtualNetworkRules')).length === 0],
     [
-      "this deployment's apps subnet as the only subnet let in",
-      subnetRules.length === 1 && appsSubnets.has(at(subnetRules[0], 'id')),
+      'no public network access: its private endpoint alone (AZ11, AZ32c-2)',
+      at(properties, 'publicNetworkAccess') === 'Disabled',
     ],
     ['infrastructure encryption', at(properties, 'encryption', 'requireInfrastructureEncryption') === true],
   ];
@@ -2507,16 +2508,11 @@ function storeAccountLines(
 function evidenceAccountProblems(
   account: PredictedResource,
   kept: (typeof EVIDENCE_KEPT)[keyof typeof EVIDENCE_KEPT],
-  appsSubnets: ReadonlySet<unknown>,
 ): string[] {
   const properties = account.properties;
   const policy = at(properties, 'immutableStorageWithVersioning', 'immutabilityPolicy');
   const required: readonly (readonly [string, boolean])[] = [
-    ...storeAccountLines(account, appsSubnets),
-    [
-      'no public network access: its private endpoint alone (AZ11)',
-      at(properties, 'publicNetworkAccess') === 'Disabled',
-    ],
+    ...storeAccountLines(account),
     [`${kept.sku} copies`, at(account, 'sku', 'name') === kept.sku],
     [
       `version-level immutability, ${kept.state}, for this environment's days, with no appends to a kept file`,
@@ -2533,12 +2529,12 @@ function evidenceAccountProblems(
 const BLOB_PRIVATE_ZONE = 'privatelink.blob.core.windows.net';
 
 /**
- * The store's one way in (AZ11, PL-43): the deployment's one private endpoint, to the store's blob service alone,
- * approved automatically, in its network's `endpoints` subnet, its A record kept by Azure in the blob zone linked to
- * that network. The subnet holds nothing else delegated, applies its rules to the endpoint, lets in TCP 443 from the
- * apps subnet alone, denies the rest of the network, and lets nothing out.
+ * Each store's one way in (AZ11, PL-43; AZ32c-2 for the activity downloads'): one private endpoint per store, to its
+ * blob service alone, approved automatically, in its network's `endpoints` subnet, its A record kept by Azure in the
+ * blob zone linked to that network; no other endpoint. The subnet holds nothing else delegated, applies its rules to
+ * the endpoints, lets in TCP 443 from the apps subnet alone, denies the rest of the network, and lets nothing out.
  */
-function evidenceEndpointProblems(
+function storeEndpointProblems(
   snapshot: Snapshot,
   accounts: readonly PredictedResource[],
   problem: (resource: string, message: string) => void,
@@ -2576,7 +2572,7 @@ function evidenceEndpointProblems(
     const subnet = list(at(network?.properties, 'subnets')).find((each) => at(each, 'name') === 'endpoints');
     const required: readonly (readonly [string, boolean])[] = [
       [
-        "one connection, to the audit-export store's blob service alone, approved automatically",
+        "one connection, to one store's blob service alone, approved automatically",
         connections.length === 1 &&
           accounts.some((account) => at(connections[0], 'properties', 'privateLinkServiceId') === account.id) &&
           JSON.stringify(at(connections[0], 'properties', 'groupIds')) === JSON.stringify(['blob']) &&
@@ -2601,8 +2597,18 @@ function evidenceEndpointProblems(
   if (endpoints.length !== accounts.length) {
     problem(
       'the deployment',
-      `needs one private endpoint, the audit-export store's; the snapshot has ${String(endpoints.length)}`,
+      `needs one private endpoint for each of its ${String(accounts.length)} stores and no other; the snapshot has ${String(endpoints.length)}`,
     );
+  }
+  for (const account of accounts) {
+    const own = endpoints.filter((endpoint) =>
+      list(at(endpoint.properties, 'privateLinkServiceConnections')).some(
+        (connection) => at(connection, 'properties', 'privateLinkServiceId') === account.id,
+      ),
+    );
+    if (own.length !== 1) {
+      problem(account.name, `needs one private endpoint, its only way in; the snapshot has ${String(own.length)}`);
+    }
   }
 }
 
@@ -2650,10 +2656,10 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * says, with versioning on its one blob service and two private containers; no
  * other Storage resource (a lifecycle rule, a file share, a local user) but the
  * activity downloads' store's, which is `activity-downloads`'s; it is reached
- * through its private endpoint alone (`evidenceEndpointProblems`, AZ11), and the
- * apps subnet keeps the Storage service endpoint the activity downloads' store
- * needs, which the store's own network rule (a fallback while public access is
- * off) names too. Each container has one
+ * through its private endpoint alone (`storeEndpointProblems`, AZ11), as the
+ * activity downloads' store is (AZ32c-2), checked here with it; and the apps
+ * subnet has no Storage service endpoint, which only reopened a way to every
+ * account in the region. Each container has one
  * custom role, assignable in the resource group alone, given on that
  * container alone: the exports' adds a new file and nothing else, to the
  * operator's identity, whose job alone is told where they go; the anchors' adds
@@ -2674,11 +2680,10 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     add({ rule: 'evidence-store', resource, message });
   };
   const copy = stageGCopyIn(snapshot);
-  const appsSubnets = appsSubnetIds(snapshot);
   const accounts = ofType(snapshot, TYPES.storage).filter((account) => EVIDENCE_ACCOUNT.test(account.name));
   for (const account of ofType(snapshot, TYPES.storage)) {
     if (EVIDENCE_ACCOUNT.test(account.name)) {
-      for (const what of evidenceAccountProblems(account, EVIDENCE_KEPT[expected.environment], appsSubnets)) {
+      for (const what of evidenceAccountProblems(account, EVIDENCE_KEPT[expected.environment])) {
         problem(account.name, `must have ${what}`);
       }
     } else if (!DOWNLOADS_ACCOUNT.test(account.name)) {
@@ -2692,18 +2697,21 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     problem('the deployment', `needs one audit-export store; the snapshot has ${String(accounts.length)}`);
   }
   evidencePartsProblems(snapshot, accounts, problem);
-  evidenceEndpointProblems(snapshot, accounts, problem);
+  storeEndpointProblems(
+    snapshot,
+    ofType(snapshot, TYPES.storage).filter(
+      (account) => EVIDENCE_ACCOUNT.test(account.name) || DOWNLOADS_ACCOUNT.test(account.name),
+    ),
+    problem,
+  );
+  // AZ32c-2: with both stores behind private endpoints, a Storage endpoint on the apps subnet would only reopen a
+  // short way to every account in the region (Azure refuses endpoint policies that would narrow it, #737).
   for (const network of ofType(snapshot, TYPES.network)) {
     const endpoints = list(at(appsSubnetOf(network), 'properties', 'serviceEndpoints'));
-    const kept = endpoints.some(
-      (endpoint) =>
-        at(endpoint, 'service') === 'Microsoft.Storage' &&
-        JSON.stringify(at(endpoint, 'locations')) === JSON.stringify([network.location]),
-    );
-    if (!kept) {
+    if (endpoints.some((endpoint) => /^Microsoft\.Storage/i.test(text(at(endpoint, 'service'))))) {
       problem(
         network.name,
-        "must keep its apps subnet's Storage service endpoint, in its own region: the activity downloads' store needs it, and the audit-export store's network rule names that subnet as its fallback",
+        'must not give its apps subnet a Storage service endpoint: both stores are reached through their private endpoints, and the endpoint would reach every account in the region (AZ32c-2)',
       );
     }
   }
@@ -3410,9 +3418,9 @@ function storeSettingsProblems(
 }
 
 /** What the activity downloads' account must be, each a line a problem names: as the audit exports', but one copy and not write-once. */
-function downloadsAccountProblems(account: PredictedResource, appsSubnets: ReadonlySet<unknown>): string[] {
+function downloadsAccountProblems(account: PredictedResource): string[] {
   const required: readonly (readonly [string, boolean])[] = [
-    ...storeAccountLines(account, appsSubnets),
+    ...storeAccountLines(account),
     ['Standard_LRS copies', at(account, 'sku', 'name') === 'Standard_LRS'],
     // A file is written over its own name, which a write-once account refuses.
     [
@@ -3511,18 +3519,17 @@ function downloadsPartsProblems(
  * nothing else, assignable in the resource group alone, and is given once,
  * on the container, to the identity of each app that runs the API (4D2e D13:
  * a `web` copy hands a file out, the jobs build it); they alone are told where
- * the store is, each as its own identity. Its logs are `resource-logs`'s, and the subnet's Storage endpoint
- * `evidence-store`'s.
+ * the store is, each as its own identity. Its logs are `resource-logs`'s, and its private endpoint
+ * (AZ32c-2) `evidence-store`'s, with the audit exports' one.
  */
 const activityDownloads: Check = (snapshot, _expected, add) => {
   const problem = (resource: string, message: string): void => {
     add({ rule: 'activity-downloads', resource, message });
   };
   const copy = stageGCopyIn(snapshot);
-  const appsSubnets = appsSubnetIds(snapshot);
   const accounts = ofType(snapshot, TYPES.storage).filter((account) => DOWNLOADS_ACCOUNT.test(account.name));
   for (const account of accounts) {
-    for (const what of downloadsAccountProblems(account, appsSubnets)) problem(account.name, `must have ${what}`);
+    for (const what of downloadsAccountProblems(account)) problem(account.name, `must have ${what}`);
     downloadsPartsProblems(snapshot, account, problem);
   }
   if (accounts.length !== 1) {

@@ -22,8 +22,10 @@
 //   nothing; no public blob access; no copying in from another tenant
 // - off the public route (AZ11; decision 27, PL-43): reached only through its
 //   blob private endpoint in the network's endpoints subnet, which only the apps
-//   subnet may reach (network.bicep); the network rule below stays as a second
-//   lock. Nobody reads an export from a laptop or the portal: how one is handed
+//   subnet may reach (network.bicep). Its network rule names no subnet: the
+//   apps subnet has no Storage endpoint (AZ32c-2), and Azure refuses a rule
+//   naming one without; with public access off it let nothing in anyway.
+//   Nobody reads an export from a laptop or the portal: how one is handed
 //   over is decided separately (decision 28)
 // - the operator's identity may add a new file to `audit-exports`
 //   (`blobs/add/action`), and read what is there (`blobs/read`, the plans'
@@ -80,7 +82,6 @@ func witnessSnapshotsContainerName() string => 'audit-witness-snapshots'
 param location string
 param name string
 param tags object
-param appsSubnetId string
 param endpointsSubnetId string
 param blobZoneId string
 param workspaceId string
@@ -142,12 +143,7 @@ resource account 'Microsoft.Storage/storageAccounts@2025-01-01' = {
       defaultAction: 'Deny'
       bypass: 'None'
       ipRules: []
-      virtualNetworkRules: [
-        {
-          id: appsSubnetId
-          action: 'Allow'
-        }
-      ]
+      virtualNetworkRules: []
     }
     encryption: {
       keySource: 'Microsoft.Storage'

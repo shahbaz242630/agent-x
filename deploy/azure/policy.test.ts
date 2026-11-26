@@ -418,13 +418,14 @@ const OPENED_ACCOUNT: readonly ((found: Mutable) => unknown)[] = [
   (found: Mutable) => (accountAcls(found).bypass = 'AzureServices'),
   (found: Mutable) => (accountAcls(found).ipRules = [{ value: '203.0.113.7' }]),
   (found: Mutable) => (accountAcls(found).resourceAccessRules = [{ resourceId: '/subscriptions/x/any' }]),
-  (found: Mutable) => (first(accountAcls(found).virtualNetworkRules).id = '/subscriptions/x/any/subnets/other'),
+  // AZ32c-2: no subnet at all, ours or another (each would need a Storage endpoint the apps subnet no longer has).
   (found: Mutable) =>
-    (accountAcls(found).virtualNetworkRules = [
-      first(accountAcls(found).virtualNetworkRules),
-      { id: '/subscriptions/x/any/subnets/other', action: 'Allow' },
-    ]),
-  (found: Mutable) => (accountAcls(found).virtualNetworkRules = []),
+    (accountAcls(found).virtualNetworkRules = [{ id: '/subscriptions/x/any/subnets/other', action: 'Allow' }]),
+  (found: Mutable) =>
+    (accountAcls(found).virtualNetworkRules = [{ id: '/subscriptions/x/vnet/subnets/apps', action: 'Allow' }]),
+  // Back on the public route, or the setting left to Azure's default (Enabled).
+  (found: Mutable) => (accountProperties(found).publicNetworkAccess = 'Enabled'),
+  (found: Mutable) => delete accountProperties(found).publicNetworkAccess,
   (found: Mutable) => (inside(found, 'properties', 'encryption').requireInfrastructureEncryption = false),
 ];
 
@@ -879,6 +880,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       'Microsoft.Insights/diagnosticSettings blob-logs-to-workspace',
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxdlstg[a-z0-9]{6}$/),
+      expect.stringMatching(/^Microsoft\.Network\/privateEndpoints pe-stagentxdlstg[a-z0-9]{6}-blob$/),
+      expect.stringMatching(
+        /^Microsoft\.Network\/privateEndpoints\/privateDnsZoneGroups pe-stagentxdlstg[a-z0-9]{6}-blob\/default$/,
+      ),
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxdlstg[a-z0-9]{6}\/default$/),
       expect.stringMatching(
         /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxdlstg[a-z0-9]{6}\/default\/activity-downloads$/,
@@ -2158,25 +2163,32 @@ describe('SEC-OPS-09 each rule can fail', () => {
       const found = staging.predictedResources.find(pick);
       expect(only(withExtra({ ...structuredClone(found), id: `${String(found?.id)}-second` }))).toContain('required');
     }
-    // The apps subnet without its Storage endpoint, or with it in another region.
+    // AZ32c-2: the apps subnet given a Storage endpoint back, in its region, another, any, or by the global name.
     const endpoints = (network: Mutable): Mutable[] =>
       at(subnet(network, 'apps'), 'properties', 'serviceEndpoints') as Mutable[];
     expect(
-      only(
-        changed(NETWORK, (network) => {
-          inside(subnet(network, 'apps'), 'properties').serviceEndpoints = endpoints(network).filter(
-            (endpoint) => endpoint.service !== 'Microsoft.Storage',
-          );
-        }),
-      ),
-    ).toEqual(['evidence-store']);
-    expect(
-      only(
-        changed(NETWORK, (network) => {
-          nth(endpoints(network), 1).locations = ['westeurope'];
-        }),
-      ),
-    ).toEqual(['evidence-store']);
+      (
+        at(
+          subnet(staging.predictedResources.find(NETWORK) as unknown as Mutable, 'apps'),
+          'properties',
+          'serviceEndpoints',
+        ) as Mutable[]
+      ).map((endpoint) => endpoint.service),
+    ).toEqual(['Microsoft.KeyVault']);
+    for (const added of [
+      { service: 'Microsoft.Storage', locations: ['uaenorth'] },
+      { service: 'Microsoft.Storage', locations: ['westeurope'] },
+      { service: 'Microsoft.Storage' },
+      { service: 'Microsoft.Storage.Global' },
+    ]) {
+      expect(
+        only(
+          changed(NETWORK, (network) => {
+            inside(subnet(network, 'apps'), 'properties').serviceEndpoints = [...endpoints(network), added];
+          }),
+        ),
+      ).toEqual(['evidence-store']);
+    }
 
     // The role: one data action, add a new file; never write, read, delete or any action.
     expect(at(staging.predictedResources.find(WRITER_ROLE)?.properties, 'permissions')).toEqual([
@@ -2314,9 +2326,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
   });
 
-  it('evidence-store: the store back on the public route, or its private endpoint, zone or subnet opened (AZ11, PL-43)', () => {
-    const ENDPOINT = type('Microsoft.Network/privateEndpoints');
-    const ZONE_GROUP = type('Microsoft.Network/privateEndpoints/privateDnsZoneGroups');
+  it('evidence-store: a store back on the public route, or its private endpoint, zone or subnet opened (AZ11, AZ32c-2)', () => {
+    const ANY_ENDPOINT = type('Microsoft.Network/privateEndpoints');
+    const ANY_ZONE_GROUP = type('Microsoft.Network/privateEndpoints/privateDnsZoneGroups');
+    // Each store's endpoint, and its zone group, by the store's name in theirs (`pe-<account>-blob`).
+    const endpointOf = (store: RegExp) => (resource: PredictedResource) =>
+      ANY_ENDPOINT(resource) && store.test(resource.name);
+    const zoneGroupOf = (store: RegExp) => (resource: PredictedResource) =>
+      ANY_ZONE_GROUP(resource) && store.test(resource.name);
+    const EVIDENCE_PE = /^pe-stagentxstg[a-z0-9]{6}-blob/;
+    const DOWNLOADS_PE = /^pe-stagentxdlstg[a-z0-9]{6}-blob/;
     const BLOB_ZONE = (resource: PredictedResource) =>
       type('Microsoft.Network/privateDnsZones')(resource) && resource.name.startsWith('privatelink.blob.');
     const BLOB_LINK = (resource: PredictedResource) =>
@@ -2333,67 +2352,85 @@ describe('SEC-OPS-09 each rule can fail', () => {
       );
     const only = (snapshotted: Snapshot): RuleId[] => brokenRules(snapshotted);
 
-    expect(at(staging.predictedResources.find(EVIDENCE_STORE)?.properties, 'publicNetworkAccess')).toBe('Disabled');
-    for (const change of [
-      (store: Mutable) => (inside(store, 'properties').publicNetworkAccess = 'Enabled'),
-      (store: Mutable) => delete inside(store, 'properties').publicNetworkAccess,
-    ]) {
-      expect(only(changed(EVIDENCE_STORE, change))).toEqual(['evidence-store']);
+    for (const [store, owner] of [
+      [EVIDENCE_STORE, 'evidence-store'],
+      [DOWNLOADS_STORE, 'activity-downloads'],
+    ] as const) {
+      expect(at(staging.predictedResources.find(store)?.properties, 'publicNetworkAccess')).toBe('Disabled');
+      for (const change of [
+        (found: Mutable) => (inside(found, 'properties').publicNetworkAccess = 'Enabled'),
+        (found: Mutable) => delete inside(found, 'properties').publicNetworkAccess,
+      ]) {
+        expect(only(changed(store, change))).toEqual([owner]);
+      }
     }
-    // No endpoint, or a second.
-    expect(only(without(ENDPOINT))).toEqual(['evidence-store']);
-    const endpoint = staging.predictedResources.find(ENDPOINT);
-    expect(only(withExtra({ ...structuredClone(endpoint), id: `${String(endpoint?.id)}-second` }))).toEqual([
+    // A third endpoint, to a store that has one already.
+    const third = staging.predictedResources.find(endpointOf(DOWNLOADS_PE));
+    expect(only(withExtra({ ...structuredClone(third), id: `${String(third?.id)}-third` }))).toEqual([
       'evidence-store',
     ]);
-    // To another account or service, by hand, or in another subnet.
-    const downloads = idOf(DOWNLOADS_STORE);
-    for (const change of [
-      (found: Mutable) => (connection(found).privateLinkServiceId = downloads),
-      (found: Mutable) => (connection(found).groupIds = ['file']),
-      (found: Mutable) => (connection(found).groupIds = ['blob', 'file']),
-      // A second connection, even one alike.
-      (found: Mutable) => {
-        const connections = at(found, 'properties', 'privateLinkServiceConnections') as Mutable[];
-        inside(found, 'properties').privateLinkServiceConnections = [
-          ...connections,
-          structuredClone(first(connections)),
-        ];
-      },
-      (found: Mutable) =>
-        (inside(found, 'properties').manualPrivateLinkServiceConnections = [
-          { name: 'other', properties: { privateLinkServiceId: downloads, groupIds: ['blob'] } },
-        ]),
-      (found: Mutable) =>
-        (inside(found, 'properties', 'subnet').id = String(at(found, 'properties', 'subnet', 'id')).replace(
-          /\/endpoints$/,
-          '/apps',
-        )),
-    ]) {
-      expect(only(changed(ENDPOINT, change))).toEqual(['evidence-store']);
-    }
-    // Its address kept nowhere, in the database's zone, or in a zone not linked to the network.
-    expect(only(without(ZONE_GROUP))).toEqual(['evidence-store']);
-    expect(
-      only(
-        changed(
-          ZONE_GROUP,
-          (group) =>
-            (inside(first(at(group, 'properties', 'privateDnsZoneConfigs')), 'properties').privateDnsZoneId = idOf(
-              DATABASE_DNS('Microsoft.Network/privateDnsZones'),
-            )),
+    // Each store's endpoint and its zone group, held alike (AZ32c-2 gave the downloads' store one beside the exports').
+    for (const [own, otherStore] of [
+      [EVIDENCE_PE, DOWNLOADS_STORE],
+      [DOWNLOADS_PE, EVIDENCE_STORE],
+    ] as const) {
+      const ENDPOINT = endpointOf(own);
+      const ZONE_GROUP = zoneGroupOf(own);
+      // No endpoint, or a second.
+      expect(only(without(ENDPOINT))).toEqual(['evidence-store']);
+      const endpoint = staging.predictedResources.find(ENDPOINT);
+      expect(only(withExtra({ ...structuredClone(endpoint), id: `${String(endpoint?.id)}-second` }))).toEqual([
+        'evidence-store',
+      ]);
+      // To another account or service, by hand, or in another subnet.
+      const other = idOf(otherStore);
+      for (const change of [
+        (found: Mutable) => (connection(found).privateLinkServiceId = other),
+        (found: Mutable) => (connection(found).groupIds = ['file']),
+        (found: Mutable) => (connection(found).groupIds = ['blob', 'file']),
+        // A second connection, even one alike.
+        (found: Mutable) => {
+          const connections = at(found, 'properties', 'privateLinkServiceConnections') as Mutable[];
+          inside(found, 'properties').privateLinkServiceConnections = [
+            ...connections,
+            structuredClone(first(connections)),
+          ];
+        },
+        (found: Mutable) =>
+          (inside(found, 'properties').manualPrivateLinkServiceConnections = [
+            { name: 'other', properties: { privateLinkServiceId: other, groupIds: ['blob'] } },
+          ]),
+        (found: Mutable) =>
+          (inside(found, 'properties', 'subnet').id = String(at(found, 'properties', 'subnet', 'id')).replace(
+            /\/endpoints$/,
+            '/apps',
+          )),
+      ]) {
+        expect(only(changed(ENDPOINT, change))).toEqual(['evidence-store']);
+      }
+      // Its address kept nowhere, in the database's zone, or in a zone not linked to the network.
+      expect(only(without(ZONE_GROUP))).toEqual(['evidence-store']);
+      expect(
+        only(
+          changed(
+            ZONE_GROUP,
+            (group) =>
+              (inside(first(at(group, 'properties', 'privateDnsZoneConfigs')), 'properties').privateDnsZoneId = idOf(
+                DATABASE_DNS('Microsoft.Network/privateDnsZones'),
+              )),
+          ),
         ),
-      ),
-    ).toEqual(['evidence-store']);
-    // A second zone config, even one alike.
-    expect(
-      only(
-        changed(ZONE_GROUP, (group) => {
-          const configs = at(group, 'properties', 'privateDnsZoneConfigs') as Mutable[];
-          inside(group, 'properties').privateDnsZoneConfigs = [...configs, structuredClone(first(configs))];
-        }),
-      ),
-    ).toEqual(['evidence-store']);
+      ).toEqual(['evidence-store']);
+      // A second zone config, even one alike.
+      expect(
+        only(
+          changed(ZONE_GROUP, (group) => {
+            const configs = at(group, 'properties', 'privateDnsZoneConfigs') as Mutable[];
+            inside(group, 'properties').privateDnsZoneConfigs = [...configs, structuredClone(first(configs))];
+          }),
+        ),
+      ).toEqual(['evidence-store']);
+    }
     // The link without its fallback to public names: other accounts behind private endpoints stop resolving.
     for (const change of [
       (link: Mutable) => delete inside(link, 'properties').resolutionPolicy,
@@ -3483,9 +3520,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['activity-downloads']);
-    // A second store, or a Storage account named as neither.
+    // A second store, or a Storage account named as neither. A second store has no private endpoint either (AZ32c-2).
     expect(only(withExtra({ ...structuredClone(store), id: `${String(store?.id)}-second` }))).toEqual([
       'required',
+      'evidence-store',
       'activity-downloads',
     ]);
     expect(
@@ -4419,22 +4457,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'apps-network',
     ]);
     // No apps subnet at all: the database's rule refuses it too, and the vault,
-    // the audit-export store and the environment point at a subnet that isn't there.
+    // the stores' endpoints and the environment point at subnets that aren't there.
     expect(
       brokenRules(
         changed(NETWORK, (network) => {
           inside(network, 'properties').subnets = [subnet(network, 'database')];
         }),
       ),
-    ).toEqual([
-      'database-network',
-      'apps-network',
-      'apps-egress',
-      'vault',
-      'evidence-store',
-      'activity-downloads',
-      'apps-environment',
-    ]);
+    ).toEqual(['database-network', 'apps-network', 'apps-egress', 'vault', 'evidence-store', 'apps-environment']);
   });
 
   it('apps-egress: a door out that nothing needs, one the apps need missing, or the rest not denied after them', () => {
@@ -4487,13 +4517,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (group: Mutable) => {
         dropRule(group, 'allow-out-communication');
       },
-      (group: Mutable) => {
-        dropRule(group, 'allow-out-storage');
-      },
-      // The audit exports' door to every region's accounts, or another country's.
-      (group: Mutable) => (out(group, 'storage').destinationAddressPrefix = 'Storage'),
-      (group: Mutable) => (out(group, 'storage').destinationAddressPrefix = 'Storage.westeurope'),
-      (group: Mutable) => (out(group, 'storage').destinationPortRange = '*'),
+      // AZ32c-2: a door to Storage put back, this region's (every account in it), every region's or another's.
+      ...['Storage.uaenorth', 'Storage', 'Storage.westeurope'].map((destination) => (group: Mutable) => {
+        const copy = structuredClone(rules(group).find((each) => each.name === 'allow-out-communication') ?? {});
+        copy.name = 'allow-out-storage';
+        Object.assign(inside(copy, 'properties'), { priority: 310, destinationAddressPrefix: destination });
+        rules(group).push(copy);
+      }),
       // Email's door widened to every Azure address, or to the whole of Front Door's.
       (group: Mutable) => (out(group, 'communication').destinationAddressPrefix = 'AzureCloud'),
       (group: Mutable) => (out(group, 'communication').destinationAddressPrefix = 'AzureFrontDoor'),
@@ -6828,6 +6858,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       });
       expect(policyProblemsOf(noEndpoint)).toEqual([
         expect.stringMatching(/^agentx-staging-allowed-types: refuses pe-stagentxstg[a-z0-9]{6}-blob, which/),
+        // AZ32c-2: the activity downloads' endpoint too.
+        expect.stringMatching(/^agentx-staging-allowed-types: refuses pe-stagentxdlstg[a-z0-9]{6}-blob, which/),
         'agentx-staging-allowed-types: refuses a private endpoint, which this deployment ships or a release sends: Azure would refuse our own deploy',
         "agentx-staging-allowed-types: refuses a private endpoint's interface, which this deployment ships or a release sends: Azure would refuse our own deploy",
         exactly,
