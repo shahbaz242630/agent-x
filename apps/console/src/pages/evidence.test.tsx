@@ -75,6 +75,7 @@ const handedOff = () => ({
       id: '0199a0f0-0000-7000-8000-0000000000d2',
       number: 2,
       name: 'Gulf Office Supplies',
+      beneficiaryRef: 'lean-beneficiary-7f3a',
       verification: null,
     },
   },
@@ -83,6 +84,7 @@ const handedOff = () => ({
     holderName: 'Staging Test Org 1 LLC',
     hint: 'AE…6026',
     partner: 'lean',
+    accountConsentId: 'lean-consent-renewed-2b',
   },
   approval: {
     eventId: APPROVED_EVENT,
@@ -102,6 +104,8 @@ const handedOff = () => ({
       partner: 'lean',
       partnerLegalEntityId: 'LEAN-AE-001',
       partnerLicenceRef: 'CBUAE-RPS-77',
+      accountConsentId: 'lean-consent-1a',
+      beneficiaryRef: 'lean-beneficiary-7f3a',
       paymentReference: 'AX-7Q2M9 INV-2026-0042',
       intentHash: 'abc123intent',
       createdAt: AT,
@@ -347,18 +351,26 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     expect(fact('Supplier and bank account', 'Supplier')).toBe('Not one of your suppliers');
     expect(fact('Supplier and bank account', 'Details decided under')).toBe('None');
     expect(fact('Supplier and bank account', 'Those details verified')).toBe('None');
+    expect(fact('Supplier and bank account', "Partner's payee reference")).toBe('None');
   });
 
   it('S206 V8 shows a request denied for a bank account the organisation doesn’t have: not one of yours', async () => {
     const evidence = handedOff();
     signedIn();
-    const fundingSource = { id: evidence.fundingSource.id, holderName: null, hint: null, partner: null };
+    const fundingSource = {
+      id: evidence.fundingSource.id,
+      holderName: null,
+      hint: null,
+      partner: null,
+      accountConsentId: null,
+    };
     answer(`GET ${READ}`, { status: 200, body: { evidence: { ...evidence, fundingSource } } });
     open(`/approvals/${ID}/evidence`);
 
     expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
     expect(fact('Supplier and bank account', 'Paid from')).toBe('Not one of your bank accounts');
     expect(fact('Supplier and bank account', 'Linked through')).toBe('None');
+    expect(fact('Supplier and bank account', "Partner's consent reference")).toBe('None');
   });
 
   it('reads it again, and still downloads nothing, when the page remounts after the shell failed and came back', async () => {
@@ -400,6 +412,9 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     expect(fact('Supplier and bank account', 'Details decided under')).toBe('Version 2: Gulf Office Supplies');
     expect(fact('Supplier and bank account', 'Those details verified')).toBe('None found in the log');
     expect(fact('Supplier and bank account', 'Paid from')).toBe('Staging Test Org 1 LLC · AE…6026');
+    // GA2 (BR-16): the partner's opaque references, the consent's as it stands and as the payment was made under.
+    expect(fact('Supplier and bank account', "Partner's payee reference")).toBe('lean-beneficiary-7f3a');
+    expect(fact('Supplier and bank account', "Partner's consent reference")).toBe('lean-consent-renewed-2b');
     expect(fact('Approval and money held', 'Approved')).toMatch(/By Shahbaz Admin \(admin@example.com\) /);
     expect(fact('Approval and money held', 'Approval bound to (hash)')).toBe('c0ffee');
     expect(fact('Approval and money held', 'Rejected')).toBe('None');
@@ -407,6 +422,8 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     expect(fact('The payment', 'Where it stands')).toBe('Paid');
     expect(fact('The payment', 'Route')).toBe('AANI · instant rail available');
     expect(fact('The payment', "Partner's licence reference")).toBe('CBUAE-RPS-77');
+    expect(fact('The payment', "Paid under consent (partner's reference)")).toBe('lean-consent-1a');
+    expect(fact('The payment', "Paid to payee (partner's reference)")).toBe('lean-beneficiary-7f3a');
     expect(fact('The payment', 'Instruction hash')).toBe('abc123intent');
     expect(fact('The payment', 'Reconciliation')).toMatch(/The bank's latest word disagrees/);
     expect(fact('The payment', 'Open proposal to mark it failed')).toBe('None');

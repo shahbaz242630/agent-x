@@ -263,12 +263,31 @@ async function changedByOwner(
   }
 }
 
-/** The instruction's secrets, each of which must never be in a bundle (SEC-EVD-04). */
-const secretsOf = (w: World, instruction: InstructionRecord) => [
-  payeeRefOf(w),
-  instruction.beneficiaryRef,
-  instruction.accountConsentId,
-];
+/** What must never be in a bundle (SEC-EVD-04): the payee's key, and anything shaped as an account number. */
+const PAYEE_KEY = `fake-payee-${'b'.repeat(32)}`;
+const IBAN_SHAPED = /\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/;
+
+/** The bundle carries no secret: no payee key, no IBAN; its event facts no consent or payee (evidenceFacts). */
+function expectNoSecret(bundle: Evidence): void {
+  const text = JSON.stringify(bundle);
+  expect(text).not.toContain(PAYEE_KEY);
+  expect(text).not.toMatch(IBAN_SHAPED);
+  const events = JSON.stringify(bundle.events);
+  for (const name of ['beneficiary', 'consent', 'payee', 'KeyVersion', 'Fingerprint', '"mac"']) {
+    expect(events).not.toContain(name);
+  }
+}
+
+/** The partner's opaque references the bundle carries (GA2, BR-16), from the instruction and the version it was decided under. */
+function expectReferences(bundle: Evidence, w: World, instruction: InstructionRecord): void {
+  expect(bundle.payment?.instruction).toMatchObject({
+    accountConsentId: instruction.accountConsentId,
+    beneficiaryRef: instruction.beneficiaryRef,
+  });
+  expect(instruction.beneficiaryRef).toBe(payeeRefOf(w));
+  expect(bundle.supplier.version?.beneficiaryRef).toBe(payeeRefOf(w));
+  expect(bundle.fundingSource.accountConsentId).toBe(instruction.accountConsentId);
+}
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -395,16 +414,26 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     });
   });
 
-  it('carries no secret and no seal: no payee, consent, partner legal reference, fingerprint or key version (SEC-EVD-04)', async () => {
+  it('carries no secret and no seal, the partner’s opaque consent and payee references alone (SEC-EVD-04, GA2)', async () => {
     const { w, request, instruction } = await paid();
 
-    const text = JSON.stringify(bundleOf(await exported(w.admin, request.id)));
+    const bundle = bundleOf(await exported(w.admin, request.id));
+    const text = JSON.stringify(bundle);
 
-    for (const secret of secretsOf(w, instruction)) expect(text).not.toContain(secret);
+    expectNoSecret(bundle);
     // The licensed partner's public references are evidence (BR-16), kept.
     expect(text).toContain(instruction.partnerLegalEntityId);
     expect(text).toContain(instruction.partnerLicenceRef);
-    for (const seal of ['stateFingerprint', 'stateKeyVersion', 'KeyVersion', '"mac"', 'beneficiary', 'consent']) {
+    expectReferences(bundle, w, instruction);
+    for (const seal of [
+      'stateFingerprint',
+      'stateKeyVersion',
+      'KeyVersion',
+      '"mac"',
+      'payeeKey',
+      'payeeHint',
+      'iban',
+    ]) {
       expect(text).not.toContain(seal);
     }
   });
@@ -460,8 +489,8 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
       expect.arrayContaining(['spend_request.decided', 'instruction.made', 'transaction.opened', EVIDENCE_EXPORTED]),
     );
     expect(bundle.events.every(({ hash, prevHash }) => /^[0-9a-f]{64}$/.test(hash) && prevHash.length > 0)).toBe(true);
-    const text = JSON.stringify(bundle);
-    for (const secret of secretsOf(w, payment.instruction)) expect(text).not.toContain(secret);
+    expectNoSecret(bundle);
+    expectReferences(bundle, w, payment.instruction);
   });
 
   it('gives a rejected request with who rejected it, when, why and the step-up it was bound to', async () => {
