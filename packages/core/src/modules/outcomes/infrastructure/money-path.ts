@@ -17,12 +17,12 @@
 //   `payment_check.still_unknown` ages one), and payments still under way
 //   (SUBMISSION_PENDING, SUBMITTED, PROCESSING) made before `stuckBefore`
 //   (0063's transactions_under_way);
-// - money held: each live request's reservation still HELD or BLOCKED_UNKNOWN,
-//   counted and summed by currency. A reservation holds money exactly while its
-//   request waits, is approved or ready, or its payment is under way (0040), so
-//   it is read from those, each by its one reservation (`one_reservation_a_request`),
-//   never by reading the organisation's reservations whole. One left held past
-//   its request's end is the holdings check's to find.
+// - money held: every reservation of the organisation HELD or BLOCKED_UNKNOWN,
+//   counted and summed by currency, from the reservations themselves (0120's
+//   reservations_holding, read from the index alone): what the limits engine
+//   holds against the agents' months. So one an ending kept HELD (its signed
+//   ending kept the capacity, `capacityKept`) is counted, as it still holds
+//   money, and none is left out by deriving it from the requests.
 import { sql } from 'kysely';
 
 /** The times one pass reads every organisation's counts at, the same for each. */
@@ -75,22 +75,14 @@ export function moneyPathRead(orgId: string, at: MoneyPathWindow) {
   // eslint-disable-next-line agentx/authority-tables-through-signed-state -- counts and sums alone, for the workbook; nothing is decided or moved from them
   return sql<MoneyPathRow>`
     with under_way as (
-      select t.status, t.created_at, i.spend_request_id
+      select t.status, t.created_at
       from transactions.transactions t
-      join instructions.instructions i on i.org_id = t.org_id and i.id = t.instruction_id
       where t.org_id = ${org}::uuid and t.status in ('SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN')
-    ),
-    live as (
-      select r.id from spend_requests.requests r
-      where r.org_id = ${org}::uuid and r.status in ('APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY')
-      union
-      select u.spend_request_id from under_way u
     ),
     held as (
       select h.currency, pg_catalog.count(*)::int as reservations, pg_catalog.sum(h.amount_minor)::text as amount_minor
-      from live
-      join limit_reservations.reservations h on h.org_id = ${org}::uuid and h.request_id = live.id
-      where h.state in ('HELD', 'BLOCKED_UNKNOWN')
+      from limit_reservations.reservations h
+      where h.org_id = ${org}::uuid and h.state in ('HELD', 'BLOCKED_UNKNOWN')
       group by h.currency
     )
     select

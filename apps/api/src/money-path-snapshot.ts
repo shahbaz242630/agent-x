@@ -17,7 +17,6 @@
 // totals (`missed` counts it); a pass stopped early (the API stopping, or the
 // lease lost) still logs what it counted, marked incomplete. A run never throws.
 import { v7Floor } from '@agentx/core/modules/activity';
-import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { type MoneyPath, moneyPathOf, moneyPathRead, type MoneyPathWindow } from '@agentx/core/modules/outcomes';
 import { LONGEST_APPROVAL_WAIT, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
@@ -27,7 +26,7 @@ import { type Database, JOB_ANSWER_WITHIN_MS, readEachTenant } from '@agentx/pla
 import type { Logger } from '@agentx/platform/observability';
 
 /** The tables a pass counts in. */
-export type MoneyPathTables = SpendRequestsTables & TransactionsTables & InstructionsTables & LimitReservationsTables;
+export type MoneyPathTables = SpendRequestsTables & TransactionsTables & LimitReservationsTables;
 
 /** How often a pass runs, once the last has ended. */
 export const MONEY_PATH_EVERY_MS = 15 * 60_000;

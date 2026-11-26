@@ -150,7 +150,7 @@ const OURS = {
   stuckPayments: 1,
   stuckAfterMinutes: 60,
   held: [
-    { currency: 'AED', reservations: 6, amountMinor: '1606' },
+    { currency: 'AED', reservations: 7, amountMinor: '41606' },
     { currency: 'USD', reservations: 1, amountMinor: '50' },
   ],
 };
@@ -181,8 +181,11 @@ beforeAll(async () => {
     // Expired: its wait ended two hours ago (counted), and one 30 hours ago (outside the day).
     { status: 'EXPIRED', hoursAgo: 26, waitsUntil: ago(2), held: ['RELEASED', 'AED', 9_000n] },
     { status: 'EXPIRED', hoursAgo: 54, waitsUntil: ago(30), held: ['RELEASED', 'AED', 9_000n] },
-    // Denied, a reservation still HELD past its end: the holdings check's to find, not money the path holds.
-    { status: 'DENIED', hoursAgo: 3, held: ['HELD', 'AED', 70_000n] },
+    // Denied, its reservation released: no money held.
+    { status: 'DENIED', hoursAgo: 3, held: ['RELEASED', 'AED', 70_000n] },
+    // Cancelled, its signed ending keeping the capacity (capacityKept, AT13d): its reservation stays HELD, still
+    // counted against the agent's month, so money held, though the request has ended.
+    { status: 'CANCELLED', hoursAgo: 200, held: ['HELD', 'AED', 40_000n] },
     // Handed off: UNKNOWN 3 hours (the oldest) and an hour, PROCESSING 2 hours (stuck), SUBMITTED 10 minutes (not
     // yet), and one paid (its money spent, not held).
     { status: 'HANDED_OFF', hoursAgo: 4, held: ['BLOCKED_UNKNOWN', 'AED', 1_000n], paid: ['UNKNOWN', 3] },
@@ -221,7 +224,7 @@ describe('GA4 the money-path snapshot', () => {
         stuckPayments: 1,
         stuckAfterMinutes: 60,
         held: [
-          { currency: 'AED', reservations: 8, amountMinor: '8609' },
+          { currency: 'AED', reservations: 9, amountMinor: '48609' },
           { currency: 'USD', reservations: 1, amountMinor: '50' },
         ],
       },
@@ -282,6 +285,17 @@ describe('GA4 the money-path snapshot', () => {
     await snapshot([ours, theirs]).run(stopped.signal);
     expect(linesOf('money_path.snapshot')).toEqual([
       expect.objectContaining({ organisations: 0, missed: 0, complete: false }),
+    ]);
+  });
+
+  it('reads money held from 0120’s index of the reservations still holding, by organisation and currency', async () => {
+    const rows = await database
+      .as('admin')
+      .query<{ indexdef: string }>(
+        "select indexdef from pg_catalog.pg_indexes where schemaname = 'limit_reservations' and indexname = 'reservations_holding'",
+      );
+    expect(rows.map(({ indexdef }) => indexdef)).toEqual([
+      "CREATE INDEX reservations_holding ON limit_reservations.reservations USING btree (org_id, currency) INCLUDE (amount_minor) WHERE (state = ANY (ARRAY['HELD'::text, 'BLOCKED_UNKNOWN'::text]))",
     ]);
   });
 

@@ -1,0 +1,21 @@
+-- agentx: no transaction (concurrent index)
+-- GA4 (PRD §9.3): the money-path snapshot counts the money each organisation holds, every
+-- 15 minutes, as the limits engine holds it: every reservation HELD or BLOCKED_UNKNOWN,
+-- whatever its request's status. A reservation an ending kept HELD (its signed ending kept
+-- the capacity: `capacityKept`, endings.ts) still counts against its agent's month, so it is
+-- money held too; read from the reservations themselves, none is left out.
+--
+-- 0040's only index on the table keys an agent's month and keeps every state but RELEASED,
+-- FINALISED among them, so it grows with every payment ever made. This one keeps only the
+-- reservations still holding money, by organisation and currency, their amount carried in
+-- it: the snapshot's sum by currency is one range of it, read from the index alone. A row
+-- leaves it as its reservation is finalised or released. No table, column or grant changes;
+-- a plain index missing is speed to the schema guard, never drift (schema-guard.ts), so the
+-- image before this migration reads on as before.
+--
+-- Built concurrently, outside a transaction (the first line; migrate.ts), as 0074's:
+-- reservations go on being made and settled while it builds. A build that fails leaves the
+-- index not valid, which the guard reads as speed, not drift, and the next run drops it and
+-- builds it again.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS reservations_holding ON limit_reservations.reservations (org_id, currency)
+  INCLUDE (amount_minor) WHERE state IN ('HELD', 'BLOCKED_UNKNOWN');
