@@ -370,7 +370,7 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
     expect(fact('Supplier and bank account', 'Paid from')).toBe('Not one of your bank accounts');
     expect(fact('Supplier and bank account', 'Linked through')).toBe('None');
-    expect(fact('Supplier and bank account', "Partner's consent reference")).toBe('None');
+    expect(fact('Supplier and bank account', "Bank account's consent now (partner's reference)")).toBe('None');
   });
 
   it('reads it again, and still downloads nothing, when the page remounts after the shell failed and came back', async () => {
@@ -414,7 +414,9 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     expect(fact('Supplier and bank account', 'Paid from')).toBe('Staging Test Org 1 LLC · AE…6026');
     // GA2 (BR-16): the partner's opaque references, the consent's as it stands and as the payment was made under.
     expect(fact('Supplier and bank account', "Partner's payee reference")).toBe('lean-beneficiary-7f3a');
-    expect(fact('Supplier and bank account', "Partner's consent reference")).toBe('lean-consent-renewed-2b');
+    expect(fact('Supplier and bank account', "Bank account's consent now (partner's reference)")).toBe(
+      'lean-consent-renewed-2b',
+    );
     expect(fact('Approval and money held', 'Approved')).toMatch(/By Shahbaz Admin \(admin@example.com\) /);
     expect(fact('Approval and money held', 'Approval bound to (hash)')).toBe('c0ffee');
     expect(fact('Approval and money held', 'Rejected')).toBe('None');

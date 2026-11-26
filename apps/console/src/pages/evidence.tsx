@@ -143,7 +143,8 @@ function Supplier({ evidence }: { readonly evidence: Evidence }) {
           }
         />
         <Fact label={t('evidence.sourcePartner')} value={fundingSource.partner} />
-        <Fact label={t('evidence.consentRef')} value={fundingSource.accountConsentId} mono />
+        {/* Today's consent, not the decision's: the payment's own is under the payment (paidUnderConsent). */}
+        <Fact label={t('evidence.consentNow')} value={fundingSource.accountConsentId} mono />
         <Fact label={t('evidence.sourceId')} value={fundingSource.id} mono />
       </dl>
     </Part>

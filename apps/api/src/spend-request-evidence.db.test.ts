@@ -267,14 +267,17 @@ async function changedByOwner(
 const PAYEE_KEY = `fake-payee-${'b'.repeat(32)}`;
 const IBAN_SHAPED = /\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/;
 
-/** The bundle carries no secret: no payee key, no IBAN; its event facts no consent or payee (evidenceFacts). */
+/** The bundle carries no secret: no payee key, no IBAN; no signed event's facts a consent or payee (evidenceFacts). */
 function expectNoSecret(bundle: Evidence): void {
   const text = JSON.stringify(bundle);
   expect(text).not.toContain(PAYEE_KEY);
   expect(text).not.toMatch(IBAN_SHAPED);
-  const events = JSON.stringify(bundle.events);
-  for (const name of ['beneficiary', 'consent', 'payee', 'KeyVersion', 'Fingerprint', '"mac"']) {
-    expect(events).not.toContain(name);
+  const signed = [bundle.events, bundle.mandate?.acceptance, bundle.supplier.version?.verification];
+  for (const part of signed.filter((events) => events !== undefined && events !== null)) {
+    const shown = JSON.stringify(part);
+    for (const name of ['beneficiary', 'consent', 'payee', 'KeyVersion', 'Fingerprint', '"mac"']) {
+      expect(shown).not.toContain(name);
+    }
   }
 }
 

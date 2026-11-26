@@ -535,7 +535,7 @@
   "evidence.sourcePartner": "Linked through",
   "evidence.sourceId": "Bank account ID",
   "evidence.payeeRef": "Partner's payee reference",
-  "evidence.consentRef": "Partner's consent reference",
+  "evidence.consentNow": "Bank account's consent now (partner's reference)",
   "evidence.paidUnderConsent": "Paid under consent (partner's reference)",
   "evidence.paidToPayee": "Paid to payee (partner's reference)",
   "evidence.outcome": "Approval and money held",
