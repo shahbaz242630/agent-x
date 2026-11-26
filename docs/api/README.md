@@ -37,8 +37,9 @@ Each operation an agent may call names the scopes its key must hold, in its `sec
 2. **Ask.** `POST /v1/spend-requests` with the amount in minor units, the currency, the supplier, the bank account, your order reference and the purpose. Send a new `Idempotency-Key` header with it (see 4). The answer is the spend request, with its `status`, its `decision` and the `reasons` for it.
 3. **Follow it.** `GET /v1/agent/spend-requests/{id}` reads it as it stands now. A request that needs a person's approval stays waiting until they decide; read it again later rather than in a tight loop.
 4. **Change your mind.** `POST /v1/agent/spend-requests/{id}/cancel` cancels your own request before it is handed off to the bank.
+5. **Check the outcome.** Once a request is HANDED_OFF to the bank, the same read carries its `payment`: its `id` and `status` (before that, `payment` is `null`). SUCCEEDED is paid. FAILED or CANCELLED is not paid. REVERSED was paid and then returned by the bank. SUBMISSION_PENDING, SUBMITTED and PROCESSING are still under way: read it again later. UNKNOWN means the outcome is not yet known: never ask to pay the same order again until it is; quote the payment's `id` if you ask your organisation about it.
 
-The exact fields, statuses and decisions are in the document's `SpendRequest` schema.
+The exact fields, statuses and decisions are in the document's `SpendRequest` schema; your own read's, with its `payment`, in `OwnSpendRequest`.
 
 ## 4. Retries and idempotency
 

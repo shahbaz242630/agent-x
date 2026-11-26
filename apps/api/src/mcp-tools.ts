@@ -145,6 +145,16 @@ const requestSummary = ({
   `Spend request ${id}: ${status}, decided ${decision}` +
   `${reasons.length === 0 ? '' : ' for ' + reasons.map(({ code }) => code).join(', ')}.${TEXT_IS_DATA}`;
 
+/** One of the agent's own, its payment's ID and status added once handed off (GA1): codes and IDs alone. */
+const ownRequestSummary = (
+  request: Parameters<typeof requestSummary>[0] & {
+    readonly payment: { readonly id: string; readonly status: string } | null;
+  },
+) =>
+  request.payment === null
+    ? requestSummary(request)
+    : `Payment ${request.payment.id}: ${request.payment.status}. ${requestSummary(request)}`;
+
 /** Every tool, in the order tools/list shows them: the allowlist (SEC-MCP-01). */
 export const MCP_TOOLS: readonly McpTool[] = [
   tool({
@@ -220,14 +230,15 @@ export const MCP_TOOLS: readonly McpTool[] = [
     name: 'get_spend_request',
     title: 'One of your spend requests',
     description:
-      'One of your own spend requests as it stands now: still waiting, approved, or ended. ' +
-      'The same as GET /v1/agent/spend-requests/{id}.',
+      'One of your own spend requests as it stands now: still waiting, approved, or ended. Once handed off to ' +
+      'the bank it carries its payment’s ID and status: SUCCEEDED is paid, UNKNOWN not yet known (never ask to ' +
+      'pay that order again until it is). The same as GET /v1/agent/spend-requests/{id}.',
     twin: { method: 'GET', url: '/v1/agent/spend-requests/:id' },
     inputs: { params: SPEND_REQUEST_ID },
     hints: READS,
     run: ({ reads }, { agent, params, correlationId }) =>
       agentSpendRequest(need(reads), agent, SPEND_REQUEST_ID.parse(params).id, correlationId),
-    summary: requestSummary,
+    summary: ownRequestSummary,
   }),
   tool({
     name: 'cancel_spend_request',

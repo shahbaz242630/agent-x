@@ -1429,6 +1429,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'OrganizationFreeze',
       'OrganizationPolicyChangeAsked',
       'OrganizationUnfreezeAsked',
+      'OwnSpendRequest',
       'PayeeRegistration',
       'PaymentDetails',
       'PaymentListed',

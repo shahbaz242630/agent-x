@@ -32,8 +32,9 @@
 // agent's own words, apart and labelled as its (SEC-AG-08, -10), and, for
 // one rejected, the reject: who, when and why; for one voided, the void:
 // when, and its causes (C2b); for one handed off, its payment's ID and
-// status (S212 G2). The agent's own read (below) stays as it was: its
-// answer, here and over MCP, is the agents' contract.
+// status (S212 G2). The agent's own read (below) carries the same payment ID
+// and status, nothing more (GA1): its answer, here and over MCP, is the
+// agents' contract.
 //
 // Rejecting one waiting for approval (Phase 3 B4a; partner decisions 1, 3, 6;
 // spend-request-rejects.ts): an admin or finance approver asks at
@@ -54,7 +55,10 @@
 // `GET /v1/agent/spend-requests/{id}`, with `requests:read`: as it stands
 // now, so it learns of an approval, a reject, a cancel or an expiry. One a
 // person rejected shows the one reason APPROVAL_REJECTED, never their words;
-// one voided shows REQUEST_VOIDED, then each cause (C2b).
+// one voided shows REQUEST_VOIDED, then each cause (C2b). One handed off
+// shows its payment's ID and status (GA1; BR-19, BR-20), so the agent learns
+// how it came out, paid, failed, unknown or under way, and never pays again
+// blindly; null before hand-off, as in the team's read.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import { DECISIONS, reasonsShownToAgent } from '@agentx/core/modules/policies';
 import {
@@ -210,12 +214,37 @@ const AGENT_CANCEL_SCHEMA = {
   response: { 200: CANCELLED },
 };
 
+/**
+ * A handed-off request's payment, its ID and status alone, for the team's read and the agent's (GA1): the same two
+ * fields, worded for each, as only the team can open the payment itself.
+ */
+const paymentShown = (id: string, status: string) =>
+  z
+    .object({ id: z.uuid().describe(id), status: z.enum(TRANSACTION.states).describe(status) })
+    .nullable()
+    .describe(
+      'For one HANDED_OFF, its payment: the request ends there, and the payment carries how it came out. Otherwise null.',
+    );
+
+/** The agent's own request as it reads it (GET and get_spend_request): with its payment once handed off (GA1). */
+const OWN_SPEND_REQUEST = SPEND_REQUEST_SHOWN.extend({
+  payment: paymentShown(
+    'The payment, by its ID: quote it when you ask your team about it.',
+    'How the payment came out: SUCCEEDED is paid; FAILED or CANCELLED is not paid; REVERSED was paid ' +
+      'and then returned by the bank; UNKNOWN is not yet known, so never ask to pay the same order again ' +
+      'until it is; SUBMISSION_PENDING, SUBMITTED and PROCESSING are still under way: read it again later.',
+  ),
+}).register(API_SCHEMAS, {
+  id: 'OwnSpendRequest',
+  description: 'One of your own spend requests, with its decision and, once handed off, its payment.',
+});
+
 const AGENT_SHOW_SCHEMA = {
   summary: 'One of your own spend requests, as it stands now',
   params: SPEND_REQUEST_ID,
   response: {
-    200: SPEND_REQUEST_SHOWN.describe(
-      'The request now: still waiting, approved, or ended (DENIED, EXPIRED, CANCELLED). One a person rejected is DENIED with the reason APPROVAL_REJECTED alone. One voided (what it was decided under stopped before it was paid) is DENIED with REQUEST_VOIDED, then each cause.',
+    200: OWN_SPEND_REQUEST.describe(
+      'The request now: still waiting, approved, or ended (DENIED, EXPIRED, CANCELLED, or HANDED_OFF to the bank, with its payment). One a person rejected is DENIED with the reason APPROVAL_REJECTED alone. One voided (what it was decided under stopped before it was paid) is DENIED with REQUEST_VOIDED, then each cause.',
     ),
   },
 };
@@ -295,17 +324,10 @@ const SPEND_REQUEST_DETAILS = SPEND_REQUEST_LISTED.extend({
     .describe(
       'For one voided, its holdings released, because what it was decided under stopped before it was paid: when and why. Otherwise null.',
     ),
-  payment: z
-    .object({
-      id: z.uuid().describe('The payment, by its ID: GET /v1/payments/{id} shows it in full.'),
-      status: z
-        .enum(TRANSACTION.states)
-        .describe('Where the payment stands, as GET /v1/payments/{id} says: SUCCEEDED is paid.'),
-    })
-    .nullable()
-    .describe(
-      'For one HANDED_OFF, its payment: the request ends there, and the payment carries how it came out. Otherwise null.',
-    ),
+  payment: paymentShown(
+    'The payment, by its ID: GET /v1/payments/{id} shows it in full.',
+    'Where the payment stands, as GET /v1/payments/{id} says: SUCCEEDED is paid.',
+  ),
 }).register(API_SCHEMAS, { id: 'SpendRequestDetails', description: 'A spend request in full, as the team sees it.' });
 
 const LIST_SCHEMA = {
@@ -522,7 +544,7 @@ export async function agentSpendRequest(
 ) {
   const found = await reads.ofAgent(orgId, agentId, requestId, correlationId);
   if (found.outcome === 'refused') return found;
-  const shownToAgent = shown(found.request, 'agent');
+  const shownToAgent = { ...shown(found.request, 'agent'), payment: found.payment };
   // Ended by a person or a brake: the reasons the decision gave no longer explain where it stands.
   return answered(
     found.endedBecause === null ? shownToAgent : { ...shownToAgent, reasons: reasonsOf(found.endedBecause) },
