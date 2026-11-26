@@ -359,10 +359,10 @@ export const ALLOWED: readonly Allowed[] = [
     guard: ".where('ends_at', '<=', clock.now())",
     proof: {
       file: 'packages/core/src/modules/identity/infrastructure/passkey-additions.db.test.ts',
-      title: 'sweeps additions past their time, and leaves the rest',
+      title: 'sweeps additions past their time, taking back each token still held, and leaves the rest',
     },
-    why: 'SA6: an addition the login service refused the key for (its own row, still confirming), and the sweep of those past their minutes',
-    lines: 2,
+    why: 'SA6: an addition that will never reach its key confirmed (its own row: the key refused, or its options failed, its token taken back first), and the sweep of those past their minutes',
+    lines: 3,
   },
   {
     file: 'packages/core/src/modules/notifications/infrastructure/outbox.ts',

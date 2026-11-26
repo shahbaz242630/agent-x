@@ -28,7 +28,6 @@ import {
   type AdditionAnswer,
   type AdditionRefusal,
   OwnPasskeysUnavailable,
-  LoginTokenRefused,
   type PasskeyAdditions,
 } from '@agentx/core/modules/identity';
 import type { Logger } from '@agentx/platform/observability';
@@ -237,7 +236,7 @@ export function registerPasskeyAdditions(
     );
   /** The login service failed the page's call: said plainly, 503 to try again (with a new ticket). */
   const unavailable = (request: FastifyRequest, reply: FastifyReply, error: unknown) => {
-    if (!(error instanceof OwnPasskeysUnavailable) && !(error instanceof LoginTokenRefused)) throw error;
+    if (!(error instanceof OwnPasskeysUnavailable)) throw error;
     logger.child({ correlationId: request.id }).warn('identity.passkey_login_service_failed', { err: error });
     return sendErrorBody(reply.header('retry-after', '15'), 503, 'SIGN_IN_UNAVAILABLE', request.id);
   };

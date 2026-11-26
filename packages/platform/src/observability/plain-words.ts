@@ -1287,9 +1287,9 @@ export const PLAIN_WORDS = {
     next: 'Nothing if rare. If it repeats, check the login service is up; this line says which step failed.',
   },
   'identity.passkey_token_kept': {
-    happened: 'After a passkey was added in Agent X, the login service did not take back the access token we used.',
-    broke: 'Nothing: we no longer hold the token, and it runs out on its own.',
-    next: 'Nothing if rare. If it repeats, check the login service answers token revocation.',
+    happened: "The login service did not take back a person's access token we held for adding a passkey.",
+    broke: 'We deleted our copy, but the token stays valid at the login service until it runs out on its own.',
+    next: 'Nothing if rare. If it repeats, check the login service answers token revocation and sign-in is on.',
   },
   'identity.passkey_addition_sweep_failed': {
     happened: 'The clean-up of passkey additions left unfinished failed.',

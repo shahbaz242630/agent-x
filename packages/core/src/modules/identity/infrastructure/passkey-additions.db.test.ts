@@ -4,7 +4,14 @@
 // used once and taken back.
 import { createDatabase, type Database, type IdempotentRequest } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import type { AuditTables } from '../../audit/index.ts';
@@ -19,6 +26,7 @@ import {
 import type { OwnPasskeys } from './idp-passkeys.ts';
 import { createPasskeyAdditions, sweepPasskeyAdditions } from './passkey-additions.ts';
 import { createSessions } from './sessions.ts';
+import { LoginTokenRefused } from './zitadel-call.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
@@ -61,7 +69,7 @@ function loginService(passkeyId = '400000000000000001') {
   return { passkeys, calls };
 }
 
-function additionsWith(passkeys: OwnPasskeys, revoke = vi.fn(() => Promise.resolve(true))) {
+function additionsWith(passkeys: OwnPasskeys, revoke = vi.fn(() => Promise.resolve(true)), capture?: LogCapture) {
   const challenges = createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
   return {
     challenges,
@@ -74,7 +82,7 @@ function additionsWith(passkeys: OwnPasskeys, revoke = vi.fn(() => Promise.resol
       keys,
       ids,
       clock,
-      logger: testLogger(),
+      logger: testLogger(capture),
     }),
   };
 }
@@ -103,9 +111,9 @@ const keyed = (userId: string, operation: string, key = `key-${String(counter)}-
 });
 
 /** A person stepped up for an addition: its challenge, with the token kept as the step-up's return keeps it. */
-async function steppedUp(passkeys: OwnPasskeys, revoke?: ReturnType<typeof vi.fn>) {
+async function steppedUp(passkeys: OwnPasskeys, revoke?: ReturnType<typeof vi.fn>, capture?: LogCapture) {
   const who = await signedIn();
-  const parts = additionsWith(passkeys, revoke as never);
+  const parts = additionsWith(passkeys, revoke as never, capture);
   const begun = await parts.additions.begin(who.sessionId, who.userId, keyed(who.userId, 'passkey.add'));
   if (begun.outcome !== 'done') throw new Error('not begun');
   await app.transaction().execute((tx) =>
@@ -120,8 +128,8 @@ async function steppedUp(passkeys: OwnPasskeys, revoke?: ReturnType<typeof vi.fn
 }
 
 /** Stepped up and ticketed. */
-async function ticketed(passkeys: OwnPasskeys, revoke?: ReturnType<typeof vi.fn>) {
-  const stepped = await steppedUp(passkeys, revoke);
+async function ticketed(passkeys: OwnPasskeys, revoke?: ReturnType<typeof vi.fn>, capture?: LogCapture) {
+  const stepped = await steppedUp(passkeys, revoke, capture);
   const issued = await stepped.additions.ticket(
     stepped.sessionId,
     stepped.challengeId,
@@ -347,31 +355,53 @@ describe(`SA6: adding a passkey inside Agent X (Postgres ${server.version})`, ()
       expect(await ready.additions.status(ready.sessionId, ready.challengeId)).toBe('WAITING_FOR_KEY');
     });
 
-    it('SA6 hands nothing out when the record can’t be made', async () => {
+    it('SA6 hands nothing out when the record can’t be made, and takes the person’s token back', async () => {
       // A passkey ID the table refuses: the transaction that records it rolls back, record and all.
       const { passkeys } = loginService('9'.repeat(201));
-      const ready = await ticketed(passkeys);
+      const revoke = vi.fn(() => Promise.resolve(true));
+      const ready = await ticketed(passkeys, revoke);
       const before = (await ownRecords()).length;
 
       await expect(ready.additions.options(ready.ticket)).rejects.toThrow();
 
       expect(await ownRecords()).toHaveLength(before);
-      expect(await rowOf(ready.challengeId)).toEqual(expect.objectContaining({ state: 'redeemed', passkey_id: null }));
+      expect(revoke).toHaveBeenCalledWith(TOKEN);
+      expect(await rowOf(ready.challengeId)).toBeUndefined();
     });
 
-    it('records nothing when the login service fails, and the ticket stays used', async () => {
+    it('records nothing when the login service fails, takes the token back, and the ticket stays used', async () => {
       const { passkeys } = loginService();
       passkeys.failRegister = new Error('the login service is away');
-      const ready = await ticketed(passkeys);
+      const revoke = vi.fn(() => Promise.resolve(true));
+      const ready = await ticketed(passkeys, revoke);
       const before = (await ownRecords()).length;
 
       await expect(ready.additions.options(ready.ticket)).rejects.toThrow('away');
 
       expect(await ownRecords()).toHaveLength(before);
+      expect(revoke).toHaveBeenCalledWith(TOKEN);
+      // Its token no longer stored: the row, token and all, is gone.
+      expect(await rowOf(ready.challengeId)).toBeUndefined();
       expect(await ready.additions.options(ready.ticket)).toEqual({
         outcome: 'refused',
         code: 'PASSKEY_TICKET_INVALID',
       });
+    });
+
+    it('answers the person’s token refused as the key refused, never the login service’s alarm, and lets it go', async () => {
+      const { passkeys } = loginService();
+      passkeys.failRegister = new LoginTokenRefused('the login service refused the token: it answered 401');
+      const revoke = vi.fn(() => Promise.resolve(false));
+      const capture = new LogCapture();
+      const ready = await ticketed(passkeys, revoke, capture);
+
+      expect(await ready.additions.options(ready.ticket)).toEqual({ outcome: 'refused', code: 'PASSKEY_REFUSED' });
+
+      expect(revoke).toHaveBeenCalledWith(TOKEN);
+      expect(await rowOf(ready.challengeId)).toBeUndefined();
+      // Revocation refused too: said plainly, never naming the token.
+      expect(capture.lines().map((line) => line.event)).toEqual(['identity.passkey_token_kept']);
+      expect(JSON.stringify(capture.lines())).not.toContain(TOKEN);
     });
   });
 
@@ -431,14 +461,73 @@ describe(`SA6: adding a passkey inside Agent X (Postgres ${server.version})`, ()
     });
   });
 
-  it('sweeps additions past their time, and leaves the rest', async () => {
+  it('sweeps additions past their time, taking back each token still held, and leaves the rest', async () => {
     const stale = await steppedUp(loginService().passkeys);
     clock.advanceBy(STEPPED_UP_SECONDS * 1000);
     const fresh = await steppedUp(loginService().passkeys);
+    const revoke = vi.fn(() => Promise.resolve(true));
+    const capture = new LogCapture();
 
-    expect(await sweepPasskeyAdditions(app, clock, 100)).toBeGreaterThanOrEqual(1);
+    const swept = await sweepPasskeyAdditions({ database: app, keys, revoke, clock, logger: testLogger(capture) }, 100);
 
+    expect(swept).toBeGreaterThanOrEqual(1);
+    expect(revoke).toHaveBeenCalledWith(TOKEN);
+    // Earlier tests' additions go too; only those still holding a token are taken back.
+    expect(revoke.mock.calls.length).toBeLessThanOrEqual(swept);
+    // Every token taken back: none said kept (an earlier test's token moved to another row is the alarm, as below).
+    expect(capture.lines().filter((line) => line.event === 'identity.passkey_token_kept')).toEqual([]);
     expect(await rowOf(stale.challengeId)).toBeUndefined();
     expect(await rowOf(fresh.challengeId)).toBeDefined();
+  });
+
+  it('sweeps a token the login service won’t take back, or with no way to, all the same, and says so', async () => {
+    for (const revoke of [vi.fn(() => Promise.resolve(false)), undefined]) {
+      const stale = await steppedUp(loginService().passkeys);
+      clock.advanceBy(STEPPED_UP_SECONDS * 1000);
+      const capture = new LogCapture();
+
+      await sweepPasskeyAdditions({ database: app, keys, revoke, clock, logger: testLogger(capture) }, 100);
+
+      expect(await rowOf(stale.challengeId)).toBeUndefined();
+      expect(capture.lines().map((line) => line.event)).toContain('identity.passkey_token_kept');
+      expect(JSON.stringify(capture.lines())).not.toContain(TOKEN);
+    }
+  });
+
+  it('sweeps a confirmed addition, which holds no token, taking nothing back', async () => {
+    const { passkeys } = loginService();
+    const ready = await ticketed(passkeys);
+    await ready.additions.options(ready.ticket);
+    await ready.additions.confirm(ready.ticket, {});
+    clock.advanceBy(60 * 60_000);
+    const revoke = vi.fn(() => Promise.resolve(true));
+
+    await sweepPasskeyAdditions({ database: app, keys, revoke, clock, logger: testLogger() }, 100);
+
+    expect(await rowOf(ready.challengeId)).toBeUndefined();
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it('sweeps a token sealed for another addition with the alarm, never sending it anywhere', async () => {
+    const first = await steppedUp(loginService().passkeys);
+    const second = await steppedUp(loginService().passkeys);
+    const moved = await rowOf(first.challengeId);
+    await app
+      .updateTable('identity.passkey_additions')
+      .set({ token_ciphertext: moved?.token_ciphertext ?? null, token_key_version: moved?.token_key_version ?? null })
+      .where('id', '=', second.challengeId)
+      .execute();
+    await app.deleteFrom('identity.passkey_additions').where('id', '=', first.challengeId).execute();
+    clock.advanceBy(STEPPED_UP_SECONDS * 1000);
+    const revoke = vi.fn(() => Promise.resolve(true));
+    const capture = new LogCapture();
+
+    await sweepPasskeyAdditions({ database: app, keys, revoke, clock, logger: testLogger(capture) }, 100);
+
+    expect(await rowOf(second.challengeId)).toBeUndefined();
+    expect(revoke).not.toHaveBeenCalled();
+    expect(capture.lines()).toEqual([
+      expect.objectContaining({ event: 'audit.integrity_failed', check: 'passkey_addition' }),
+    ]);
   });
 });

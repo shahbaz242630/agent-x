@@ -13,12 +13,15 @@
 //   person; the passkey's ID then recorded on the platform chain as the person's own addition, with the addition
 //   moved to `registering`, in one transaction, its head outside the database (TR-1), and only then the options
 //   handed out. A record that fails hands out nothing: the copier finds no record, and a key made anyway restricts.
+//   On any failure there (the login service, the record), or the person's token refused (PASSKEY_REFUSED, never a
+//   LoginTokenRefused, which pages: only our own service tokens should), the token is taken back and the row deleted
+//   with it: a token carrying the login service's API audience never outlives the addition it was kept for.
 // - `confirm`, for the page: the ticket's addition taken, once (`confirming`, its token out of the row), the key sent
 //   to the login service as the person, and the token taken back there; `confirmed` for the console to read, or the
 //   row gone when the login service refused the key.
-// - sweepPasskeyAdditions: additions past their time deleted, with any token still in them (the API's sweep, hourly).
-//   A token left by an addition never finished isn't taken back there: the job has no client of the login service,
-//   and such a token runs out on its own within the login service's access token lifetime.
+// - sweepPasskeyAdditions: additions past their time deleted (the API's sweep, hourly), and each token still in one
+//   (left at `stepped_up`, `ticketed`, `redeemed` or `registering`) taken back at the login service first. A token
+//   the login service won't take back is deleted all the same, and said (`identity.passkey_token_kept`).
 //
 // The ticket is the page's only credential: the add-a-key page is on a host of its own, which the console's session
 // cookie never reaches. It goes from the console to the page in the address's fragment, which no request carries.
@@ -42,6 +45,7 @@ import {
   TICKET_SECONDS,
 } from '../domain/passkey-addition.ts';
 import type { OwnPasskeys } from './idp-passkeys.ts';
+import { LoginTokenRefused } from './zitadel-call.ts';
 import type { RowMacs } from './row-macs.ts';
 import { openField } from './sealed-fields.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
@@ -243,9 +247,19 @@ export function createPasskeyAdditions({
       .forUpdate()
       .executeTakeFirst();
 
-  /** Takes the token back at the login service; a token left runs out on its own, so said, never thrown. */
-  const takeBack = async (token: string): Promise<void> => {
-    if (!(await revoke(token))) logger.warn('identity.passkey_token_kept');
+  const takeBack = (token: string): Promise<void> => takenBack(revoke, token, logger);
+
+  /**
+   * An addition that won't reach its key confirmed: its token taken back at the login service, and its row, token and
+   * all, deleted, while it is still between its ticket redeemed and its key sent.
+   */
+  const dropAddition = async (id: string, token: string): Promise<void> => {
+    await takeBack(token);
+    await database
+      .deleteFrom('identity.passkey_additions')
+      .where('id', '=', id)
+      .where('state', 'in', ['redeemed', 'registering'])
+      .execute();
   };
 
   return {
@@ -342,22 +356,31 @@ export function createPasskeyAdditions({
       });
       if (redeemed === undefined) return refused('PASSKEY_TICKET_INVALID');
       const { row, subject } = redeemed;
-      const asked = await passkeys.register(tokenOf(row), subject);
-      // The person's own addition on the record before anything to make the key with leaves this process.
-      await inTransaction(async (tx) => {
-        await tx
-          .updateTable('identity.passkey_additions')
-          .set({ state: 'registering', passkey_id: asked.passkeyId, ends_at: later(REGISTERING_SECONDS * 1000) })
-          .where('id', '=', row.id)
-          .where('state', '=', 'redeemed')
-          .execute();
-        await platform.record(tx, {
-          actor: ACTOR,
-          action: OWN_PASSKEY_REGISTERED,
-          details: { person: row.user_id, subject, passkey: asked.passkeyId, at: clock.now().toISOString() },
+      const token = tokenOf(row);
+      try {
+        const asked = await passkeys.register(token, subject);
+        // The person's own addition on the record before anything to make the key with leaves this process.
+        await inTransaction(async (tx) => {
+          await tx
+            .updateTable('identity.passkey_additions')
+            .set({ state: 'registering', passkey_id: asked.passkeyId, ends_at: later(REGISTERING_SECONDS * 1000) })
+            .where('id', '=', row.id)
+            .where('state', '=', 'redeemed')
+            .execute();
+          await platform.record(tx, {
+            actor: ACTOR,
+            action: OWN_PASSKEY_REGISTERED,
+            details: { person: row.user_id, subject, passkey: asked.passkeyId, at: clock.now().toISOString() },
+          });
         });
-      });
-      return { outcome: 'done', options: asked.options };
+        return { outcome: 'done', options: asked.options };
+      } catch (error) {
+        // Nothing to make the key with went out: the token is of no more use, so it goes, whatever failed.
+        await dropAddition(row.id, token);
+        // The person's token refused (run out, or taken back): theirs to start again, never our service token's alarm.
+        if (error instanceof LoginTokenRefused) return refused('PASSKEY_REFUSED');
+        throw error;
+      }
     },
 
     async confirm(ticket, credential) {
@@ -403,11 +426,38 @@ export function createPasskeyAdditions({
   };
 }
 
-/** Deletes up to `most` additions past their time, with any token still in them; how many. */
-export async function sweepPasskeyAdditions(db: Kysely<IdentityTables>, clock: Clock, most: number): Promise<number> {
-  return db.transaction().execute(async (tx) => {
+/** Takes a token back at the login service; one it won't take back is said (never the token), never thrown. */
+async function takenBack(
+  revoke: ((accessToken: string) => Promise<boolean>) | undefined,
+  token: string,
+  logger: Logger,
+): Promise<void> {
+  if (revoke === undefined || !(await revoke(token))) logger.warn('identity.passkey_token_kept');
+}
+
+/**
+ * Deletes up to `most` additions past their time; each token still in one taken back at the login service first, by
+ * `revoke` (none where sign-in is off: said, and deleted all the same). How many went.
+ */
+export async function sweepPasskeyAdditions(
+  {
+    database,
+    keys,
+    revoke,
+    clock,
+    logger,
+  }: {
+    readonly database: Kysely<IdentityTables>;
+    readonly keys: KeyProvider;
+    readonly revoke: ((accessToken: string) => Promise<boolean>) | undefined;
+    readonly clock: Clock;
+    readonly logger: Logger;
+  },
+  most: number,
+): Promise<number> {
+  const gone = await database.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    const gone = await tx
+    return tx
       .deleteFrom('identity.passkey_additions')
       .where(
         'id',
@@ -419,7 +469,25 @@ export async function sweepPasskeyAdditions(db: Kysely<IdentityTables>, clock: C
           .orderBy('ends_at')
           .limit(most),
       )
-      .executeTakeFirst();
-    return Number(gone.numDeletedRows);
+      .returning(['id', 'user_id', 'session_id', 'token_ciphertext', 'token_key_version'])
+      .execute();
   });
+  for (const row of gone) {
+    if (row.token_ciphertext === null || row.token_key_version === null) continue;
+    let token: string;
+    try {
+      token = openField(
+        keys,
+        { keyVersion: row.token_key_version, ciphertext: row.token_ciphertext },
+        tokenData(row.id, row.user_id, row.session_id),
+        (cause) => new AdditionTokenUnreadable({ cause }),
+      );
+    } catch {
+      // Sealed for another row, or changed: deleted, and the alarm, as no token of ours would be.
+      logger.error('audit.integrity_failed', { check: 'passkey_addition', reason: 'token', rowId: row.id });
+      continue;
+    }
+    await takenBack(revoke, token, logger);
+  }
+  return gone.length;
 }

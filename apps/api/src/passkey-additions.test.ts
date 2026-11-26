@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { PasskeyAdditions } from '@agentx/core/modules/identity';
-import { LoginTokenRefused, OwnPasskeysUnavailable } from '@agentx/core/modules/identity';
+import { OwnPasskeysUnavailable } from '@agentx/core/modules/identity';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -409,6 +409,17 @@ describe('SA6 the add-a-passkey page’s host', () => {
     expect(answer.json()).toMatchObject({ error: { code } });
   });
 
+  it('answers the person’s token refused, which its use case says as the key refused, 422, logging no alarm', async () => {
+    const app = await server(
+      additions({ options: () => Promise.resolve({ outcome: 'refused', code: 'PASSKEY_REFUSED' }) }),
+    );
+
+    const answer = await app.inject(fromPage('/v1/passkey-additions/options', { ticket: TICKET }));
+
+    expect(answer.statusCode).toBe(422);
+    expect(answer.json()).toMatchObject({ error: { code: 'PASSKEY_REFUSED' } });
+  });
+
   it('answers a used ticket at the options 409', async () => {
     const app = await server(
       additions({ options: () => Promise.resolve({ outcome: 'refused', code: 'PASSKEY_TICKET_INVALID' }) }),
@@ -417,10 +428,8 @@ describe('SA6 the add-a-passkey page’s host', () => {
     expect((await app.inject(fromPage('/v1/passkey-additions/options', { ticket: TICKET }))).statusCode).toBe(409);
   });
 
-  it.each([
-    ['the login service failing', new OwnPasskeysUnavailable('asking for a passkey: it answered 500')],
-    ['the person’s token refused', new LoginTokenRefused('the login service refused the token: it answered 401')],
-  ])('answers %s 503, to start again', async (_name, error) => {
+  it('answers the login service failing 503, to start again', async () => {
+    const error = new OwnPasskeysUnavailable('asking for a passkey: it answered 500');
     const app = await server(additions({ options: () => Promise.reject(error), confirm: () => Promise.reject(error) }));
 
     const options = await app.inject(fromPage('/v1/passkey-additions/options', { ticket: TICKET }));
