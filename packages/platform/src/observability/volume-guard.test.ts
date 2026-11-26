@@ -183,6 +183,14 @@ describe('4D2e F8 each event has its budget; money and audit lines are never hel
     },
   );
 
+  it("GA4: never holds back the money path's organisation lines, so a bank outage's whole list gets out", () => {
+    // Every organisation with a payment unknown or stuck named in one pass, far past the cap.
+    expect(flood('money_path.organisation', INFO, 2)).toEqual({ admitted: FLOOD, suppressed: [] });
+    expect(budgetOf('money_path.organisation', INFO, 2)).toBe(Number.POSITIVE_INFINITY);
+    // Its warnings keep the cap: an organisation that can't be read is said, but can't flood the log.
+    expect(budgetOf('money_path.missed', WARN, 2)).toBe(2);
+  });
+
   it('holds back a flood of audit.backlog errors with a count, while an integrity alarm still gets out', () => {
     const clock = manualClock();
     const guard = createVolumeGuard(3, clock.now);
