@@ -40,7 +40,10 @@
 // the request's own story ends at HANDED_OFF and the payment carries how it
 // came out. Read in the same transaction, after the request (ADR-006: payment
 // 10), and only for one handed off: the instruction and its transaction are
-// made with that move, in one transaction (hand-off's Tx A).
+// made with that move, in one transaction (hand-off's Tx A). The agent's own
+// read carries the same two fields and nothing more (GA1; BR-19, BR-20), so
+// it learns paid, failed, unknown or still under way and never pays again
+// blindly: read only once the request is found to be its own.
 import { agentOf, agentsNamed, type AgentShown, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
 import type { PageAsked, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import {
@@ -111,7 +114,7 @@ interface Denial {
   readonly voiding: VoidingShown | null;
 }
 
-/** A handed-off request's payment, as the team follows it: its ID (the payments page's) and its status. */
+/** A handed-off request's payment, as the team and its agent follow it: its ID and its status, nothing more. */
 interface RequestPayment {
   readonly id: string;
   readonly status: TransactionStatus;
@@ -132,6 +135,8 @@ export type OwnRequestFound =
       readonly request: SpendRequestRecord;
       /** The reasons that replace its decision's once a person or a brake ended it; null while they still explain it. */
       readonly endedBecause: readonly ReasonCode[] | null;
+      /** Null for one not handed off: no payment yet. */
+      readonly payment: RequestPayment | null;
     }
   | Refused;
 
@@ -139,7 +144,7 @@ export interface SpendRequestReads {
   /** Every request, newest first; or those waiting for approval, oldest first. */
   list(orgId: string, page: PageAsked, which: 'all' | 'waiting', correlationId: string): Promise<RequestsListed>;
   show(orgId: string, requestId: string, correlationId: string): Promise<RequestFound>;
-  /** One of the agent's own requests, as it stands, and why it ended if a person or a brake ended it. */
+  /** One of the agent's own requests, as it stands, why it ended if a person or a brake ended it, and its payment. */
   ofAgent(orgId: string, agentId: string, requestId: string, correlationId: string): Promise<OwnRequestFound>;
 }
 
@@ -431,7 +436,12 @@ export function createSpendRequestReads({
           throw new RequestReadRefused(404, 'NOT_FOUND');
         }
         const denial = await denialIn(tx, states, orgId, read.request);
-        return { outcome: 'found' as const, request: read.request, endedBecause: toldToAgent(denial) };
+        return {
+          outcome: 'found' as const,
+          request: read.request,
+          endedBecause: toldToAgent(denial),
+          payment: await paymentIn(tx, states, orgId, read.request),
+        };
       }),
   };
 }

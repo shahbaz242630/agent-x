@@ -295,7 +295,9 @@ describe('GET /v1/agent/spend-requests/{id}: the agent reads its own (Phase 3 B4
     response.json().reasons.map(({ code }) => code);
 
   it('asks for the agent’s own, by its key, and shows it as it stands, with no team-only field', async () => {
-    const { app, asked } = await withReads({ own: { outcome: 'found', request: WAITING, endedBecause: null } });
+    const { app, asked } = await withReads({
+      own: { outcome: 'found', request: WAITING, endedBecause: null, payment: null },
+    });
     const reply = await app.inject(asAgent());
 
     expect(reply.statusCode).toBe(200);
@@ -303,14 +305,31 @@ describe('GET /v1/agent/spend-requests/{id}: the agent reads its own (Phase 3 B4
     expect(codes(reply)).toEqual(['APPROVAL_THRESHOLD']);
     expect(reply.json()).not.toHaveProperty('agent');
     expect(reply.json()).not.toHaveProperty('rejection');
-    expect(reply.json()).not.toHaveProperty('payment');
+    // Not yet handed off: no payment, null as in the team's read (GA1).
+    expect(reply.json()).toMatchObject({ payment: null });
     expect(asked).toEqual([[ORG, AGENT_ID, REQUEST_ID, expect.any(String)]]);
   });
+
+  it.each(['SUCCEEDED', 'FAILED', 'UNKNOWN', 'PROCESSING'] as const)(
+    'shows one handed off with its payment’s ID and status alone: %s (GA1; BR-19, BR-20)',
+    async (status) => {
+      const handedOff = { ...WAITING, status: 'HANDED_OFF' as const };
+      const { app } = await withReads({
+        own: { outcome: 'found', request: handedOff, endedBecause: null, payment: { id: PAYMENT_ID, status } },
+      });
+      const reply = await app.inject(asAgent());
+
+      expect(reply.statusCode).toBe(200);
+      expect(reply.json()).toMatchObject({ status: 'HANDED_OFF', payment: { id: PAYMENT_ID, status } });
+      // The two fields people see, nothing more: no partner reference, payee or amount of the payment's own.
+      expect(Object.keys(reply.json<{ payment: object }>().payment)).toEqual(['id', 'status']);
+    },
+  );
 
   it('shows one a person rejected as DENIED with APPROVAL_REJECTED alone (decision 6)', async () => {
     const denied = { ...WAITING, status: 'DENIED' as const };
     const { app } = await withReads({
-      own: { outcome: 'found', request: denied, endedBecause: ['APPROVAL_REJECTED'] },
+      own: { outcome: 'found', request: denied, endedBecause: ['APPROVAL_REJECTED'], payment: null },
     });
     const reply = await app.inject(asAgent());
 
@@ -321,7 +340,7 @@ describe('GET /v1/agent/spend-requests/{id}: the agent reads its own (Phase 3 B4
   it('shows one voided as DENIED with REQUEST_VOIDED, then its causes (C2b)', async () => {
     const denied = { ...WAITING, status: 'DENIED' as const };
     const endedBecause = ['REQUEST_VOIDED', 'MANDATE_NOT_IN_FORCE'] as const;
-    const { app } = await withReads({ own: { outcome: 'found', request: denied, endedBecause } });
+    const { app } = await withReads({ own: { outcome: 'found', request: denied, endedBecause, payment: null } });
 
     expect(codes(await app.inject(asAgent()))).toEqual(['REQUEST_VOIDED', 'MANDATE_NOT_IN_FORCE']);
   });
@@ -333,7 +352,7 @@ describe('GET /v1/agent/spend-requests/{id}: the agent reads its own (Phase 3 B4
       reasons: ['DUPLICATE_ORDER_REFERENCE', 'APPROVAL_THRESHOLD'] as const,
       status: 'DENIED' as const,
     };
-    const { app } = await withReads({ own: { outcome: 'found', request: refused, endedBecause: null } });
+    const { app } = await withReads({ own: { outcome: 'found', request: refused, endedBecause: null, payment: null } });
 
     expect(codes(await app.inject(asAgent()))).toEqual(['DUPLICATE_ORDER_REFERENCE']);
   });

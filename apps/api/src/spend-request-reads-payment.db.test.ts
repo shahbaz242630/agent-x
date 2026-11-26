@@ -3,6 +3,8 @@
 // the hand-off, its own payment's ID and status after, a payment changed past
 // the app refusing the read (503 INTEGRITY_FAILED, the organisation held),
 // and another organisation's request, payment and all, never found.
+// GA1 (BR-19, BR-20): the agent's own read carries the same payment, only for
+// its own request; another agent's, or another organisation's, is none.
 // The route's answer is spend-request-reads.test.ts.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -84,12 +86,27 @@ async function paid() {
   const { w, acting } = await ready();
   const request = await ask(acting, w, { amount: SMALL() });
   const before = await reads.show(w.org, request.id, CORRELATION);
+  const agentBefore = await reads.ofAgent(w.org, acting.agentId, request.id, CORRELATION);
   await createHandoff(runner(w)).run();
   clock.advanceBy(2 * STEP);
   await createPaymentChecks(runner(w)).run();
   const payment = await paymentOf(w, request.id);
   if (typeof payment.transaction !== 'object') throw new Error(`not paid: ${JSON.stringify(payment)}`);
-  return { w, request, before, transaction: payment.transaction };
+  return { w, acting, request, before, agentBefore, transaction: payment.transaction };
+}
+
+/** The payment's partner status changed as the database's owner, its guard trigger off: past the app. */
+async function changedPastTheApp(w: World, transactionId: string) {
+  const owner = await tamperAsOwner(database, TRANSACTIONS, w.org);
+  try {
+    await owner.query('begin');
+    await owner.query('alter table transactions.transactions disable trigger user');
+    await owner.setColumn(transactionId, 'provider_status', 'Rejected');
+    await owner.query('alter table transactions.transactions enable trigger user');
+    await owner.query('commit');
+  } finally {
+    await owner.end();
+  }
 }
 
 const heldOf = (w: World) => withSignedStates(app, w.org, quiet(), (tx, states) => states.holdRecord(tx, w.org));
@@ -164,18 +181,42 @@ describe('a request read in full carries its payment once handed off (S212 G2, B
 
   it('refuses one whose payment was changed past the app, holding the organisation', async () => {
     const { w, request, transaction } = await paid();
-    const owner = await tamperAsOwner(database, TRANSACTIONS, w.org);
-    try {
-      await owner.query('begin');
-      await owner.query('alter table transactions.transactions disable trigger user');
-      await owner.setColumn(transaction.id, 'provider_status', 'Rejected');
-      await owner.query('alter table transactions.transactions enable trigger user');
-      await owner.query('commit');
-    } finally {
-      await owner.end();
-    }
+    await changedPastTheApp(w, transaction.id);
 
     expect(await reads.show(w.org, request.id, CORRELATION)).toEqual(INTEGRITY_FAILED);
+    expect(await heldOf(w)).toMatchObject({ outcome: 'held' });
+  });
+});
+
+describe('the agent’s own read carries its payment once handed off (GA1; BR-19, BR-20)', () => {
+  it('shows none before the hand-off, and its own payment’s ID and status, paid, after', async () => {
+    const { w, acting, request, agentBefore, transaction } = await paid();
+
+    expect(agentBefore).toMatchObject({ outcome: 'found', request: { status: 'APPROVED' }, payment: null });
+    expect(await reads.ofAgent(w.org, acting.agentId, request.id, CORRELATION)).toMatchObject({
+      outcome: 'found',
+      request: { status: 'HANDED_OFF' },
+      payment: { id: transaction.id.toLowerCase(), status: 'SUCCEEDED' },
+    });
+  });
+
+  it('SEC-AG-08, SEC-TEN-01: another agent’s request, or another organisation’s, is none, payment and all', async () => {
+    const mine = await paid();
+    const theirs = await paid();
+    const other = await shared.secondAgent(registry, mine.w);
+
+    expect(await reads.ofAgent(mine.w.org, other.agentId, mine.request.id, CORRELATION)).toEqual(NOT_FOUND);
+    expect(await reads.ofAgent(mine.w.org, mine.acting.agentId, theirs.request.id, CORRELATION)).toEqual(NOT_FOUND);
+    // Another organisation's agent naming this one's request, in this organisation or its own.
+    expect(await reads.ofAgent(theirs.w.org, theirs.acting.agentId, mine.request.id, CORRELATION)).toEqual(NOT_FOUND);
+    expect(await reads.ofAgent(mine.w.org, theirs.acting.agentId, mine.request.id, CORRELATION)).toEqual(NOT_FOUND);
+  });
+
+  it('refuses one whose payment was changed past the app, as the team’s read does', async () => {
+    const { w, acting, request, transaction } = await paid();
+    await changedPastTheApp(w, transaction.id);
+
+    expect(await reads.ofAgent(w.org, acting.agentId, request.id, CORRELATION)).toEqual(INTEGRITY_FAILED);
     expect(await heldOf(w)).toMatchObject({ outcome: 'held' });
   });
 });
