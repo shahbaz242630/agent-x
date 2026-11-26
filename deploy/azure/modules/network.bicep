@@ -10,9 +10,10 @@
 //   the server's name resolves to its private address inside the network.
 //   Only the apps subnet, and the server's own subnet, may reach its port;
 //   it reaches out only to its own subnet and the region's Storage (AZ8)
-// - endpoints: the audit-export store's private endpoint (AZ11, PL-43), with a
-//   private DNS zone so the store's name resolves to its private address inside
-//   the network. Only the apps subnet may reach it, on 443
+// - endpoints: the two stores' private endpoints, the audit exports' (AZ11,
+//   PL-43) and the activity downloads' (AZ32c-2), with a private DNS zone so
+//   each store's name resolves to its private address inside the network. Only
+//   the apps subnet may reach them, on 443
 // A server's networking can't be changed after it is created, and neither can
 // an environment's subnet size (Microsoft), so both are fixed here.
 
@@ -167,7 +168,7 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
       {
         name: 'allow-out-endpoints'
         properties: {
-          description: 'The audit-export store, through its private endpoint, and nothing else in the network (AZ11).'
+          description: 'The two stores, audit exports and activity downloads, through their private endpoints, and nothing else in the network (AZ11, AZ32c-2).'
           priority: 225
           direction: 'Outbound'
           access: 'Allow'
@@ -304,22 +305,8 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
           destinationPortRange: '443'
         }
       }
-      {
-        // The regional tag, as the key vault's: it still covers every account
-        // in this region, not ours alone; the audit exports' store left it for a private endpoint (AZ11).
-        name: 'allow-out-storage'
-        properties: {
-          description: 'Activity downloads, to their store through the subnet\'s Storage endpoint, in this region only.'
-          priority: 310
-          direction: 'Outbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourceAddressPrefix: appsPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: 'Storage.${location}'
-          destinationPortRange: '443'
-        }
-      }
+      // No way out to the region's Storage (AZ32c-2): it reached every account in the region, not ours alone. Both
+      // stores are reached through their private endpoints, by the endpoints rule above.
       {
         name: 'deny-out-rest'
         properties: {
@@ -495,7 +482,7 @@ resource endpointsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
       {
         name: 'allow-https-from-apps'
         properties: {
-          description: 'The apps and jobs reach the audit-export store\'s private endpoint; nothing else in the network does.'
+          description: 'The apps and jobs reach the two stores\' private endpoints; nothing else in the network does.'
           priority: 100
           direction: 'Inbound'
           access: 'Allow'
@@ -562,15 +549,13 @@ resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
               }
             }
           ]
-          // Lets the key vault and the activity downloads' store take requests
-          // from this subnet and refuse the rest (keyvault.bicep, activity-downloads.bicep).
+          // Lets the key vault take requests from this subnet and refuse the rest
+          // (keyvault.bicep). No Storage endpoint (AZ32c-2): both stores are
+          // reached through their private endpoints, and nothing the apps run
+          // needs another account (our image is on ghcr.io, no Azure Files).
           serviceEndpoints: [
             {
               service: 'Microsoft.KeyVault'
-              locations: [location]
-            }
-            {
-              service: 'Microsoft.Storage'
               locations: [location]
             }
           ]

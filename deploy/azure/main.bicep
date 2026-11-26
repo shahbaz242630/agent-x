@@ -366,7 +366,6 @@ module evidence 'modules/evidence.bicep' = {
     location: location
     name: evidenceAccountName(short, nameSuffix)
     tags: tags
-    appsSubnetId: ids.appsSubnet
     endpointsSubnetId: ids.endpointsSubnet
     blobZoneId: ids.blobZone
     workspaceId: ids.workspace
@@ -398,11 +397,12 @@ module activityDownloads 'modules/activity-downloads.bicep' = {
     location: location
     name: activityDownloadsAccountName(short, nameSuffix)
     tags: tags
-    appsSubnetId: ids.appsSubnet
+    endpointsSubnetId: ids.endpointsSubnet
+    blobZoneId: ids.blobZone
     workspaceId: ids.workspace
     keepers: [apiKeeper, jobsKeeper]
   }
-  // The subnet's Storage endpoint, the workspace and the keepers' identities must exist first.
+  // The endpoints subnet, the zone linked to the network, the workspace and the keepers' identities must exist first.
   dependsOn: [
     network
     monitoring
