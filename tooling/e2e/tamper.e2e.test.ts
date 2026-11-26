@@ -392,13 +392,16 @@ function routeOf(op: Operation, tenant: Tenant, missing = false): string {
     // Neither tenant has a payment of its own (their requests wait for approval): a third organisation's.
     payments: payment,
   };
-  const resource = op.route.includes('/members/invitations/')
-    ? tenant.identity?.invitation
-    : op.route.includes('/spend-requests/')
-      ? tenant.request
-      : op.route.includes('{registrationId}')
-        ? w.suppliers.at(-1)
-        : resources[op.route.split('/')[2] ?? ''];
+  // SA6: a passkey addition is a person's own, found only by its own session, never a tenant's: any ID stands for one.
+  const resource = op.route.startsWith('/v1/auth/passkeys/additions/')
+    ? randomUUID()
+    : op.route.includes('/members/invitations/')
+      ? tenant.identity?.invitation
+      : op.route.includes('/spend-requests/')
+        ? tenant.request
+        : op.route.includes('{registrationId}')
+          ? w.suppliers.at(-1)
+          : resources[op.route.split('/')[2] ?? ''];
   const values: Readonly<Record<string, string | undefined>> = {
     id: resource,
     keyId: tenant.key.keyId,
@@ -450,6 +453,8 @@ function textSample(schema: Schema, tenant: Tenant, field: string): unknown {
     email: 'tamper@example.test',
     iban: 'AE070331234567890123456',
     token: 't'.repeat(43),
+    // The add-a-passkey page's one-time ticket (SA6): 32 bytes in base64url.
+    ticket: 'T'.repeat(43),
     oldKey: tenant.key.text,
     accountId: bankAccountId,
     url: 'https://example.test/form',
