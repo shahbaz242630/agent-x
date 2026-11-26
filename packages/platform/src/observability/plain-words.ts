@@ -1635,6 +1635,18 @@ export const PLAIN_WORDS = {
     broke: "Organisations' security records are not sealed or checked until the next run, 30 minutes later.",
     next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
   },
+  'money_path.missed': {
+    happened:
+      "The 15-minute count of one organisation's waiting approvals, unknown payments and held money could not be read.",
+    broke: 'That organisation is left out of this count on the dashboard; its payments themselves are not affected.',
+    next: 'Nothing to do if it is rare. If it repeats, check the database.',
+  },
+  'money_path.run_failed': {
+    happened:
+      'The 15-minute count of waiting approvals, unknown payments and held money stopped: the list of organisations could not be read.',
+    broke: 'The dashboard has no new count until a run passes; payments themselves are not affected.',
+    next: 'The next run tries again in 15 minutes. If it repeats, check the database.',
+  },
   'security_tally.missed': {
     happened: 'The five-minute count of security records could not be read for one organisation, or the shared log.',
     broke: 'Records deleted there are not noticed until a later count, or the day is sealed.',
