@@ -68,6 +68,8 @@ export interface Evidence {
       readonly id: string;
       readonly number: number;
       readonly name: string;
+      /** The partner's opaque reference for those details' payee; null when none was registered. */
+      readonly beneficiaryRef: string | null;
       readonly verification: LogEvent | null;
     } | null;
   };
@@ -77,6 +79,8 @@ export interface Evidence {
     readonly holderName: string | null;
     readonly hint: string | null;
     readonly partner: string | null;
+    /** The partner's opaque reference for the consent it is linked under now. */
+    readonly accountConsentId: string | null;
   };
   readonly approval: PersonDecision | null;
   readonly rejection: (PersonDecision & { readonly reason: string }) | null;
@@ -96,6 +100,8 @@ export interface Evidence {
       readonly partner: string;
       readonly partnerLegalEntityId: string;
       readonly partnerLicenceRef: string;
+      readonly accountConsentId: string;
+      readonly beneficiaryRef: string;
       readonly paymentReference: string;
       readonly intentHash: string;
       readonly createdAt: string;

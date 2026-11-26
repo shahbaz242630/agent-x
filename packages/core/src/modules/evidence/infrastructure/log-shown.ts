@@ -42,7 +42,9 @@ export const factsShown = (details: LogEvent['event']['details']) =>
  * account's reference, an IBAN, a key's version,
  * a keyed fingerprint, a token or a password. No event a spend request's
  * evidence reads records one today; any added later is left out of the
- * evidence all the same, never shown by default (SEC-EVD-04).
+ * evidence all the same, never shown by default (SEC-EVD-04). The bundle names
+ * the partner's consent and payee references, opaque IDs, in fields of its own
+ * (GA2), never through an event's facts.
  */
 const SECRET_SHAPED =
   /consent|beneficiary|payee|iban|account(number|ref)|keyversion|fingerprint|token|secret|password|credential|^mac$/i;

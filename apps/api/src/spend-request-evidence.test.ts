@@ -60,13 +60,20 @@ const EVIDENCE: Evidence = {
   supplier: {
     id: '0199a0f0-0000-7000-8000-0000000c2a06',
     name: 'Paper Co',
-    version: { id: '0199a0f0-0000-7000-8000-0000000c2a08', number: 2, name: 'Paper Co', verification: null },
+    version: {
+      id: '0199a0f0-0000-7000-8000-0000000c2a08',
+      number: 2,
+      name: 'Paper Co',
+      beneficiaryRef: 'fake-beneficiary-c2a08',
+      verification: null,
+    },
   },
   fundingSource: {
     id: '0199a0f0-0000-7000-8000-0000000c2a07',
     holderName: 'Acme LLC',
     hint: 'AE…6026',
     partner: 'fake',
+    accountConsentId: 'fake-consent-c2a07',
   },
   approval: null,
   rejection: null,

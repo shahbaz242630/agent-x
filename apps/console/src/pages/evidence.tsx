@@ -133,6 +133,7 @@ function Supplier({ evidence }: { readonly evidence: Evidence }) {
           label={t('evidence.verification')}
           value={supplier.version === null ? null : <Signed event={supplier.version.verification} />}
         />
+        <Fact label={t('evidence.payeeRef')} value={supplier.version?.beneficiaryRef ?? null} mono />
         <Fact
           label={t('evidence.source')}
           value={
@@ -142,6 +143,8 @@ function Supplier({ evidence }: { readonly evidence: Evidence }) {
           }
         />
         <Fact label={t('evidence.sourcePartner')} value={fundingSource.partner} />
+        {/* Today's consent, not the decision's: the payment's own is under the payment (paidUnderConsent). */}
+        <Fact label={t('evidence.consentNow')} value={fundingSource.accountConsentId} mono />
         <Fact label={t('evidence.sourceId')} value={fundingSource.id} mono />
       </dl>
     </Part>
@@ -223,6 +226,8 @@ function Payment({ payment }: { readonly payment: EvidencePayment | null }) {
         <Fact label={t('evidence.partner')} value={instruction.partner} />
         <Fact label={t('evidence.partnerEntity')} value={instruction.partnerLegalEntityId} mono />
         <Fact label={t('evidence.partnerLicence')} value={instruction.partnerLicenceRef} mono />
+        <Fact label={t('evidence.paidUnderConsent')} value={instruction.accountConsentId} mono />
+        <Fact label={t('evidence.paidToPayee')} value={instruction.beneficiaryRef} mono />
         <Fact label={t('evidence.paymentReference')} value={instruction.paymentReference} mono />
         <Fact label={t('evidence.intentHash')} value={instruction.intentHash} mono />
         <Fact label={t('evidence.instructionId')} value={instruction.id} mono />
