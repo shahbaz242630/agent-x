@@ -2594,6 +2594,15 @@ function storeEndpointProblems(
       endpointsSubnetProblems(snapshot, network, subnet, problem);
     }
   }
+  endpointCountProblems(endpoints, accounts, problem);
+}
+
+/** One endpoint for each store and no other: a store with none, or two, and any endpoint left over (AZ32c-2). */
+function endpointCountProblems(
+  endpoints: readonly PredictedResource[],
+  accounts: readonly PredictedResource[],
+  problem: (resource: string, message: string) => void,
+): void {
   if (endpoints.length !== accounts.length) {
     problem(
       'the deployment',
