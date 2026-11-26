@@ -15,7 +15,7 @@ import { api, ApiError, isSignedOut, isUuid } from './api.ts';
 import { refusalText } from './refusals.ts';
 import { t, type TextKey } from './text.ts';
 
-export const PASSKEYS_PATH = '/more/passkeys';
+const PASSKEYS_PATH = '/more/passkeys';
 const ADDITIONS = '/v1/auth/passkeys/additions';
 /** The query the page comes back with from its step-up: the addition, by its challenge. */
 export const ADDING = 'adding';

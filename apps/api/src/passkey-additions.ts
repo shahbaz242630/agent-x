@@ -52,8 +52,8 @@ declare module 'fastify' {
   }
 }
 
-export const PASSKEY_ADD_OPERATION = 'passkey.add';
-export const PASSKEY_CONFIRM_OPERATION = 'passkey.add.confirm';
+const PASSKEY_ADD_OPERATION = 'passkey.add';
+const PASSKEY_CONFIRM_OPERATION = 'passkey.add.confirm';
 
 /** The most of the page's calls one network makes a minute, across every `web` copy: a person needs two. */
 export const PAGE_CALLS = { most: 20, windowMs: 60_000 } as const;

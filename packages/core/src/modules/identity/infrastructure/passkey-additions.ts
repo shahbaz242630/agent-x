@@ -124,7 +124,7 @@ const tokenData = (id: string, userId: string, sessionId: string) =>
 const hashOf = (ticket: string): Buffer => createHash('sha256').update(ticket, 'ascii').digest();
 
 /** A sealed token that won't open: changed, or copied from another addition. */
-export class AdditionTokenUnreadable extends Error {
+class AdditionTokenUnreadable extends Error {
   override readonly name = 'AdditionTokenUnreadable';
   constructor(options: ErrorOptions) {
     super("A passkey addition's token can't be opened", options);

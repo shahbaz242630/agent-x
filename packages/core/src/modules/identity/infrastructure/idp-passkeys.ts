@@ -30,7 +30,7 @@ export class OwnPasskeysUnavailable extends Error {
 }
 
 /** A passkey asked for: its ID, and the options the browser makes it with (WebAuthn's, as JSON). */
-export interface PasskeyAsked {
+interface PasskeyAsked {
   readonly passkeyId: string;
   readonly options: Readonly<Record<string, unknown>>;
 }
