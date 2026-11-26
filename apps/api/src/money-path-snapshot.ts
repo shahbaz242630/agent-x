@@ -18,7 +18,13 @@
 // lease lost) still logs what it counted, marked incomplete. A run never throws.
 import { v7Floor } from '@agentx/core/modules/activity';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import { type MoneyPath, moneyPathOf, moneyPathRead, type MoneyPathWindow } from '@agentx/core/modules/outcomes';
+import {
+  type HeldMoney,
+  type MoneyPath,
+  moneyPathOf,
+  moneyPathRead,
+  type MoneyPathWindow,
+} from '@agentx/core/modules/outcomes';
 import { LONGEST_APPROVAL_WAIT, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import { type Clock, DAY_MS, HOUR_MS, UUID } from '@agentx/core/shared-kernel';
@@ -52,20 +58,27 @@ export function windowAt(now: Date): MoneyPathWindow {
   };
 }
 
-/** Money paths added up: the counts summed, the oldest UNKNOWN the older, the money held summed by currency. */
+/** Money in several lists summed by currency, in the currency's order. */
+function summed(lists: readonly (readonly HeldMoney[])[]): readonly HeldMoney[] {
+  const sums = new Map<string, { reservations: number; amountMinor: bigint }>();
+  for (const { currency, reservations, amountMinor } of lists.flat()) {
+    const sum = sums.get(currency) ?? { reservations: 0, amountMinor: 0n };
+    sums.set(currency, {
+      reservations: sum.reservations + reservations,
+      amountMinor: sum.amountMinor + BigInt(amountMinor),
+    });
+  }
+  return [...sums]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([currency, sum]) => ({ currency, reservations: sum.reservations, amountMinor: sum.amountMinor.toString() }));
+}
+
+/** Money paths added up: the counts summed, the oldest UNKNOWN the older, the money held and kept summed by currency. */
 export function added(paths: readonly MoneyPath[]): MoneyPath {
-  const held = new Map<string, { reservations: number; amountMinor: bigint }>();
   let oldestUnknownAt: Date | null = null;
   for (const path of paths) {
     if (path.oldestUnknownAt !== null && (oldestUnknownAt === null || path.oldestUnknownAt < oldestUnknownAt))
       oldestUnknownAt = path.oldestUnknownAt;
-    for (const { currency, reservations, amountMinor } of path.held) {
-      const sum = held.get(currency) ?? { reservations: 0, amountMinor: 0n };
-      held.set(currency, {
-        reservations: sum.reservations + reservations,
-        amountMinor: sum.amountMinor + BigInt(amountMinor),
-      });
-    }
   }
   const total = (count: (path: MoneyPath) => number): number => paths.reduce((sum, path) => sum + count(path), 0);
   return {
@@ -74,13 +87,8 @@ export function added(paths: readonly MoneyPath[]): MoneyPath {
     unknownPayments: total((path) => path.unknownPayments),
     oldestUnknownAt,
     stuckPayments: total((path) => path.stuckPayments),
-    held: [...held]
-      .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([currency, sum]) => ({
-        currency,
-        reservations: sum.reservations,
-        amountMinor: sum.amountMinor.toString(),
-      })),
+    held: summed(paths.map((path) => path.held)),
+    keptPastMonths: summed(paths.map((path) => path.keptPastMonths)),
   };
 }
 
@@ -96,6 +104,7 @@ export const lineOf = (path: MoneyPath, now: Date) => ({
   stuckPayments: path.stuckPayments,
   stuckAfterMinutes: STUCK_AFTER_MS / 60_000,
   held: path.held,
+  keptPastMonths: path.keptPastMonths,
 });
 
 /** Whether an organisation's own counts are logged: a payment whose outcome isn't known, or one stuck under way. */

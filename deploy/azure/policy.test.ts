@@ -4007,6 +4007,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
         data.items = (data.items as Mutable[]).filter((item) => item.name !== 'money-unknown-age');
       }),
       rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter((item) => item.name !== 'money-kept-trend');
+      }),
+      rewritten((data) => {
         for (const item of data.items as Mutable[])
           if (String(item.name).startsWith('money-'))
             inside(item, 'content').query = String(inside(item, 'content').query).replace(

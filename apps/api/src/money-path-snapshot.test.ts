@@ -17,6 +17,7 @@ const none: MoneyPath = {
   oldestUnknownAt: null,
   stuckPayments: 0,
   held: [],
+  keptPastMonths: [],
 };
 
 describe('GA4 the money-path snapshot', () => {
@@ -45,6 +46,7 @@ describe('GA4 the money-path snapshot', () => {
           { currency: 'USD', reservations: 1, amountMinor: '500' },
           { currency: 'AED', reservations: 2, amountMinor: '9007199254740993' },
         ],
+        keptPastMonths: [{ currency: 'AED', reservations: 1, amountMinor: '40' }],
       },
       none,
       {
@@ -54,6 +56,7 @@ describe('GA4 the money-path snapshot', () => {
         oldestUnknownAt: older,
         stuckPayments: 4,
         held: [{ currency: 'AED', reservations: 1, amountMinor: '7' }],
+        keptPastMonths: [{ currency: 'AED', reservations: 2, amountMinor: '2' }],
       },
       { ...none, unknownPayments: 1, oldestUnknownAt: newer },
     ]);
@@ -67,6 +70,7 @@ describe('GA4 the money-path snapshot', () => {
         { currency: 'AED', reservations: 3, amountMinor: '9007199254741000' },
         { currency: 'USD', reservations: 1, amountMinor: '500' },
       ],
+      keptPastMonths: [{ currency: 'AED', reservations: 3, amountMinor: '42' }],
     });
   });
 
@@ -88,6 +92,7 @@ describe('GA4 the money-path snapshot', () => {
       stuckPayments: 1,
       stuckAfterMinutes: 60,
       held: [],
+      keptPastMonths: [],
     });
   });
 });

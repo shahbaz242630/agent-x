@@ -45,18 +45,27 @@ interface Asked {
   readonly hoursAgo: number;
   /** When its wait ends, for a request that waited for approval. */
   readonly waitsUntil?: Date;
-  /** Its reservation, if any: its state, currency and amount. */
-  readonly held?: readonly [state: string, currency: string, amountMinor: bigint];
+  /** Its reservation, if any: its state, currency and amount, and its agent's month (the pass's, March, unless named). */
+  readonly held?: readonly [state: string, currency: string, amountMinor: bigint, month?: string];
   /** Its payment, for one handed off: the transaction's status and how long ago it was made. */
   readonly paid?: readonly [status: string, hoursAgo: number];
 }
 
-/** The organisation's requests, their reservations and payments, as the admin lays them down. */
-async function laid(orgId: string, requests: readonly Asked[]): Promise<void> {
+/**
+ * The organisation's requests, their reservations and payments, as the admin lays them down, every reservation its one
+ * agent's; that agent's zone row too where `zone` is named (none: the default zone).
+ */
+async function laid(orgId: string, requests: readonly Asked[], zone?: string): Promise<void> {
   const admin = await database.connect('admin');
+  const agent = idAt(1000);
   try {
     await admin.query('begin');
     await admin.query("select pg_catalog.set_config('session_replication_role', 'replica', true)");
+    if (zone !== undefined)
+      await admin.query(
+        'insert into limit_reservations.agent_zones (org_id, agent_id, id, time_zone, created_at) values ($1, $2, $2, $3, $4)',
+        [orgId, agent, zone, ago(1000)],
+      );
     for (const { status, hoursAgo, waitsUntil, held, paid } of requests) {
       const id = idAt(hoursAgo);
       const waited = waitsUntil !== undefined || status === 'APPROVAL_REQUIRED';
@@ -79,13 +88,24 @@ async function laid(orgId: string, requests: readonly Asked[]): Promise<void> {
         ],
       );
       if (held !== undefined) {
-        const [state, currency, amount] = held;
+        const [state, currency, amount, month = '2027-03'] = held;
         const ended = state === 'FINALISED' || state === 'RELEASED';
         await admin.query(
           `insert into limit_reservations.reservations (org_id, id, request_id, agent_id, mandate_id, month,
              supplier_id, amount_minor, currency, state, reserved_at, settled_at)
-           values ($1, $2, $3, $2, $2, '2027-03', $2, $4, $5, $6, $7, $8)`,
-          [orgId, idAt(hoursAgo), id, amount.toString(), currency, state, ago(hoursAgo), ended ? NOW : null],
+           values ($1, $2, $3, $9, $2, $10, $2, $4, $5, $6, $7, $8)`,
+          [
+            orgId,
+            idAt(hoursAgo),
+            id,
+            amount.toString(),
+            currency,
+            state,
+            ago(hoursAgo),
+            ended ? NOW : null,
+            agent,
+            month,
+          ],
         );
       }
       if (paid !== undefined) {
@@ -150,9 +170,10 @@ const OURS = {
   stuckPayments: 1,
   stuckAfterMinutes: 60,
   held: [
-    { currency: 'AED', reservations: 7, amountMinor: '41606' },
+    { currency: 'AED', reservations: 8, amountMinor: '41631' },
     { currency: 'USD', reservations: 1, amountMinor: '50' },
   ],
+  keptPastMonths: [{ currency: 'AED', reservations: 1, amountMinor: '600' }],
 };
 
 /** Theirs alone. */
@@ -164,6 +185,7 @@ const THEIRS = {
   stuckPayments: 0,
   stuckAfterMinutes: 60,
   held: [{ currency: 'AED', reservations: 2, amountMinor: '7003' }],
+  keptPastMonths: [{ currency: 'USD', reservations: 1, amountMinor: '9' }],
 };
 
 beforeAll(async () => {
@@ -172,31 +194,41 @@ beforeAll(async () => {
   ours = orgIds.next();
   theirs = orgIds.next();
   quiet = orgIds.next();
-  await laid(ours, [
-    // Two waiting, each holding its amount.
-    { status: 'APPROVAL_REQUIRED', hoursAgo: 2, held: ['HELD', 'AED', 100n] },
-    { status: 'APPROVAL_REQUIRED', hoursAgo: 5, held: ['HELD', 'AED', 200n] },
-    // Approved, not yet handed off, in another currency.
-    { status: 'APPROVED', hoursAgo: 1, held: ['HELD', 'USD', 50n] },
-    // Expired: its wait ended two hours ago (counted), and one 30 hours ago (outside the day).
-    { status: 'EXPIRED', hoursAgo: 26, waitsUntil: ago(2), held: ['RELEASED', 'AED', 9_000n] },
-    { status: 'EXPIRED', hoursAgo: 54, waitsUntil: ago(30), held: ['RELEASED', 'AED', 9_000n] },
-    // Denied, its reservation released: no money held.
-    { status: 'DENIED', hoursAgo: 3, held: ['RELEASED', 'AED', 70_000n] },
-    // Cancelled, its signed ending keeping the capacity (capacityKept, AT13d): its reservation stays HELD, still
-    // counted against the agent's month, so money held, though the request has ended.
-    { status: 'CANCELLED', hoursAgo: 200, held: ['HELD', 'AED', 40_000n] },
-    // Handed off: UNKNOWN 3 hours (the oldest) and an hour, PROCESSING 2 hours (stuck), SUBMITTED 10 minutes (not
-    // yet), and one paid (its money spent, not held).
-    { status: 'HANDED_OFF', hoursAgo: 4, held: ['BLOCKED_UNKNOWN', 'AED', 1_000n], paid: ['UNKNOWN', 3] },
-    { status: 'HANDED_OFF', hoursAgo: 2, held: ['BLOCKED_UNKNOWN', 'AED', 1n], paid: ['UNKNOWN', 1] },
-    { status: 'HANDED_OFF', hoursAgo: 3, held: ['HELD', 'AED', 300n], paid: ['PROCESSING', 2] },
-    { status: 'HANDED_OFF', hoursAgo: 1, held: ['HELD', 'AED', 5n], paid: ['SUBMITTED', 1 / 6] },
-    { status: 'HANDED_OFF', hoursAgo: 6, held: ['FINALISED', 'AED', 80_000n], paid: ['SUCCEEDED', 5] },
-  ]);
+  await laid(
+    ours,
+    [
+      // Two waiting, each holding its amount.
+      { status: 'APPROVAL_REQUIRED', hoursAgo: 2, held: ['HELD', 'AED', 100n] },
+      { status: 'APPROVAL_REQUIRED', hoursAgo: 5, held: ['HELD', 'AED', 200n] },
+      // Approved, not yet handed off, in another currency.
+      { status: 'APPROVED', hoursAgo: 1, held: ['HELD', 'USD', 50n] },
+      // Expired: its wait ended two hours ago (counted), and one 30 hours ago (outside the day).
+      { status: 'EXPIRED', hoursAgo: 26, waitsUntil: ago(2), held: ['RELEASED', 'AED', 9_000n] },
+      { status: 'EXPIRED', hoursAgo: 54, waitsUntil: ago(30), held: ['RELEASED', 'AED', 9_000n] },
+      // Denied, its reservation released: no money held.
+      { status: 'DENIED', hoursAgo: 3, held: ['RELEASED', 'AED', 70_000n] },
+      // Cancelled, its signed ending keeping the capacity (capacityKept, AT13d): its reservation stays HELD, still
+      // counted against the agent's month, so money held, though the request has ended.
+      { status: 'CANCELLED', hoursAgo: 200, held: ['HELD', 'AED', 40_000n] },
+      // One kept so in February: it counted in February alone, so it holds nothing now; said apart, not dropped.
+      { status: 'CANCELLED', hoursAgo: 300, held: ['HELD', 'AED', 600n, '2027-02'] },
+      // Approved at February's end and still live: what its payment may take, so held, whatever its month.
+      { status: 'APPROVED', hoursAgo: 230, held: ['HELD', 'AED', 25n, '2027-02'] },
+      // Handed off: UNKNOWN 3 hours (the oldest) and an hour, PROCESSING 2 hours (stuck), SUBMITTED 10 minutes (not
+      // yet), and one paid (its money spent, not held).
+      { status: 'HANDED_OFF', hoursAgo: 4, held: ['BLOCKED_UNKNOWN', 'AED', 1_000n], paid: ['UNKNOWN', 3] },
+      { status: 'HANDED_OFF', hoursAgo: 2, held: ['BLOCKED_UNKNOWN', 'AED', 1n], paid: ['UNKNOWN', 1] },
+      { status: 'HANDED_OFF', hoursAgo: 3, held: ['HELD', 'AED', 300n], paid: ['PROCESSING', 2] },
+      { status: 'HANDED_OFF', hoursAgo: 1, held: ['HELD', 'AED', 5n], paid: ['SUBMITTED', 1 / 6] },
+      { status: 'HANDED_OFF', hoursAgo: 6, held: ['FINALISED', 'AED', 80_000n], paid: ['SUCCEEDED', 5] },
+    ],
+    'Asia/Dubai',
+  );
   await laid(theirs, [
     { status: 'APPROVAL_REQUIRED', hoursAgo: 1, held: ['HELD', 'AED', 7_000n] },
     { status: 'HANDED_OFF', hoursAgo: 51, held: ['BLOCKED_UNKNOWN', 'AED', 3n], paid: ['UNKNOWN', 50] },
+    // Their agent has no zone row: its month read in the default zone. One kept past its month, in USD.
+    { status: 'EXPIRED', hoursAgo: 900, waitsUntil: ago(876), held: ['HELD', 'USD', 9n, '2027-01'] },
   ]);
 });
 
@@ -224,8 +256,12 @@ describe('GA4 the money-path snapshot', () => {
         stuckPayments: 1,
         stuckAfterMinutes: 60,
         held: [
-          { currency: 'AED', reservations: 9, amountMinor: '48609' },
+          { currency: 'AED', reservations: 10, amountMinor: '48634' },
           { currency: 'USD', reservations: 1, amountMinor: '50' },
+        ],
+        keptPastMonths: [
+          { currency: 'AED', reservations: 1, amountMinor: '600' },
+          { currency: 'USD', reservations: 1, amountMinor: '9' },
         ],
       },
     ]);
@@ -259,6 +295,7 @@ describe('GA4 the money-path snapshot', () => {
         stuckPayments: 0,
         stuckAfterMinutes: 60,
         held: [],
+        keptPastMonths: [],
       },
     ]);
     expect(linesOf('money_path.organisation')).toEqual([]);
@@ -295,7 +332,7 @@ describe('GA4 the money-path snapshot', () => {
         "select indexdef from pg_catalog.pg_indexes where schemaname = 'limit_reservations' and indexname = 'reservations_holding'",
       );
     expect(rows.map(({ indexdef }) => indexdef)).toEqual([
-      "CREATE INDEX reservations_holding ON limit_reservations.reservations USING btree (org_id, currency) INCLUDE (amount_minor) WHERE (state = ANY (ARRAY['HELD'::text, 'BLOCKED_UNKNOWN'::text]))",
+      "CREATE INDEX reservations_holding ON limit_reservations.reservations USING btree (org_id, currency) INCLUDE (amount_minor, agent_id, month, request_id) WHERE (state = ANY (ARRAY['HELD'::text, 'BLOCKED_UNKNOWN'::text]))",
     ]);
   });
 

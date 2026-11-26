@@ -3724,14 +3724,21 @@ const workbooks: Check = (snapshot, _expected, add) => {
       problem('counts only: names no organisation, agent, key, person or request');
     const moneyPath = itemQueries(content).filter((query) => query.includes(MONEY_PATH_LINES));
     // Its latest values and their trend: each field the snapshot carries, read in both.
-    const charted = ['approvalsWaiting', 'unknownPayments', 'oldestUnknownSeconds', 'stuckPayments', 'held'].every(
+    const charted = [
+      'approvalsWaiting',
+      'unknownPayments',
+      'oldestUnknownSeconds',
+      'stuckPayments',
+      'held',
+      'keptPastMonths',
+    ].every(
       (field) =>
         moneyPath.some((query) => query.includes(`Line.${field}`) && query.includes('top 1 by TimeGenerated')) &&
         moneyPath.some((query) => query.includes(`Line.${field}`) && query.includes('bin(TimeGenerated')),
     );
     if (!charted)
       problem(
-        'must chart the money path from money_path.snapshot (GA4): approvals waiting, payments unknown and the oldest one, payments stuck and money held, each as it stands now and over time',
+        'must chart the money path from money_path.snapshot (GA4): approvals waiting, payments unknown and the oldest one, payments stuck, money held and money kept past its month, each as it stands now and over time',
       );
   }
 };

@@ -124,6 +124,12 @@ var workbookContent = {
       'table'
     )
     chart(
+      'money-kept-now',
+      'Kept past its month, by currency: reservations an ending kept, which no longer hold anything (minor units)',
+      '${moneyPathNow} | mv-expand Kept = Line.keptPastMonths | where isnotempty(Kept) | project Currency = tostring(Kept.currency), Reservations = toint(Kept.reservations), KeptMinor = tolong(Kept.amountMinor) | order by Currency asc',
+      'table'
+    )
+    chart(
       'money-trend',
       'Approvals waiting and payments unknown or stuck, over time',
       '${moneyPath} | summarize ApprovalsWaiting = max(toint(Line.approvalsWaiting)), ApprovalsExpiredLastDay = max(toint(Line.approvalsExpiredLastDay)), UnknownPayments = max(toint(Line.unknownPayments)), StuckPayments = max(toint(Line.stuckPayments)) by bin(TimeGenerated, 15m)',
@@ -139,6 +145,12 @@ var workbookContent = {
       'money-held-trend',
       'Money held by currency, over time (minor units)',
       '${moneyPath} | mv-expand Held = Line.held | where isnotempty(Held) | summarize HeldMinor = max(tolong(Held.amountMinor)) by Currency = tostring(Held.currency), bin(TimeGenerated, 15m)',
+      'timechart'
+    )
+    chart(
+      'money-kept-trend',
+      'Kept past its month by currency, over time (minor units)',
+      '${moneyPath} | mv-expand Kept = Line.keptPastMonths | where isnotempty(Kept) | summarize KeptMinor = max(tolong(Kept.amountMinor)) by Currency = tostring(Kept.currency), bin(TimeGenerated, 15m)',
       'timechart'
     )
     chart(
