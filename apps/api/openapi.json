@@ -2038,6 +2038,145 @@
         "additionalProperties": false,
         "description": "A spend request, with its decision."
       },
+      "OwnSpendRequest": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "VALIDATING",
+              "DENIED",
+              "APPROVAL_REQUIRED",
+              "APPROVED",
+              "INSTRUCTION_READY",
+              "HANDED_OFF",
+              "EXPIRED",
+              "CANCELLED"
+            ]
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "DENY",
+              "REQUIRE_NEW_MANDATE",
+              "REQUIRE_APPROVAL",
+              "ALLOW"
+            ]
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "amountMinor": {
+            "type": "number"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "supplierId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "fundingSourceId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "mandateId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "orderReference": {
+            "type": "string"
+          },
+          "bankReference": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payment": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "SUBMISSION_PENDING",
+                      "SUBMITTED",
+                      "PROCESSING",
+                      "SUCCEEDED",
+                      "FAILED",
+                      "CANCELLED",
+                      "UNKNOWN",
+                      "REVERSED"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "status"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "decision",
+          "reasons",
+          "amountMinor",
+          "currency",
+          "supplierId",
+          "fundingSourceId",
+          "mandateId",
+          "orderReference",
+          "bankReference",
+          "payment"
+        ],
+        "additionalProperties": false,
+        "description": "One of your own spend requests, with its decision and, once handed off, its payment."
+      },
       "SpendRequestListed": {
         "type": "object",
         "properties": {
@@ -15812,7 +15951,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SpendRequest"
+                  "$ref": "#/components/schemas/OwnSpendRequest"
                 }
               }
             }
@@ -15878,7 +16017,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SpendRequest"
+                  "$ref": "#/components/schemas/OwnSpendRequest"
                 }
               }
             }

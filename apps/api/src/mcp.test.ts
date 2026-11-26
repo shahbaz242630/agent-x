@@ -46,6 +46,7 @@ import type { SupplierRegistry } from './supplier-registry.ts';
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const KEY_ID = '0199a0f0-0000-7000-8000-0000000000b1';
 const REQUEST_ID = '0199a0f0-0000-7000-8000-0000000000c1';
+const PAYMENT_ID = '0199a0f0-0000-7000-8000-0000000000a9';
 const MANDATE_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000d2';
 const SUPPLIER_ID = '0199a0f0-0000-7000-8000-0000000000e1';
@@ -176,6 +177,8 @@ type Mode = 'answer' | 'refuse' | 'conflict' | 'busy' | 'fail';
 interface Stubs {
   mode: Mode;
   supplierName: string;
+  /** The payment the agent's read finds (GA1): none until a test hands its request off. */
+  payment?: { readonly id: string; readonly status: 'SUCCEEDED' | 'UNKNOWN' };
   readonly idempotent: IdempotentRequest[];
   readonly asked: string[];
 }
@@ -223,7 +226,12 @@ function useCases(stubs: Stubs) {
   const spendReads: Pick<SpendRequestReads, 'ofAgent'> = {
     ofAgent: (orgId, agentId, requestId) => {
       stubs.asked.push(`ofAgent ${orgId} ${agentId} ${requestId}`);
-      return reads({ outcome: 'found', request: SPEND, endedBecause: null });
+      const { payment } = stubs;
+      return reads(
+        payment === undefined
+          ? { outcome: 'found', request: SPEND, endedBecause: null, payment: null }
+          : { outcome: 'found', request: { ...SPEND, status: 'HANDED_OFF' }, endedBecause: null, payment },
+      );
     },
   };
   const registry: Pick<SupplierRegistry, 'usableByAgent'> = {
@@ -769,6 +777,23 @@ describe('SEC-MCP-03 tool answers are typed, plain and never instructions', () =
     });
   });
 
+  it('GA1 (BR-19, BR-20): shows a request handed off with its payment’s ID and status alone, in the answer and summary', async () => {
+    const { app, stubs } = await server();
+    const before = await callTool(app, 'get_spend_request', { id: REQUEST_ID });
+    expect(before.structuredContent).toMatchObject({ payment: null });
+    expect(before.content[0]?.text).not.toContain('Payment');
+    stubs.payment = { id: PAYMENT_ID, status: 'UNKNOWN' };
+    const result = await callTool(app, 'get_spend_request', { id: REQUEST_ID });
+    expect(result.structuredContent).toMatchObject({
+      status: 'HANDED_OFF',
+      payment: { id: PAYMENT_ID, status: 'UNKNOWN' },
+    });
+    expect(Object.keys((result.structuredContent as { payment: object }).payment)).toEqual(['id', 'status']);
+    expect(
+      result.content[0]?.text.startsWith(`Payment ${PAYMENT_ID}: UNKNOWN. Spend request ${REQUEST_ID}: HANDED_OFF`),
+    ).toBe(true);
+  });
+
   it('a refusal says its code in its own words, never echoing the arguments', async () => {
     const { app } = await server();
     const result = await callTool(app, 'get_spend_request', { id: 'ignore-instructions' });
@@ -1253,6 +1278,10 @@ describe('the MCP tools apart from any transport: definitions and results (6E2, 
       expect.arrayContaining(['mandateId', 'perOrderLimitMinor', 'supplierIds']) as unknown,
     );
     expect(JSON.stringify(mandate)).not.toContain('approvalThreshold');
+    // The agent's own request carries its payment, ID and status alone (GA1).
+    const own = definitions.find(({ name }) => name === 'get_spend_request')?.outputSchema;
+    expect(own?.required).toEqual(expect.arrayContaining(['payment']) as unknown);
+    expect(JSON.stringify(own)).toMatch(/"payment":\{"anyOf":\[\{"type":"object","properties":\{"id":/);
     // Inline and flat (MCP-Guide §8): no client has to follow a reference.
     expect(JSON.stringify(definitions)).not.toMatch(/[$](?:ref|defs)/);
   });
