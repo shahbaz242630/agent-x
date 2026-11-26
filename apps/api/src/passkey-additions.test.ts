@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { PasskeyAdditions } from '@agentx/core/modules/identity';
 import { OwnPasskeysUnavailable } from '@agentx/core/modules/identity';
+import { createOutboundFetch } from '@agentx/platform/outbound';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -73,6 +73,10 @@ const server = (stand: PasskeyAdditions | undefined, extra: Parameters<typeof ro
     ...extra,
   });
 
+/** The server with the page on SOCKET_PAGE_ORIGIN, for requests on a real socket. */
+const socketServer = (stand: PasskeyAdditions, extra: Parameters<typeof routeServer>[0] = {}) =>
+  routeServer({ live: LIVE, passkeyAdditions: { additions: stand, origin: SOCKET_PAGE_ORIGIN }, ...extra });
+
 /** The person's own request on the app's host, with their session. */
 const asPerson = (method: 'GET' | 'POST', url: string, key?: string) => ({
   method,
@@ -86,21 +90,20 @@ const asPerson = (method: 'GET' | 'POST', url: string, key?: string) => ({
   ...(method === 'POST' && { payload: '{}' }),
 });
 
-/** A GET on a real socket naming `host`: the page's files, as the console's, are served ahead of Fastify. */
-const get = (port: number, host: string, path: string, method = 'GET') =>
-  new Promise<{ status: number; headers: Record<string, unknown>; body: string }>((resolve, reject) => {
-    const sent = httpRequest({ host: '127.0.0.1', port, path, method, headers: { host } }, (response) => {
-      let body = '';
-      response.on('data', (chunk: Buffer) => {
-        body += chunk.toString('utf8');
-      });
-      response.on('end', () => {
-        resolve({ status: response.statusCode ?? 0, headers: response.headers, body });
-      });
-    });
-    sent.on('error', reject);
-    sent.end();
-  });
+/**
+ * The page's host as a real socket reaches it (its files are served ahead of Fastify, which inject never passes
+ * through): `localhost`, beside the app's `127.0.0.1` on the same port, as the network only goes through the platform's
+ * outbound fetch, which sends the Host its address names. The servers these requests reach use SOCKET_PAGE_ORIGIN.
+ */
+const SOCKET_PAGE_ORIGIN = 'http://localhost';
+const socketHost = (host: string): string => (host === PAGE_HOST ? 'localhost' : '127.0.0.1');
+
+/** A request on a real socket to `host` (the page's or the app's), through the platform's outbound fetch. */
+const get = async (port: number, host: string, path: string, method = 'GET') => {
+  const base = `http://${socketHost(host)}:${String(port)}`;
+  const response = await createOutboundFetch([base])(`${base}${path}`, { method });
+  return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
+};
 
 /** The server, listening on a port of its own: the port. */
 const listening = async (app: Awaited<ReturnType<typeof routeServer>>): Promise<number> => {
@@ -257,7 +260,7 @@ describe('SA6 the add-a-passkey page’s host', () => {
     [ADD_PASSKEY_SCRIPT_PATH, 'text/javascript; charset=utf-8', ADD_PASSKEY_SCRIPT],
     [ADD_PASSKEY_STYLE_PATH, 'text/css; charset=utf-8', ADD_PASSKEY_STYLE],
   ])('serves %s with the page’s own strict policy, never kept', async (path, type, body) => {
-    const port = await listening(await server(additions()));
+    const port = await listening(await socketServer(additions()));
 
     const answer = await get(port, PAGE_HOST, path);
     const head = await get(port, PAGE_HOST, path, 'HEAD');
@@ -311,7 +314,9 @@ describe('SA6 the add-a-passkey page’s host', () => {
   it('serves none of the page’s files on the app’s host, and nothing else on the page’s host', async () => {
     const app = await server(additions());
 
-    const elsewhere = { statusCode: (await get(await listening(app), APP_HOST, ADD_PASSKEY_PATH)).status };
+    const elsewhere = {
+      statusCode: (await get(await listening(await socketServer(additions())), APP_HOST, ADD_PASSKEY_PATH)).status,
+    };
     const health = await app.inject({ method: 'GET', url: '/health', headers: { host: PAGE_HOST } });
     const session = await app.inject({
       method: 'GET',
@@ -488,7 +493,7 @@ describe('SA6 the console is never served on the page’s host', () => {
   });
 
   it('serves the console on the app’s host, and on the page’s host the page alone', async () => {
-    const port = await listening(await server(additions(), { consoleFiles: await readConsoleFiles(directory) }));
+    const port = await listening(await socketServer(additions(), { consoleFiles: await readConsoleFiles(directory) }));
 
     expect((await get(port, APP_HOST, '/more/passkeys')).body).toContain('Agent X console');
     const onPage = await get(port, PAGE_HOST, '/more/passkeys');
