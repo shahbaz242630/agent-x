@@ -132,7 +132,7 @@ function signInFrom(
           database,
           challenges,
           passkeys: createOwnPasskeys({ issuer, internalOrigin, fetch }),
-          revoke: (token) => oidc.revoke(token),
+          revoke: oidc.revoke.bind(oidc),
           keys,
           ids: uuidV7Ids,
           clock: systemClock,

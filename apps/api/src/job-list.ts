@@ -319,7 +319,7 @@ function revokeOf(config: Config): ((accessToken: string) => Promise<boolean>) |
     fetch: createOutboundFetch(config.outbound.allowedOrigins),
     clock: systemClock,
   });
-  return (accessToken) => oidc.revoke(accessToken);
+  return oidc.revoke.bind(oidc);
 }
 
 export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts, leadership: Leadership) {
