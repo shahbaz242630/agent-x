@@ -99,6 +99,7 @@ export type RuleId =
   | 'records-filling-alert'
   | 'dead-man-alerts'
   | 'agent-cancels-alert'
+  | 'duplicate-attempts-alert'
   | 'agent-cancel-cap-alert'
   | 'decisions-suppressed-alert'
   | 'mcp-alerts'
@@ -400,6 +401,22 @@ const AGENT_CANCEL_LINES = [
 
 /** One agent cancelling more of its own than this in a window: half its day's cap (10) at once. */
 const AGENT_CANCELS_THRESHOLD = 5;
+
+/**
+ * Duplicate attempts' lines (ADR-014, Logging-and-Monitoring.md section 5, GA3): a spend request denied as an order
+ * already asked for (its space-separated reasons hold DUPLICATE_ORDER_REFERENCE), and an agent's retry key reused for
+ * a different request (`idempotency.conflict`, 409 IDEMPOTENCY_KEY_REUSED, its agent the `clientId`), counted per agent
+ * and the highest kept, so the alert returns one number with no ID dimensions.
+ */
+const DUPLICATE_LINES = [
+  'extend Line = parse_json(Log)',
+  'where (tostring(Line.event) == "spend_request.decided" and set_has_element(split(tostring(Line.reasons), " "), "DUPLICATE_ORDER_REFERENCE")) or (tostring(Line.event) == "idempotency.conflict" and tostring(Line.clientKind) == "agent")',
+  'extend Agent = tolower(iff(tostring(Line.event) == "spend_request.decided", tostring(Line.agentId), tostring(Line.clientId)))',
+  'summarize Attempts = count() by Agent',
+] as const;
+
+/** One agent making more duplicate attempts than this in a window is past retrying once or twice. */
+const DUPLICATE_ATTEMPTS_THRESHOLD = 5;
 
 /** An agent refused a cancel by its day's cap (Phase 2 G6): steady cancelling the burst alert never sees. */
 const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent"';
@@ -3704,9 +3721,20 @@ const resourceIdsIn = (content: unknown): readonly string[] => {
 /** The fields that name who: a workbook shows how much, never which organisation, agent, key or request. */
 const WHO_FIELDS = /\b(?:orgId|agentId|agentKeyId|correlationId|userId)\b/;
 
+/** The money path's snapshot line (GA4, PRD §9.3): approvals, unknown payments and money held, which a workbook charts. */
+const MONEY_PATH_LINES = 'where Event == "money_path.snapshot"';
+
+/** The queries of a workbook's items, each as its content holds it. */
+const itemQueries = (content: unknown): readonly string[] =>
+  list(at(content, 'items')).map((item) => {
+    const query = at(item, 'content', 'query');
+    return typeof query === 'string' ? query : '';
+  });
+
 /**
  * A workbook (4D2e Stage F, PR 10) reads only this deployment's workspaces, keeps its content in Azure's own store
- * in the region rather than a storage account of anyone's, and counts without naming who.
+ * in the region rather than a storage account of anyone's, and counts without naming who. And it charts the money
+ * path from its snapshot (GA4): approvals waiting, payments unknown or stuck, and money held.
  */
 const workbooks: Check = (snapshot, _expected, add) => {
   const workspaces = mainWorkspaceIds(snapshot);
@@ -3727,6 +3755,24 @@ const workbooks: Check = (snapshot, _expected, add) => {
       problem("keeps its content in Azure's own store, not storageUri");
     if (WHO_FIELDS.test(JSON.stringify(content)))
       problem('counts only: names no organisation, agent, key, person or request');
+    const moneyPath = itemQueries(content).filter((query) => query.includes(MONEY_PATH_LINES));
+    // Its latest values and their trend: each field the snapshot carries, read in both.
+    const charted = [
+      'approvalsWaiting',
+      'unknownPayments',
+      'oldestUnknownSeconds',
+      'stuckPayments',
+      'held',
+      'keptPastMonths',
+    ].every(
+      (field) =>
+        moneyPath.some((query) => query.includes(`Line.${field}`) && query.includes('top 1 by TimeGenerated')) &&
+        moneyPath.some((query) => query.includes(`Line.${field}`) && query.includes('bin(TimeGenerated')),
+    );
+    if (!charted)
+      problem(
+        'must chart the money path from money_path.snapshot (GA4): approvals waiting, payments unknown and the oldest one, payments stuck, money held and money kept past its month, each as it stands now and over time',
+      );
   }
 };
 
@@ -4291,6 +4337,32 @@ const denialSurgeAlert: Check = (snapshot, _expected, add) => {
         rule: 'denial-surge-alert',
         resource: environment.name,
         message: `needs an enabled alert on this deployment's workspace that fires when one agent has more than ${String(DENIAL_SURGE_THRESHOLD)} spend requests denied in a window, watching every minute`,
+      });
+    }
+  }
+};
+
+/**
+ * An enabled alert on the workspace fires when one agent's duplicate attempts
+ * in a window pass DUPLICATE_ATTEMPTS_THRESHOLD (GA3), watching every window.
+ */
+const duplicateAttemptsAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', DUPLICATE_LINES, 'max(Attempts)') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === DUPLICATE_ATTEMPTS_THRESHOLD &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'duplicate-attempts-alert',
+        resource: environment.name,
+        message: `needs an enabled alert on this deployment's workspace that fires when one agent makes more than ${String(DUPLICATE_ATTEMPTS_THRESHOLD)} duplicate attempts (duplicate orders denied, retry keys reused) in a window, watching every window`,
       });
     }
   }
@@ -7295,6 +7367,7 @@ const CHECKS: readonly Check[] = [
   recordsFillingAlert,
   deadManAlerts,
   agentCancelsAlert,
+  duplicateAttemptsAlert,
   agentCancelCapAlert,
   decisionsSuppressedAlert,
   mcpAlerts,

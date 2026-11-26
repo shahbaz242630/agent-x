@@ -11,6 +11,9 @@
 //   or an agent's ID, so a chart shows how much, not who
 // - requests come from `http.minute`, each process's exact counts a minute,
 //   which sampling and the logger's caps never thin (request-log.ts)
+// - the money path (GA4, PRD §9.3) comes from `money_path.snapshot`: approvals
+//   waiting and expired, payments unknown or stuck and money held, the jobs'
+//   own totals across every organisation every 15 minutes (money-path-snapshot.ts)
 
 param location string
 param tags object
@@ -22,6 +25,13 @@ var lines = 'ContainerAppConsoleLogs | extend Line = parse_json(Log) | extend Ev
 
 // The hand-off's outcomes: an accepted or refused answer by its kind, or the line's own event.
 var handoffOutcomes = '${lines} | where Event in ("handoff.handed_off", "handoff.failed", "handoff.denied", "handoff.marked_unknown", "handoff.refused_late") | extend Outcome = iff(Event == "handoff.handed_off", strcat("handed off: ", tostring(Line.answer)), Event)'
+
+// The money path's snapshot (GA4, PRD §9.3): every 15 minutes, the jobs copy's totals across every organisation
+// (money-path-snapshot.ts). Its organisation lines are another event, so none is read here.
+var moneyPath = '${lines} | where Event == "money_path.snapshot"'
+
+// The snapshot's latest line: what stands now, whatever range the reader picks.
+var moneyPathNow = '${moneyPath} | where TimeGenerated > ago(1h) | top 1 by TimeGenerated'
 
 // One chart of the workbook, over the time range its reader picks.
 func chart(name string, title string, query string, visualization string) object => {
@@ -49,7 +59,7 @@ var workbookContent = {
       type: 1
       name: 'about'
       content: {
-        json: '## Agent X: counts\nRead from the apps\' own log lines in this workspace. Counts only: no organisation or agent is named. Requests are exact (`http.minute`); everything else is a count of lines. No targets yet: what normal is waits for real traffic.'
+        json: '## Agent X: counts\nRead from the apps\' own log lines in this workspace. Counts only: no organisation or agent is named. Requests are exact (`http.minute`); the money path is the jobs\' own count every 15 minutes across every organisation (`money_path.snapshot`); everything else is a count of lines. No targets yet: what normal is waits for real traffic.'
       }
     }
     {
@@ -99,6 +109,48 @@ var workbookContent = {
       'handoffs',
       'Hand-offs to the bank, by outcome',
       '${handoffOutcomes} | summarize HandOffs = count() by Outcome, bin(TimeGenerated, 5m)',
+      'timechart'
+    )
+    chart(
+      'money-now',
+      'Money path now: approvals waiting, payments unknown or stuck (latest 15-minute count)',
+      '${moneyPathNow} | project Counted = TimeGenerated, ApprovalsWaiting = toint(Line.approvalsWaiting), ApprovalsExpiredLastDay = toint(Line.approvalsExpiredLastDay), UnknownPayments = toint(Line.unknownPayments), OldestUnknownHours = round(toreal(Line.oldestUnknownSeconds) / 3600, 1), StuckPayments = toint(Line.stuckPayments), StuckAfterMinutes = toint(Line.stuckAfterMinutes), Organisations = toint(Line.organisations), NotRead = toint(Line.missed), Complete = tobool(Line.complete)',
+      'table'
+    )
+    chart(
+      'money-held-now',
+      'Money held now, by currency (minor units: fils, cents)',
+      '${moneyPathNow} | mv-expand Held = Line.held | where isnotempty(Held) | project Currency = tostring(Held.currency), Reservations = toint(Held.reservations), HeldMinor = tolong(Held.amountMinor) | order by Currency asc',
+      'table'
+    )
+    chart(
+      'money-kept-now',
+      'Kept past its month, by currency: reservations an ending kept, which no longer hold anything (minor units)',
+      '${moneyPathNow} | mv-expand Kept = Line.keptPastMonths | where isnotempty(Kept) | project Currency = tostring(Kept.currency), Reservations = toint(Kept.reservations), KeptMinor = tolong(Kept.amountMinor) | order by Currency asc',
+      'table'
+    )
+    chart(
+      'money-trend',
+      'Approvals waiting and payments unknown or stuck, over time',
+      '${moneyPath} | summarize ApprovalsWaiting = max(toint(Line.approvalsWaiting)), ApprovalsExpiredLastDay = max(toint(Line.approvalsExpiredLastDay)), UnknownPayments = max(toint(Line.unknownPayments)), StuckPayments = max(toint(Line.stuckPayments)) by bin(TimeGenerated, 15m)',
+      'timechart'
+    )
+    chart(
+      'money-unknown-age',
+      'Oldest unknown payment, hours old, over time',
+      '${moneyPath} | summarize OldestUnknownHours = max(round(toreal(Line.oldestUnknownSeconds) / 3600, 1)) by bin(TimeGenerated, 15m)',
+      'timechart'
+    )
+    chart(
+      'money-held-trend',
+      'Money held by currency, over time (minor units)',
+      '${moneyPath} | mv-expand Held = Line.held | where isnotempty(Held) | summarize HeldMinor = max(tolong(Held.amountMinor)) by Currency = tostring(Held.currency), bin(TimeGenerated, 15m)',
+      'timechart'
+    )
+    chart(
+      'money-kept-trend',
+      'Kept past its month by currency, over time (minor units)',
+      '${moneyPath} | mv-expand Kept = Line.keptPastMonths | where isnotempty(Kept) | summarize KeptMinor = max(tolong(Kept.amountMinor)) by Currency = tostring(Kept.currency), bin(TimeGenerated, 15m)',
       'timechart'
     )
     chart(

@@ -467,6 +467,7 @@ const INTEGRITY_ALERT = named(/-audit-integrity$/);
 const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
 const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
 const AGENT_CANCELS_ALERT = named(/^alert-agentx-.+-agent-cancels$/);
+const DUPLICATE_ATTEMPTS_ALERT = named(/^alert-agentx-.+-duplicate-attempts$/);
 const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
 const DECISIONS_SUPPRESSED_ALERT = named(/^alert-agentx-.+-decisions-suppressed$/);
 const MCP_REFUSALS_ALERT = named(/^alert-agentx-.+-mcp-refusals$/);
@@ -789,6 +790,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-token-refused',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-denials-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-denial-surge',
+      'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-duplicates-by-agent',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-duplicate-attempts',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-holdings-check',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-handoff-queue',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-service',
@@ -4031,6 +4034,30 @@ describe('SEC-OPS-09 each rule can fail', () => {
         inside(decisions ?? {}, 'content').query =
           'ContainerAppConsoleLogs | summarize count() by tostring(parse_json(Log).orgId)';
       }),
+      // GA4: the money path charted from its snapshot, as it stands now and over time. Without its charts, without
+      // what stands now, without its trend, or reading another event, it isn't.
+      rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter((item) => !String(item.name).startsWith('money-'));
+      }),
+      rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter(
+          (item) => !['money-now', 'money-held-now'].includes(String(item.name)),
+        );
+      }),
+      rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter((item) => item.name !== 'money-unknown-age');
+      }),
+      rewritten((data) => {
+        data.items = (data.items as Mutable[]).filter((item) => item.name !== 'money-kept-trend');
+      }),
+      rewritten((data) => {
+        for (const item of data.items as Mutable[])
+          if (String(item.name).startsWith('money-'))
+            inside(item, 'content').query = String(inside(item, 'content').query).replace(
+              'money_path.snapshot',
+              'money_path.organisation',
+            );
+      }),
     ]) {
       expect(brokenRules(changed(WORKBOOK, change))).toEqual(['workbook']);
     }
@@ -4048,6 +4075,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [TOKEN_REFUSED_ALERT, 'token-refused-alert'],
       [DENIAL_SURGE_ALERT, 'denial-surge-alert'],
       [AGENT_CANCELS_ALERT, 'agent-cancels-alert'],
+      [DUPLICATE_ATTEMPTS_ALERT, 'duplicate-attempts-alert'],
       [AGENT_CANCEL_CAP_ALERT, 'agent-cancel-cap-alert'],
       [HOLDINGS_CHECK_ALERT, 'holdings-check-alert'],
       [HANDOFF_QUEUE_ALERT, 'handoff-queue-alert'],
@@ -5050,6 +5078,69 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
     // Its runbook is the playbook's section F (an agent behaving strangely).
     expect(String(at(staging.predictedResources.find(AGENT_CANCELS_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section F\.$/,
+    );
+  });
+
+  it("duplicate-attempts-alert: no alert on one agent's duplicate orders and reused retry keys, or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    const LINE = 'ContainerAppConsoleLogs | extend Line = parse_json(Log)';
+    const DUPLICATE_ORDER =
+      '(tostring(Line.event) == "spend_request.decided" and set_has_element(split(tostring(Line.reasons), " "), "DUPLICATE_ORDER_REFERENCE"))';
+    const REUSED_KEY = '(tostring(Line.event) == "idempotency.conflict" and tostring(Line.clientKind) == "agent")';
+    const AGENT =
+      'extend Agent = tolower(iff(tostring(Line.event) == "spend_request.decided", tostring(Line.agentId), tostring(Line.clientId)))';
+    const PER_AGENT = 'summarize Attempts = count() by Agent | summarize Highest = max(Attempts)';
+    const counting = (where: string, agent = AGENT, perAgent = PER_AGENT) =>
+      query(`${LINE} | where ${where} | ${agent} | ${perAgent}`);
+    expect(brokenRules(without(DUPLICATE_ATTEMPTS_ALERT))).toEqual(['duplicate-attempts-alert']);
+    for (const change of [
+      // One sign alone: duplicate orders without reused keys, or reused keys without duplicate orders.
+      counting(DUPLICATE_ORDER),
+      counting(REUSED_KEY),
+      // Every denial, not the duplicate order's; a busy key, not a reused one; a person's reused key too.
+      counting(
+        `${DUPLICATE_ORDER.replace(' and set_has_element(split(tostring(Line.reasons), " "), "DUPLICATE_ORDER_REFERENCE")', '')} or ${REUSED_KEY}`,
+      ),
+      counting(`${DUPLICATE_ORDER} or ${REUSED_KEY.replace('idempotency.conflict', 'idempotency.busy')}`),
+      counting(`${DUPLICATE_ORDER} or (tostring(Line.event) == "idempotency.conflict")`),
+      // Per organisation, not per agent; the organisation's total; the agents' total again.
+      counting(`${DUPLICATE_ORDER} or ${REUSED_KEY}`, 'extend Agent = tostring(Line.orgId)'),
+      counting(`${DUPLICATE_ORDER} or ${REUSED_KEY}`, AGENT, 'summarize Highest = count()'),
+      counting(
+        `${DUPLICATE_ORDER} or ${REUSED_KEY}`,
+        AGENT,
+        'summarize Attempts = count() by Agent | summarize Highest = sum(Attempts)',
+      ),
+      query(
+        `${LINE.replace('ContainerAppConsoleLogs', 'ContainerAppSystemLogs')} | where ${DUPLICATE_ORDER} or ${REUSED_KEY} | ${AGENT} | ${PER_AGENT}`,
+      ),
+      // Its threshold, neither higher nor lower.
+      (alert: Mutable) => (criterion(alert).threshold = 6),
+      (alert: Mutable) => (criterion(alert).threshold = 0),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(DUPLICATE_ATTEMPTS_ALERT, change))).toEqual(['duplicate-attempts-alert']);
+    }
+    expect(brokenRules(changed(DUPLICATE_ATTEMPTS_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'duplicate-attempts-alert',
+    ]);
+    // One number: the per-agent stage left last returns a row an agent.
+    expect(
+      brokenRules(
+        changed(
+          DUPLICATE_ATTEMPTS_ALERT,
+          counting(`${DUPLICATE_ORDER} or ${REUSED_KEY}`, AGENT, 'summarize Attempts = count() by Agent'),
+        ),
+      ),
+    ).toEqual(['alert-counts-only', 'duplicate-attempts-alert']);
+    // Its runbook is the playbook's section F (an agent behaving strangely).
+    expect(String(at(staging.predictedResources.find(DUPLICATE_ATTEMPTS_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section F\.$/,
     );
   });
