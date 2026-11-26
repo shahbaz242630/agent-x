@@ -99,6 +99,7 @@ export type RuleId =
   | 'records-filling-alert'
   | 'dead-man-alerts'
   | 'agent-cancels-alert'
+  | 'duplicate-attempts-alert'
   | 'agent-cancel-cap-alert'
   | 'decisions-suppressed-alert'
   | 'mcp-alerts'
@@ -400,6 +401,22 @@ const AGENT_CANCEL_LINES = [
 
 /** One agent cancelling more of its own than this in a window: half its day's cap (10) at once. */
 const AGENT_CANCELS_THRESHOLD = 5;
+
+/**
+ * Duplicate attempts' lines (ADR-014, Logging-and-Monitoring.md section 5, GA3): a spend request denied as an order
+ * already asked for (its space-separated reasons hold DUPLICATE_ORDER_REFERENCE), and an agent's retry key reused for
+ * a different request (`idempotency.conflict`, 409 IDEMPOTENCY_KEY_REUSED, its agent the `clientId`), counted per agent
+ * and the highest kept, so the alert returns one number with no ID dimensions.
+ */
+const DUPLICATE_LINES = [
+  'extend Line = parse_json(Log)',
+  'where (tostring(Line.event) == "spend_request.decided" and set_has_element(split(tostring(Line.reasons), " "), "DUPLICATE_ORDER_REFERENCE")) or (tostring(Line.event) == "idempotency.conflict" and tostring(Line.clientKind) == "agent")',
+  'extend Agent = tolower(iff(tostring(Line.event) == "spend_request.decided", tostring(Line.agentId), tostring(Line.clientId)))',
+  'summarize Attempts = count() by Agent',
+] as const;
+
+/** One agent making more duplicate attempts than this in a window is past retrying once or twice. */
+const DUPLICATE_ATTEMPTS_THRESHOLD = 5;
 
 /** An agent refused a cancel by its day's cap (Phase 2 G6): steady cancelling the burst alert never sees. */
 const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent"';
@@ -4281,6 +4298,32 @@ const denialSurgeAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
+ * An enabled alert on the workspace fires when one agent's duplicate attempts
+ * in a window pass DUPLICATE_ATTEMPTS_THRESHOLD (GA3), watching every window.
+ */
+const duplicateAttemptsAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', DUPLICATE_LINES, 'max(Attempts)') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === DUPLICATE_ATTEMPTS_THRESHOLD &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'duplicate-attempts-alert',
+        resource: environment.name,
+        message: `needs an enabled alert on this deployment's workspace that fires when one agent makes more than ${String(DUPLICATE_ATTEMPTS_THRESHOLD)} duplicate attempts (duplicate orders denied, retry keys reused) in a window, watching every window`,
+      });
+    }
+  }
+};
+
+/**
  * An enabled alert on the workspace fires when one agent's own cancels in a
  * window pass AGENT_CANCELS_THRESHOLD (Phase 2 G6), watching every window.
  */
@@ -7279,6 +7322,7 @@ const CHECKS: readonly Check[] = [
   recordsFillingAlert,
   deadManAlerts,
   agentCancelsAlert,
+  duplicateAttemptsAlert,
   agentCancelCapAlert,
   decisionsSuppressedAlert,
   mcpAlerts,

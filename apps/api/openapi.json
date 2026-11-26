@@ -5160,6 +5160,12 @@
                       "name": {
                         "type": "string"
                       },
+                      "beneficiaryRef": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
                       "verification": {
                         "anyOf": [
                           {
@@ -5175,6 +5181,7 @@
                       "id",
                       "number",
                       "name",
+                      "beneficiaryRef",
                       "verification"
                     ],
                     "additionalProperties": false
@@ -5217,13 +5224,20 @@
                   "string",
                   "null"
                 ]
+              },
+              "accountConsentId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
               "id",
               "holderName",
               "hint",
-              "partner"
+              "partner",
+              "accountConsentId"
             ],
             "additionalProperties": false
           },
@@ -5443,6 +5457,12 @@
                       "partnerLicenceRef": {
                         "type": "string"
                       },
+                      "accountConsentId": {
+                        "type": "string"
+                      },
+                      "beneficiaryRef": {
+                        "type": "string"
+                      },
                       "paymentReference": {
                         "type": "string"
                       },
@@ -5462,6 +5482,8 @@
                       "partner",
                       "partnerLegalEntityId",
                       "partnerLicenceRef",
+                      "accountConsentId",
+                      "beneficiaryRef",
                       "paymentReference",
                       "intentHash",
                       "createdAt"
@@ -5884,6 +5906,12 @@
                       "name": {
                         "type": "string"
                       },
+                      "beneficiaryRef": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
                       "verification": {
                         "anyOf": [
                           {
@@ -5899,6 +5927,7 @@
                       "id",
                       "number",
                       "name",
+                      "beneficiaryRef",
                       "verification"
                     ],
                     "additionalProperties": false
@@ -5941,13 +5970,20 @@
                   "string",
                   "null"
                 ]
+              },
+              "accountConsentId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
               "id",
               "holderName",
               "hint",
-              "partner"
+              "partner",
+              "accountConsentId"
             ],
             "additionalProperties": false
           },
@@ -6167,6 +6203,12 @@
                       "partnerLicenceRef": {
                         "type": "string"
                       },
+                      "accountConsentId": {
+                        "type": "string"
+                      },
+                      "beneficiaryRef": {
+                        "type": "string"
+                      },
                       "paymentReference": {
                         "type": "string"
                       },
@@ -6186,6 +6228,8 @@
                       "partner",
                       "partnerLegalEntityId",
                       "partnerLicenceRef",
+                      "accountConsentId",
+                      "beneficiaryRef",
                       "paymentReference",
                       "intentHash",
                       "createdAt"
