@@ -3688,9 +3688,17 @@ const resourceIdsIn = (content: unknown): readonly string[] => {
 /** The fields that name who: a workbook shows how much, never which organisation, agent, key or request. */
 const WHO_FIELDS = /\b(?:orgId|agentId|agentKeyId|correlationId|userId)\b/;
 
+/** The money path's snapshot line (GA4, PRD §9.3): approvals, unknown payments and money held, which a workbook charts. */
+const MONEY_PATH_LINES = 'where Event == "money_path.snapshot"';
+
+/** The queries of a workbook's items, each as its content holds it. */
+const itemQueries = (content: unknown): readonly string[] =>
+  list(at(content, 'items')).map((item) => String(at(item, 'content', 'query') ?? ''));
+
 /**
  * A workbook (4D2e Stage F, PR 10) reads only this deployment's workspaces, keeps its content in Azure's own store
- * in the region rather than a storage account of anyone's, and counts without naming who.
+ * in the region rather than a storage account of anyone's, and counts without naming who. And it charts the money
+ * path from its snapshot (GA4): approvals waiting, payments unknown or stuck, and money held.
  */
 const workbooks: Check = (snapshot, _expected, add) => {
   const workspaces = mainWorkspaceIds(snapshot);
@@ -3711,6 +3719,17 @@ const workbooks: Check = (snapshot, _expected, add) => {
       problem("keeps its content in Azure's own store, not storageUri");
     if (WHO_FIELDS.test(JSON.stringify(content)))
       problem('counts only: names no organisation, agent, key, person or request');
+    const moneyPath = itemQueries(content).filter((query) => query.includes(MONEY_PATH_LINES));
+    // Its latest values and their trend: each field the snapshot carries, read in both.
+    const charted = ['approvalsWaiting', 'unknownPayments', 'oldestUnknownSeconds', 'stuckPayments', 'held'].every(
+      (field) =>
+        moneyPath.some((query) => query.includes(`Line.${field}`) && query.includes('top 1 by TimeGenerated')) &&
+        moneyPath.some((query) => query.includes(`Line.${field}`) && query.includes('bin(TimeGenerated')),
+    );
+    if (!charted)
+      problem(
+        'must chart the money path from money_path.snapshot (GA4): approvals waiting, payments unknown and the oldest one, payments stuck and money held, each as it stands now and over time',
+      );
   }
 };
 
