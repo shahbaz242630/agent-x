@@ -203,6 +203,15 @@ describe('SA6 the person’s routes for adding a passkey', () => {
     expect(answer.json()).toMatchObject({ error: { code } });
   });
 
+  it('answers an addition the session has none of, or another person’s, 404 as one that never existed', async () => {
+    const app = await server(additions({ status: () => Promise.resolve('GONE') }));
+
+    const answer = await app.inject(asPerson('GET', `/v1/auth/passkeys/additions/${CHALLENGE}`));
+
+    expect(answer.statusCode).toBe(404);
+    expect(answer.json()).toMatchObject({ error: { code: 'NOT_FOUND' } });
+  });
+
   it('says where an addition of the session got to', async () => {
     const stand = additions();
     const app = await server(stand);
@@ -288,7 +297,11 @@ describe('SA6 the add-a-passkey page’s host', () => {
     );
     expect(ADD_PASSKEY_HTML).toContain(`integrity="${ADD_PASSKEY_SCRIPT_INTEGRITY}"`);
     // No inline script or style, no handler attribute, and nothing from another origin.
-    expect(ADD_PASSKEY_HTML).not.toMatch(/<script>|<style|\son[a-z]+=|https?:\/\//);
+    // Its one script tag names its file; no inline script or style, no handler, nothing from another origin: in any case.
+    expect(ADD_PASSKEY_HTML.match(/<script\b[^>]*>/gi)).toEqual([
+      `<script src="${ADD_PASSKEY_SCRIPT_PATH}" integrity="${ADD_PASSKEY_SCRIPT_INTEGRITY}" defer>`,
+    ]);
+    expect(ADD_PASSKEY_HTML).not.toMatch(/<style\b|\son[a-z]+\s*=|https?:\/\//i);
     // The script writes text alone, and drops the ticket from the address.
     expect(ADD_PASSKEY_SCRIPT).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/);
     expect(ADD_PASSKEY_SCRIPT).toContain("window.history.replaceState(null, '', window.location.pathname)");

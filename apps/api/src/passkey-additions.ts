@@ -9,7 +9,8 @@
 //   page's one-time ticket and the page's address to open it at (the ticket in the fragment, which no request
 //   carries), TICKET_SECONDS to redeem. Before the step-up (or from another session, or once it ran out) it is
 //   403 STEP_UP_FAILED; a retry of the same request is 409 PASSKEY_TICKET_ALREADY_ISSUED.
-// - `GET /v1/auth/passkeys/additions/{id}`: where it got to (STEPPED_UP, WAITING_FOR_KEY, ADDED, or GONE), for the
+// - `GET /v1/auth/passkeys/additions/{id}`: where it got to (STEPPED_UP, WAITING_FOR_KEY or ADDED; 404 NOT_FOUND once
+//   none of this session's is under way, as another person's never is), for the
 //   console to check until the key is added.
 //
 // The page's, on the page's host alone (AGENTX_ADD_PASSKEY_ORIGIN), with no session (the session cookie is the app
@@ -110,9 +111,9 @@ const STATUS_SCHEMA = {
     200: z
       .object({
         status: z
-          .enum(['STEPPED_UP', 'WAITING_FOR_KEY', 'ADDED', 'GONE'])
+          .enum(['STEPPED_UP', 'WAITING_FOR_KEY', 'ADDED'])
           .describe(
-            'STEPPED_UP: signed in again, the ticket not yet asked for; WAITING_FOR_KEY: the page has the ticket; ADDED: the login service took the new passkey; GONE: none under way (run out, or not added).',
+            'STEPPED_UP: signed in again, the ticket not yet asked for; WAITING_FOR_KEY: the page has the ticket; ADDED: the login service took the new passkey. None under way for this session (run out, not added, or another person’s) is 404 NOT_FOUND.',
           ),
       })
       .register(API_SCHEMAS, { id: 'PasskeyAdditionStatus', description: 'Where adding a passkey got to.' }),
@@ -287,7 +288,10 @@ export function registerPasskeyAdditions(
     async (request, reply) => {
       if (adding === undefined) return off(request, reply);
       const { sessionId } = sessionOf(request);
-      return { status: await adding.additions.status(sessionId, request.params.id) };
+      const status = await adding.additions.status(sessionId, request.params.id);
+      // Another person's addition, or none, reads exactly as one that never existed (SEC-TEN-01).
+      if (status === 'GONE') return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+      return { status };
     },
   );
 

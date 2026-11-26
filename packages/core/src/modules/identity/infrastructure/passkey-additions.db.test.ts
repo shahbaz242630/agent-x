@@ -461,6 +461,83 @@ describe(`SA6: adding a passkey inside Agent X (Postgres ${server.version})`, ()
     });
   });
 
+  describe('a person that can’t be believed, or a row gone, mid-way (the re-review’s leftovers)', () => {
+    /** The owner changes the person's row past its MAC: from then on, no one is believed to be them. */
+    const unbelieve = (userId: string) =>
+      database
+        .as('owner')
+        .query("update identity.users set mac = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex') where id = $1", [
+          userId,
+        ]);
+
+    it('at the options, takes the token back and deletes the addition at once, never leaving it for the sweep', async () => {
+      const { passkeys, calls } = loginService();
+      const revoke = vi.fn(() => Promise.resolve(true));
+      const ready = await ticketed(passkeys, revoke);
+      await unbelieve(ready.userId);
+
+      expect(await ready.additions.options(ready.ticket)).toEqual({
+        outcome: 'refused',
+        code: 'PASSKEY_TICKET_INVALID',
+      });
+
+      expect(revoke).toHaveBeenCalledWith(TOKEN);
+      expect(await rowOf(ready.challengeId)).toBeUndefined();
+      expect(calls.register).toEqual([]);
+    });
+
+    it('at the confirm, checks the person before the token leaves its row, then takes it back and deletes it', async () => {
+      const { passkeys, calls } = loginService();
+      const revoke = vi.fn(() => Promise.resolve(true));
+      const ready = await ticketed(passkeys, revoke);
+      await ready.additions.options(ready.ticket);
+      await unbelieve(ready.userId);
+
+      expect(await ready.additions.confirm(ready.ticket, {})).toEqual({
+        outcome: 'refused',
+        code: 'PASSKEY_TICKET_INVALID',
+      });
+
+      expect(revoke).toHaveBeenCalledWith(TOKEN);
+      expect(await rowOf(ready.challengeId)).toBeUndefined();
+      expect(calls.confirm).toEqual([]);
+    });
+
+    it('keeps a ticket redeemed near its end alive while the login service is asked, past the ticket’s own minutes', async () => {
+      const { passkeys } = loginService();
+      const ready = await ticketed(passkeys);
+      clock.advanceBy((TICKET_SECONDS - 1) * 1000);
+      // The login service slow: the ticket's own minutes pass, and a sweep runs, while it is asked.
+      const register = passkeys.register.bind(passkeys);
+      passkeys.register = async (token, subject) => {
+        clock.advanceBy(60_000);
+        await sweepPasskeyAdditions({ database: app, keys, revoke: undefined, clock, logger: testLogger() }, 100);
+        return register(token, subject);
+      };
+
+      expect((await ready.additions.options(ready.ticket)).outcome).toBe('done');
+      expect(await rowOf(ready.challengeId)).toEqual(expect.objectContaining({ state: 'registering' }));
+    });
+
+    it('records nothing, and hands nothing out, for a row swept while the login service was asked', async () => {
+      const { passkeys } = loginService('400000000000000999');
+      const revoke = vi.fn(() => Promise.resolve(true));
+      const ready = await ticketed(passkeys, revoke);
+      const register = passkeys.register.bind(passkeys);
+      passkeys.register = async (token, subject) => {
+        clock.advanceBy(REGISTERING_SECONDS * 1000);
+        await sweepPasskeyAdditions({ database: app, keys, revoke: undefined, clock, logger: testLogger() }, 100);
+        return register(token, subject);
+      };
+
+      await expect(ready.additions.options(ready.ticket)).rejects.toThrow('went while the login service was asked');
+
+      expect((await ownRecords()).map((record) => record.passkey)).not.toContain('400000000000000999');
+      expect(revoke).toHaveBeenCalledWith(TOKEN);
+      expect(await rowOf(ready.challengeId)).toBeUndefined();
+    });
+  });
+
   it('sweeps additions past their time, taking back each token still held, and leaves the rest', async () => {
     const stale = await steppedUp(loginService().passkeys);
     clock.advanceBy(STEPPED_UP_SECONDS * 1000);

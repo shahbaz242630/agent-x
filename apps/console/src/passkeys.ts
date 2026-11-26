@@ -87,11 +87,20 @@ function isHttps(address: string): boolean {
   }
 }
 
-const STATUSES: ReadonlySet<string> = new Set(['STEPPED_UP', 'WAITING_FOR_KEY', 'ADDED', 'GONE']);
+const STATUSES: ReadonlySet<string> = new Set(['STEPPED_UP', 'WAITING_FOR_KEY', 'ADDED']);
 
-/** Where the addition got to; an answer the console can't read is a failure, checked again. */
+/**
+ * Where the addition got to: GONE once the API finds none of this session's (404, run out or not added); an answer the
+ * console can't read is a failure, checked again.
+ */
 export async function statusOf(id: string): Promise<AdditionStatus> {
-  const { status } = await api.get<{ readonly status?: unknown }>(`${ADDITIONS}/${id}`);
+  let status: unknown;
+  try {
+    ({ status } = await api.get<{ readonly status?: unknown }>(`${ADDITIONS}/${id}`));
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return 'GONE';
+    throw error;
+  }
   if (typeof status !== 'string' || !STATUSES.has(status)) throw new ApiError(502, 'UNREADABLE');
   return status as AdditionStatus;
 }

@@ -4085,8 +4085,7 @@
             "enum": [
               "STEPPED_UP",
               "WAITING_FOR_KEY",
-              "ADDED",
-              "GONE"
+              "ADDED"
             ]
           }
         },

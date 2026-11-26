@@ -141,6 +141,14 @@ class Refused extends Error {
   }
 }
 
+/** The addition went while the login service was asked (swept, or moved by anything else): nothing is recorded. */
+class AdditionGone extends Error {
+  override readonly name = 'AdditionGone';
+  constructor() {
+    super('the passkey addition went while the login service was asked');
+  }
+}
+
 /** A row's sealed token, as far as opening it needs. */
 interface SealedRow {
   readonly id: string;
@@ -346,27 +354,35 @@ export function createPasskeyAdditions({
       const redeemed = await inTransaction(async (tx) => {
         const row = await byTicket(tx, ticket, 'ticketed');
         if (row === undefined) return undefined;
+        // Redeemed, it lives as long as the login service may take and the key's making: no sweep takes it meanwhile.
         await tx
           .updateTable('identity.passkey_additions')
-          .set({ state: 'redeemed' })
+          .set({ state: 'redeemed', ends_at: later(REGISTERING_SECONDS * 1000) })
           .where('id', '=', row.id)
           .execute();
         const subject = await subjectOfUser(tx, row.user_id, macs);
-        return subject === undefined ? undefined : { row, subject: subject.subject };
+        return { row, subject: subject?.subject };
       });
       if (redeemed === undefined) return refused('PASSKEY_TICKET_INVALID');
       const { row, subject } = redeemed;
       const token = tokenOf(row);
+      // Its person can't be believed (their row's MAC fails, the alarm raised): the token goes now, not at the sweep.
+      if (subject === undefined) {
+        await dropAddition(row.id, token);
+        return refused('PASSKEY_TICKET_INVALID');
+      }
       try {
         const asked = await passkeys.register(token, subject);
         // The person's own addition on the record before anything to make the key with leaves this process.
         await inTransaction(async (tx) => {
-          await tx
+          const moved = await tx
             .updateTable('identity.passkey_additions')
             .set({ state: 'registering', passkey_id: asked.passkeyId, ends_at: later(REGISTERING_SECONDS * 1000) })
             .where('id', '=', row.id)
             .where('state', '=', 'redeemed')
-            .execute();
+            .executeTakeFirst();
+          // Swept, or moved by anything else, meanwhile: no record of a registration for a row that is gone.
+          if (moved.numUpdatedRows !== 1n) throw new AdditionGone();
           await platform.record(tx, {
             actor: ACTOR,
             action: OWN_PASSKEY_REGISTERED,
@@ -389,17 +405,21 @@ export function createPasskeyAdditions({
         const row = await byTicket(tx, ticket, 'registering');
         if (row?.passkey_id === null || row === undefined) return undefined;
         const token = tokenOf(row);
+        // Its person checked before the token leaves the row: one that can't be believed has it taken back below.
+        const subject = await subjectOfUser(tx, row.user_id, macs);
+        if (subject === undefined) return { unbelieved: true, id: row.id, token } as const;
         await tx
           .updateTable('identity.passkey_additions')
           .set({ state: 'confirming', token_ciphertext: null, token_key_version: null })
           .where('id', '=', row.id)
           .execute();
-        const subject = await subjectOfUser(tx, row.user_id, macs);
-        return subject === undefined
-          ? undefined
-          : { id: row.id, token, passkeyId: row.passkey_id, subject: subject.subject };
+        return { unbelieved: false, id: row.id, token, passkeyId: row.passkey_id, subject: subject.subject } as const;
       });
       if (taken === undefined) return refused('PASSKEY_TICKET_INVALID');
+      if (taken.unbelieved) {
+        await dropAddition(taken.id, taken.token);
+        return refused('PASSKEY_TICKET_INVALID');
+      }
       let confirmed: 'confirmed' | 'refused';
       try {
         confirmed = await passkeys.confirm(taken.token, taken.subject, taken.passkeyId, credential);

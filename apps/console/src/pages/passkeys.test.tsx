@@ -173,7 +173,7 @@ describe('Your passkeys (SA6)', () => {
 
   it('says a passkey that wasn’t added, offering to start again', async () => {
     answers.set(`POST ${TICKET_PATH}`, [ticket()]);
-    answers.set(`GET ${STATUS_PATH}`, [status('GONE')]);
+    answers.set(`GET ${STATUS_PATH}`, [refused(404, 'NOT_FOUND')]);
     open(`/more/passkeys?adding=${CHALLENGE}`);
     await screen.findByRole('link', { name: 'Open the page to make your new passkey' });
     await nextCheck();
@@ -212,7 +212,7 @@ describe('Your passkeys (SA6)', () => {
 
   it('stops checking on a refusal that asking again won’t change', async () => {
     answers.set(`POST ${TICKET_PATH}`, [ticket()]);
-    answers.set(`GET ${STATUS_PATH}`, [refused(404, 'NOT_FOUND')]);
+    answers.set(`GET ${STATUS_PATH}`, [refused(403, 'FORBIDDEN')]);
     open(`/more/passkeys?adding=${CHALLENGE}`);
     await screen.findByRole('link', { name: 'Open the page to make your new passkey' });
     await nextCheck();
