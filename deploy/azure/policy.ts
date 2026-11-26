@@ -3693,7 +3693,10 @@ const MONEY_PATH_LINES = 'where Event == "money_path.snapshot"';
 
 /** The queries of a workbook's items, each as its content holds it. */
 const itemQueries = (content: unknown): readonly string[] =>
-  list(at(content, 'items')).map((item) => String(at(item, 'content', 'query') ?? ''));
+  list(at(content, 'items')).map((item) => {
+    const query = at(item, 'content', 'query');
+    return typeof query === 'string' ? query : '';
+  });
 
 /**
  * A workbook (4D2e Stage F, PR 10) reads only this deployment's workspaces, keeps its content in Azure's own store
