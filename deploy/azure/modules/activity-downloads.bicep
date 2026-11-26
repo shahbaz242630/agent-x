@@ -6,8 +6,12 @@
 //
 // - shut as the audit exports' store is (evidence.bicep): shared keys off, so
 //   every request signs in with Entra; no public blob access; no copying in
-//   from another tenant; requests only from the apps subnet, through its
-//   Storage service endpoint (PL-43: a private endpoint before live)
+//   from another tenant; off the public route (AZ32c-2, PL-43): reached only
+//   through its blob private endpoint in the network's endpoints subnet, which
+//   only the apps subnet may reach (network.bicep), as the audit exports' store
+//   is. So the apps subnet needs no Storage service endpoint and no way out to
+//   the region's Storage, which let a container taken over reach any account
+//   in the region
 // - but not write-once: a month built again after a stop is written over the
 //   same name. So no immutability, and versioning off, since a version kept of
 //   each overwrite would outlive the lifecycle rule, which deletes the file only
@@ -28,7 +32,9 @@ func activityDownloadsContainerName() string => 'activity-downloads'
 param location string
 param name string
 param tags object
-param appsSubnetId string
+param endpointsSubnetId string
+@description('Microsoft\'s fixed zone for blob private endpoints, linked to the network (network.bicep).')
+param blobZoneId string
 param workspaceId string
 @description('Who keeps the downloads, each `{ workload, identity }`: every app that runs the API (4D2e D13), a `web` copy handing a file out and the jobs building one, created by the foundation (environment.bicep) under that name.')
 param keepers array
@@ -54,17 +60,13 @@ resource account 'Microsoft.Storage/storageAccounts@2025-01-01' = {
     isSftpEnabled: false
     isLocalUserEnabled: false
     isNfsV3Enabled: false
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: 'Disabled'
+    // No subnet named: the apps subnet has no Storage endpoint (AZ32c-2), and Azure refuses a rule naming one without.
     networkAcls: {
       defaultAction: 'Deny'
       bypass: 'None'
       ipRules: []
-      virtualNetworkRules: [
-        {
-          id: appsSubnetId
-          action: 'Allow'
-        }
-      ]
+      virtualNetworkRules: []
     }
     encryption: {
       keySource: 'Microsoft.Storage'
@@ -77,6 +79,45 @@ resource account 'Microsoft.Storage/storageAccounts@2025-01-01' = {
         }
       }
     }
+  }
+}
+
+// The store's one way in (AZ32c-2): its blob service at a private address in the endpoints subnet.
+resource endpoint 'Microsoft.Network/privateEndpoints@2025-01-01' = {
+  name: 'pe-${name}-blob'
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: endpointsSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'blob'
+        properties: {
+          privateLinkServiceId: account.id
+          groupIds: [
+            'blob'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+// Azure keeps the endpoint's A record in the zone the network resolves through, so the API's URL is unchanged.
+resource endpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2025-01-01' = {
+  parent: endpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'blob'
+        properties: {
+          privateDnsZoneId: blobZoneId
+        }
+      }
+    ]
   }
 }
 
