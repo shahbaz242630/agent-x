@@ -140,13 +140,14 @@
   margin-top: 6px;
 }
 
+/* The three cards stack in a staggered column (CO11e): laid out in flow, never placed absolutely, so no card can slide
+   under another whatever the width or the reader's text size. The gap outlasts the 10px bob. */
 .hero-visual {
-  position: relative;
-  height: 27.5rem;
+  display: grid;
+  gap: 16px;
 }
 
 .hero-visual .glass {
-  position: absolute;
   display: grid;
   gap: 10px;
   padding: 20px;
@@ -154,11 +155,8 @@
 }
 
 .main-card {
-  z-index: 2;
   width: 20rem;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  justify-self: center;
   background: color-mix(in oklab, var(--surface) 88%, transparent);
 }
 
@@ -167,14 +165,12 @@
 }
 
 .side-card.one {
-  right: 0;
-  top: 0;
+  justify-self: end;
   animation: bob 7s ease-in-out infinite;
 }
 
 .side-card.two {
-  left: 0;
-  bottom: 0;
+  justify-self: start;
   animation: bob 8s ease-in-out -3s infinite;
 }
 
@@ -423,10 +419,6 @@
     padding-top: 24px;
   }
 
-  .hero-visual {
-    height: 23rem;
-  }
-
   .steps {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -444,10 +436,6 @@
   .features,
   .trust {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .hero-visual {
-    height: 21rem;
   }
 
   .main-card {
