@@ -91,6 +91,33 @@ describe("reading the snapshot's values", () => {
     expect(reads(`https://${marker}`, 'https://not a host')).toBe(false);
   });
 
+  it('matches the add-a-passkey host (SA6) as one label directly below the auth host the other settings carry', () => {
+    const { given = '' } = SHELL_MARKERS.AGENTX_AZURE_ADD_PASSKEY_HOST ?? {};
+    const { marker: auth } = SHELL_MARKERS.AGENTX_AZURE_AUTH_HOST ?? { marker: '' };
+    const origin = `https://${given}`;
+    expect(reads(origin, 'https://addkey.auth.example.com')).toBe(true);
+    const bound: Bound = new Map();
+    expect(reads(`https://${auth}`, 'https://auth.example.com', bound)).toBe(true);
+    expect(reads(origin, 'https://addkey.auth.example.com', bound)).toBe(true);
+    expect(bound.get('shell AGENTX_AZURE_ADD_PASSKEY_HOST')).toBe('addkey');
+    // Below another host than the auth host already read: refused.
+    expect(reads(origin, 'https://addkey.evil.example.com', new Map(bound))).toBe(false);
+    for (const wrong of [
+      'http://addkey.auth.example.com',
+      'https://auth.example.com',
+      'https://a.addkey.auth.example.com',
+      'https://addkey.auth.example.com/',
+      'https://addkey.auth.example.com/x',
+      'https://addkey.auth.example.com:8443',
+      'https://AddKey.auth.example.com',
+      'https://addkey.auth.example.com\n',
+      ' https://addkey.auth.example.com',
+      'https://user@addkey.auth.example.com',
+    ]) {
+      expect(reads(origin, wrong, new Map(bound)), wrong).toBe(false);
+    }
+  });
+
   it('refuses any expression it cannot read, never guessing', () => {
     for (const expression of [
       "[if(true(), 'a', 'b')]",
@@ -234,6 +261,68 @@ const LIVENESS: Probe = {
 };
 const READINESS: Probe = { type: 'Readiness', tcpSocket: { port: 8080 }, periodSeconds: 5 };
 
+describe('the add-a-passkey origin (SA6), the one setting the shell may leave out', () => {
+  const { given = '' } = SHELL_MARKERS.AGENTX_AZURE_ADD_PASSKEY_HOST ?? {};
+  const { marker: auth } = SHELL_MARKERS.AGENTX_AZURE_AUTH_HOST ?? { marker: '' };
+  const [one] = TEMPLATE;
+  const withSettings = (...env: readonly Record<string, string>[]): unknown[] => [
+    { ...one, env: [...(one?.env ?? []), ...env] },
+  ];
+  const template = withSettings(
+    { name: 'AGENTX_OIDC_ISSUER', value: `https://${auth}` },
+    { name: 'AGENTX_ADD_PASSKEY_ORIGIN', value: `https://${given}` },
+  );
+  const issuer = { name: 'AGENTX_OIDC_ISSUER', value: 'https://auth.example.com' };
+  const withOrigin = (value: string): Partial<LiveContainer> => ({
+    env: [...LIVE.env, issuer, { name: 'AGENTX_ADD_PASSKEY_ORIGIN', value }],
+  });
+
+  it('accepts it present, directly below the auth host, and absent', () => {
+    expect(differs(withOrigin('https://addkey.auth.example.com'), template)).toEqual([]);
+    expect(differs({ env: [...LIVE.env, issuer] }, template)).toEqual([]);
+  });
+
+  it('refuses it in any other shape, by name alone', () => {
+    for (const value of [
+      'http://addkey.auth.example.com',
+      'https://addkey.evil.example.com',
+      'https://auth.example.com',
+      'https://a.addkey.auth.example.com',
+      'https://addkey.auth.example.com/x',
+      'https://addkey.auth.example.com/',
+      'https://addkey.auth.example.com?x',
+      '',
+    ]) {
+      expect(differs(withOrigin(value), template), value).toEqual([
+        'its setting AGENTX_ADD_PASSKEY_ORIGIN holds another value than the template gives',
+      ]);
+    }
+    expect(
+      differs({ env: [...LIVE.env, issuer, { name: 'AGENTX_ADD_PASSKEY_ORIGIN', secretRef: 'x' }] }, template),
+    ).toEqual(['its setting AGENTX_ADD_PASSKEY_ORIGIN reads a secret where the template gives a value']);
+  });
+
+  it('still refuses any other setting the template lacks, and lacking any other it gives', () => {
+    const live = withOrigin('https://addkey.auth.example.com');
+    expect(differs({ env: [...(live.env ?? []), { name: 'NODE_OPTIONS', value: 'x' }] }, template)).toEqual([
+      "it has a setting the template doesn't: NODE_OPTIONS",
+    ]);
+    const originOnly = [...LIVE.env, { name: 'AGENTX_ADD_PASSKEY_ORIGIN', value: 'https://addkey.auth.example.com' }];
+    expect(differs({ env: originOnly }, template)).toEqual(["it lacks the template's setting AGENTX_OIDC_ISSUER"]);
+    // Absent is accepted only while the template makes it of the shell's add-a-passkey host.
+    for (const lacked of [
+      withSettings({ name: 'AGENTX_ADD_PASSKEY_ORIGIN', value: 'https://x.example' }),
+      withSettings({ name: 'AGENTX_ADD_PASSKEY_ORIGIN', secretRef: 'x' }),
+    ]) {
+      expect(differs({}, lacked)).toEqual(["it lacks the template's setting AGENTX_ADD_PASSKEY_ORIGIN"]);
+    }
+    // Another setting made of the same host may not be absent.
+    expect(differs({}, withSettings({ name: 'AGENTX_OTHER', value: `https://${given}` }))).toEqual([
+      "it lacks the template's setting AGENTX_OTHER",
+    ]);
+  });
+});
+
 describe("a container's probes (AZ8b)", () => {
   const refuse = (why: string): never => {
     throw new Error(why);
@@ -339,6 +428,7 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
       'shell AGENTX_AZURE_APP_HOST': 'app.example.com',
       'shell AGENTX_AZURE_AUTH_HOST': 'auth.example.com',
       'shell AGENTX_AZURE_API_OIDC_CLIENT_ID': 'stand-in-client-id',
+      'shell AGENTX_AZURE_ADD_PASSKEY_HOST': 'addkey',
     };
     const filled = (parts: Readonly<ReturnType<typeof partsOf>>): string =>
       parts
@@ -371,6 +461,17 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
       [...expectedApi.env.values()].some((want) => 'parts' in want && want.parts.some((part) => 'key' in part)),
     ).toBe(true);
     const bound: Bound = new Map();
+    // SA6: the add-a-passkey origin, directly below the auth host, or left out as a plain `apps` leaves it.
+    const origin = live.env.find((setting) => setting.name === 'AGENTX_ADD_PASSKEY_ORIGIN');
+    expect(origin).toEqual({ name: 'AGENTX_ADD_PASSKEY_ORIGIN', value: 'https://addkey.auth.example.com' });
+    const withoutOrigin = live.env.filter((setting) => setting !== origin);
+    expect(differences(expectedApi, { ...live, env: withoutOrigin }, new Map())).toEqual([]);
+    const elsewhere = live.env.map((setting) =>
+      setting === origin ? { ...setting, value: 'https://addkey.evil.example.com' } : setting,
+    );
+    expect(differences(expectedApi, { ...live, env: elsewhere }, new Map())).toEqual([
+      'its setting AGENTX_ADD_PASSKEY_ORIGIN holds another value than the template gives',
+    ]);
     expect(differences(expectedApi, live, bound)).toEqual([]);
     expect(differences(expectedOf(migrate), deployable('migrate', migrate, 'i', 'c'), bound)).toEqual([]);
     // The API's own command, and a host the shell gives pointed elsewhere, are each found.

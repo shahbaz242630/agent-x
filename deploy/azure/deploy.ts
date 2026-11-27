@@ -2277,13 +2277,15 @@ async function askHost(steps: Steps, which: 'authHost' | 'appHost', question: st
 
 /**
  * SA6: the add-a-passkey page's host, from the operator's own shell (AGENTX_AZURE_ADD_PASSKEY_HOST), in lower case:
- * empty, the default, leaves adding a passkey inside Agent X off. Given, it must be a host just below the auth host
+ * empty, the default, leaves adding a passkey inside Agent X off. Given, it must be a host directly below the auth host
  * (a passkey made there is the login service's own), and is a door with a certificate and DNS records of its own.
  */
 export function addPasskeyHostOf(env: Readonly<Record<string, string | undefined>> = {}, authHost: string): string {
   const host = (env[APP_VARIABLES.addPasskeyHost] ?? '').trim().toLowerCase();
   if (host === '') return '';
-  if (!HOST.test(host) || !host.endsWith(`.${authHost}`)) {
+  // One label directly below: the release's drift check (drift.ts SHELL_MARKERS) matches no deeper host.
+  const label = host.endsWith(`.${authHost}`) ? host.slice(0, -authHost.length - 1) : '';
+  if (!HOST.test(host) || label === '' || label.includes('.')) {
     throw new Error(
       `${APP_VARIABLES.addPasskeyHost} must be a host just below the sign-in host (addkey.${authHost}): nothing was deployed.`,
     );

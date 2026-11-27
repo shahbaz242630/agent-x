@@ -4730,6 +4730,8 @@ describe('SA6 the add-a-passkey host, from the operator’s own shell', () => {
     'addkey.example.invalid',
     'addkeyauth.example.invalid',
     'addkey.auth.example.invalid/x',
+    // Directly below only: the release's drift check matches no deeper host.
+    'a.addkey.auth.example.invalid',
   ])('refuses %s, deploying nothing', (host) => {
     expect(() => addPasskeyHostOf({ AGENTX_AZURE_ADD_PASSKEY_HOST: host }, 'auth.example.invalid')).toThrow(
       'must be a host just below the sign-in host (addkey.auth.example.invalid): nothing was deployed',
