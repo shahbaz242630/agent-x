@@ -16,7 +16,11 @@
 // - what only the partner's shell gives `apps` (the two hosts, the API's client ID
 //   in Zitadel): never in this repository (Rule Book §7), nor in CI. Each is
 //   snapshotted as a marker and matched as a host (or an ID), the same everywhere
-//   it is used
+//   it is used. The add-a-passkey host (SA6), the one the shell may leave out, is
+//   snapshotted as one label below the auth host's marker, so it matches only a
+//   host directly below the very auth host the other settings carry; the one
+//   setting it makes may also be absent (OPTIONAL_SETTINGS), as `apps` sends it
+//   with the host left out
 // - what Azure names at deploy time (`reference(...)` an existing resource's
 //   property, `environment()`'s suffixes): each is matched as a host, or a GUID
 //   for a client ID, and the same reference must read the same in every setting
@@ -67,6 +71,9 @@ const RELEASE_SETTING = 'AGENTX_RELEASE';
 /** A DNS name with at least one dot, in lower case, as Azure and the partner's hosts are written. */
 const HOST = '[a-z0-9-]+(?:\\.[a-z0-9-]+)+';
 
+/** One DNS label, in lower case: the add-a-passkey host's own part, below the auth host. */
+const LABEL = '[a-z0-9-]+';
+
 /** A GUID, as Azure writes a client ID. */
 const GUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 
@@ -77,18 +84,48 @@ const UNREADABLE = 'an expression this tool cannot read';
 
 const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const AUTH_HOST_MARKER = 'auth-host.shell-marker.invalid';
+const ADD_PASSKEY_LABEL_MARKER = 'add-passkey-label-shell-marker';
+
 /**
  * The markers the shell's values are snapshotted as, each found again in what
  * Bicep resolves and matched as a hole: a host, or the API's client ID in Zitadel
- * as its config takes it (visible ASCII). Each is a name nothing else in the
- * templates holds. Zitadel's admin e-mail, the shell's other value, is Zitadel's
- * alone: snapshot.ts's stand-in serves.
+ * as its config takes it (visible ASCII), or the add-a-passkey host's one label.
+ * Each is a name nothing else in the templates holds. `given`, when set, is what
+ * the snapshot is given in place of the marker: the add-a-passkey host as its
+ * label's marker below the auth host's, so both holes bind. Zitadel's admin
+ * e-mail, the shell's other value, is Zitadel's alone: snapshot.ts's stand-in serves.
  */
-export const SHELL_MARKERS: Readonly<Record<string, { readonly marker: string; readonly pattern: string }>> = {
+export const SHELL_MARKERS: Readonly<
+  Record<string, { readonly marker: string; readonly pattern: string; readonly given?: string }>
+> = {
   AGENTX_AZURE_APP_HOST: { marker: 'app-host.shell-marker.invalid', pattern: HOST },
-  AGENTX_AZURE_AUTH_HOST: { marker: 'auth-host.shell-marker.invalid', pattern: HOST },
+  AGENTX_AZURE_AUTH_HOST: { marker: AUTH_HOST_MARKER, pattern: HOST },
   AGENTX_AZURE_API_OIDC_CLIENT_ID: { marker: 'oidc-client-id-shell-marker', pattern: '[!-~]+' },
+  AGENTX_AZURE_ADD_PASSKEY_HOST: {
+    marker: ADD_PASSKEY_LABEL_MARKER,
+    pattern: LABEL,
+    given: `${ADD_PASSKEY_LABEL_MARKER}.${AUTH_HOST_MARKER}`,
+  },
 };
+
+/**
+ * The settings a live container may lack though the template gives them, each by the shell value it is made of: the
+ * snapshot gives every shell value, but `apps` leaves the setting out when that value is left out (SA6: the
+ * add-a-passkey page off). Absent is accepted for these alone, and only while the template's value carries that hole;
+ * present, each is held to the template's value as any setting is.
+ */
+const OPTIONAL_SETTINGS: Readonly<Record<string, string>> = {
+  AGENTX_ADD_PASSKEY_ORIGIN: 'AGENTX_AZURE_ADD_PASSKEY_HOST',
+};
+
+/** Whether the template's setting may be absent: one of OPTIONAL_SETTINGS, its value made with its shell value's hole. */
+function mayBeAbsent(name: string, want: ExpectedSetting): boolean {
+  const shell = OPTIONAL_SETTINGS[name];
+  return (
+    shell !== undefined && 'parts' in want && want.parts.some((part) => 'key' in part && part.key === `shell ${shell}`)
+  );
+}
 
 /** A name from Azure as it is printed: anything but letters, digits, `_`, `.` and `-` becomes `?` (no line break can reach the log). */
 export const shown = (name: string): string => name.replace(/[^\w.-]/g, '?');
@@ -402,8 +439,8 @@ function settingDifferences(expected: Expected, live: LiveContainer, bound: Boun
       said.push(`its setting ${shown(setting.name)} holds another value than the template gives`);
     }
   }
-  for (const name of expected.env.keys()) {
-    if (!names.includes(name)) said.push(`it lacks the template's setting ${shown(name)}`);
+  for (const [name, want] of expected.env) {
+    if (!names.includes(name) && !mayBeAbsent(name, want)) said.push(`it lacks the template's setting ${shown(name)}`);
   }
   return said;
 }
@@ -672,7 +709,9 @@ interface Named {
  * isn't made exactly once. `source` is this checkout's folder unless given.
  */
 export function templatesIn(subscription: string, wanted: readonly Named[], source?: string): Workload[] {
-  const values = Object.fromEntries(Object.entries(SHELL_MARKERS).map(([variable, { marker }]) => [variable, marker]));
+  const values = Object.fromEntries(
+    Object.entries(SHELL_MARKERS).map(([variable, { marker, given }]) => [variable, given ?? marker]),
+  );
   const made = inCopy(
     (dir) =>
       deploymentSnapshot(
