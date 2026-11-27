@@ -935,7 +935,17 @@ const PUBLIC_DOORS: Readonly<Record<string, readonly string[]>> = {
   // plain 404 (apps/api/src/login-host.ts). Zitadel's system API, instance services, REST gateways, reflection,
   // /openapi, /saml and /idps are never public, and its console and admin and management services not from a deploy.
   auth: authRoutes('closed').map(doorLine),
+  // SA6: the add-a-passkey page's host, only where adding a passkey inside Agent X is on: everything to the API, which
+  // answers that host with the page's own routes alone (apps/api/src/server.ts).
+  addkey: ['prefix "/" to api'],
 };
+
+/** The doors a deployment may leave out (SA6: adding a passkey inside Agent X is off by default); once, where there. */
+const OPTIONAL_DOORS: ReadonlySet<string> = new Set(['addkey']);
+
+/** Whether a deployment holds the door as often as it may: once, or not at all for an optional one. */
+const doorCountStands = (name: string, count: number): boolean =>
+  count === 1 || (count === 0 && OPTIONAL_DOORS.has(name));
 
 /**
  * The auth door open to Zitadel's console: a shape deploy.ts console --open
@@ -6884,7 +6894,7 @@ const publicDoors: Check = (snapshot, _expected, add) => {
   }
   for (const name of Object.keys(PUBLIC_DOORS)) {
     const count = found.filter((door) => publicDoorOf(door.name) === name).length;
-    if (count !== 1) {
+    if (!doorCountStands(name, count)) {
       add({
         rule: 'public-doors',
         resource: 'the deployment',

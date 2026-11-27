@@ -383,6 +383,10 @@ const SETTINGS = {
   // and only with sign-in; read by secretSetting (database.ts).
   AGENTX_FACTOR_RESET_TOKEN: { schema: text },
   AGENTX_FACTOR_RESET_TOKEN_FILE: { schema: text },
+  // SA6: the add-a-passkey page's own origin, on a host just below the login service's (addkey.auth.<site>), so a
+  // passkey made there is the login service's own and works at its sign-in. Optional, off by default, and only with
+  // sign-in: unset, no passkey is added inside Agent X, and every key added at the login service restricts as before.
+  AGENTX_ADD_PASSKEY_ORIGIN: { schema: publicOrigin.optional() },
   // SA2: our own routine changes in the login service, told by an info line, not the alert: the logins that make them
   // (the break-glass admin, our set-up's service user), and our API's service users they are made for (agentx-directory,
   // agentx-resets). Both or neither; unset (or `none`), every token issued and every grant alerts. SA2b: kept like a
@@ -602,6 +606,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_DIRECTORY_TOKEN_FILE',
       'AGENTX_FACTOR_RESET_TOKEN',
       'AGENTX_FACTOR_RESET_TOKEN_FILE',
+      'AGENTX_ADD_PASSKEY_ORIGIN',
       'AGENTX_IDP_OUR_ACTORS',
       'AGENTX_IDP_OUR_ACTORS_FILE',
       'AGENTX_IDP_OUR_SERVICE_USERS',

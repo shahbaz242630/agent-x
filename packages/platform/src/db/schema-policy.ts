@@ -367,6 +367,26 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       appMay: ['SELECT', 'INSERT', 'DELETE'],
       appMayUpdate: ['verified_at', 'auth_time', 'amr', 'idp_session_id', 'id_token_hash', 'mac', 'mac_key_version'],
     },
+    'identity.passkey_additions': {
+      reason:
+        "A passkey added inside Agent X under way (SA6, B6-3d): a person's own sign-in method, added after a passkey step-up of their own session, which belongs to no organisation",
+      columns: [
+        'id',
+        'session_id',
+        'user_id',
+        'state',
+        'token_ciphertext',
+        'token_key_version',
+        'ticket_hash',
+        'passkey_id',
+        'created_at',
+        'ends_at',
+      ],
+      // Added, moved on through its states and deleted; never moved to another person or session. Its token is only
+      // ever taken out, as the key is confirmed.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['state', 'token_ciphertext', 'token_key_version', 'ticket_hash', 'passkey_id', 'ends_at'],
+    },
     'notifications.outbox': {
       reason:
         "Notices waiting to be sent (ADR-003 §10, ADR-005 §8's job queue; B5-1a): the sender takes the due ones across every organisation, each row naming its own",

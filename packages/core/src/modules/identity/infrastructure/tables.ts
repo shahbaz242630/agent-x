@@ -2,12 +2,13 @@ import type { Generated } from 'kysely';
 
 import type { TamperSign } from '../../audit/index.ts';
 
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql, 0049_user_contacts.sql, 0085_membership_grants.sql, 0106_login_flow_caps.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql, 0049_user_contacts.sql, 0085_membership_grants.sql, 0106_login_flow_caps.sql, 0121_passkey_additions.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
   'identity.login_flows': LoginFlowsTable;
   'identity.step_up_challenges': StepUpChallengesTable;
+  'identity.passkey_additions': PasskeyAdditionsTable;
   'identity.memberships': MembershipsTable;
   'identity.membership_grants': MembershipGrantsTable;
   'identity.invitations': InvitationsTable;
@@ -65,6 +66,25 @@ interface LoginFlowsTable {
   step_up_challenge_id: string | null;
   /** The network a sign-in's flow was started from (0106), counted against its cap; null for a step-up's, or one before. */
   network_key: string | null;
+}
+
+/** A passkey added inside Agent X under way (SA6, 0121): from the step-up's return to the key confirmed. */
+interface PasskeyAdditionsTable {
+  /** The step-up challenge's own ID. */
+  id: string;
+  /** The session the step-up was made in; the addition goes with it. */
+  session_id: string;
+  user_id: string;
+  state: 'stepped_up' | 'ticketed' | 'redeemed' | 'registering' | 'confirming' | 'confirmed';
+  /** The person's own access token to the login service's API, sealed with the row's ID, person and session; gone once sent to be confirmed. */
+  token_ciphertext: Buffer | null;
+  token_key_version: number | null;
+  /** SHA-256 of the one-time ticket for the add-a-key page, from `ticketed` on. */
+  ticket_hash: Buffer | null;
+  /** The login service's ID for the new passkey, once registering. */
+  passkey_id: string | null;
+  created_at: Date;
+  ends_at: Date;
 }
 
 interface StepUpChallengesTable {

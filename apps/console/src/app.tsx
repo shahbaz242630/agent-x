@@ -37,6 +37,7 @@ import { MemberPage } from './pages/member.tsx';
 import { Members } from './pages/members.tsx';
 import { More } from './pages/more.tsx';
 import { MyActivity } from './pages/my-activity.tsx';
+import { Passkeys } from './pages/passkeys.tsx';
 import { PaymentPage } from './pages/payment.tsx';
 import { Payments } from './pages/payments.tsx';
 import { PolicyPage } from './pages/policy.tsx';
@@ -236,6 +237,7 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/more/access-log', component: AccessLog }),
   createRoute({ getParentRoute: () => root, path: '/more/security-events', component: SecurityEvents }),
   createRoute({ getParentRoute: () => root, path: '/more/my-activity', component: MyActivity }),
+  createRoute({ getParentRoute: () => root, path: '/more/passkeys', component: Passkeys }),
   createRoute({ getParentRoute: () => root, path: '/more/members', component: Members }),
   createRoute({ getParentRoute: () => root, path: '/more/members/$id', component: MemberAt }),
   createRoute({ getParentRoute: () => root, path: '/more/contacts', component: Contacts }),

@@ -160,6 +160,52 @@ describe('the login service’s event feed (B6-2b)', () => {
     expect(JSON.stringify(events)).not.toContain('sara');
   });
 
+  it('SA6: reads a passkey confirmed’s own ID from its payload, and nothing else of it, nor of any other event’s', async () => {
+    const withPayload = (type: string, payload: unknown) => ({ ...EVENT, type: { type }, payload });
+    const confirmed = 'user.human.passwordless.token.verified';
+    const secret = { publicKey: 'cHVibGljLWtleQ', keyId: 'a2V5', aaguid: 'AQID', email: 'sara@example.test' };
+    const { fetch } = zitadel(() =>
+      json({
+        events: [
+          withPayload(confirmed, { webAuthNTokenId: '401348157432135810', webAuthNTokenName: 'Sara phone', ...secret }),
+          withPayload(confirmed, { webAuthNTokenId: 'not an ID; drop table' }),
+          withPayload(confirmed, { webAuthNTokenId: 401_348_157_432_135_810 }),
+          withPayload(confirmed, {}),
+          withPayload(confirmed, null),
+          // A security key's confirmation, and a passkey removed: their payloads' IDs are never read.
+          withPayload('user.human.mfa.u2f.token.verified', { webAuthNTokenId: '401348157432135811' }),
+          withPayload('user.human.passwordless.token.removed', { webAuthNTokenId: '401348157432135812' }),
+        ],
+      }),
+    );
+
+    const events = await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10, 'changes');
+
+    expect(events.map((event) => event.passkeyId)).toEqual([
+      '401348157432135810',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    const read = JSON.stringify(events);
+    for (const kept of ['sara', 'Sara', secret.publicKey, secret.keyId, secret.aaguid, '401348157432135811']) {
+      expect(read).not.toContain(kept);
+    }
+    expect(Object.keys(events[0] ?? {}).sort()).toEqual([
+      'aggregateId',
+      'aggregateType',
+      'createdAt',
+      'editorUserId',
+      'eventClass',
+      'passkeyId',
+      'sequence',
+      'type',
+    ]);
+  });
+
   it('reads an answer with no events as none', async () => {
     const { fetch } = zitadel(() => json({}));
 

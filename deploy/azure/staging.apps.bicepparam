@@ -34,6 +34,8 @@ param zitadelAdminEmail = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_ADMIN_EM
 param zitadelLoginImage = 'ghcr.io/zitadel/zitadel-login:v4.20.5@sha256:bbab3b26a44093c1a9636a6b89c3ab31c2f6eb2f2cafc681c6f676e74e96845c'
 
 param appHost = readEnvironmentVariable('AGENTX_AZURE_APP_HOST')
+// SA6: the add-a-passkey page's host, from the same shell; unset leaves adding a passkey inside Agent X off.
+param addPasskeyHost = readEnvironmentVariable('AGENTX_AZURE_ADD_PASSKEY_HOST', '')
 
 // ADR-014 §4: staging talks to the fake partner, which keeps its records in
 // the database (Phase 1 D2-1), until the partner's sandbox adapter (Phase 5).

@@ -130,8 +130,8 @@ export const TAGS: readonly {
   {
     name: 'Sign-in',
     description:
-      "A person's sign-in to the console, their session and organisations, and the words each choice is confirmed with.",
-    prefixes: ['/v1/auth', '/v1/statements'],
+      "A person's sign-in to the console, their session and organisations, the passkeys they add, and the words each choice is confirmed with.",
+    prefixes: ['/v1/auth', '/v1/statements', '/v1/passkey-additions'],
   },
   {
     name: 'Partner',

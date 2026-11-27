@@ -93,6 +93,8 @@ export const APP_VARIABLES = {
   adminEmail: 'AGENTX_AZURE_ZITADEL_ADMIN_EMAIL',
   apiClientId: 'AGENTX_AZURE_API_OIDC_CLIENT_ID',
   minReplicas: 'AGENTX_AZURE_APP_MIN_REPLICAS',
+  // SA6: optional, from the operator's own shell: unset leaves adding a passkey inside Agent X off.
+  addPasskeyHost: 'AGENTX_AZURE_ADD_PASSKEY_HOST',
 } as const;
 
 /**
@@ -157,7 +159,11 @@ export const RECORDS_JOB = 'job-agentx-stg-migrate';
 export const APPS_ENVIRONMENT = 'cae-agentx-staging';
 
 /** What the certificates deployment reads from the shell (staging.certificates.bicepparam): the apps' two hosts. */
-export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost: APP_VARIABLES.appHost } as const;
+export const CERTIFICATE_VARIABLES = {
+  authHost: APP_VARIABLES.authHost,
+  appHost: APP_VARIABLES.appHost,
+  addPasskeyHost: APP_VARIABLES.addPasskeyHost,
+} as const;
 
 /** AG10: the vault secret holding Zitadel's machine-ID config, which the API reads too (apps.bicep `machineConfig`). */
 const MACHINE_CONFIG = 'zitadel-machine-config';
@@ -1131,6 +1137,8 @@ export interface Steps {
   readonly unattended?: Unattended;
   /** Zitadel's version, and its setup run ahead of the apps when the version moves (AZ29, zitadel-upgrade.ts). */
   readonly zitadel?: ZitadelSetup;
+  /** The operator's own shell, for the optional settings it alone gives (SA6's add-a-passkey host); none where unset. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
 }
 
 /** What a person types at a prompt, which CI's infrastructure deploy takes from its GitHub environment's secrets. */
@@ -2267,6 +2275,22 @@ async function askHost(steps: Steps, which: 'authHost' | 'appHost', question: st
   return host;
 }
 
+/**
+ * SA6: the add-a-passkey page's host, from the operator's own shell (AGENTX_AZURE_ADD_PASSKEY_HOST), in lower case:
+ * empty, the default, leaves adding a passkey inside Agent X off. Given, it must be a host just below the auth host
+ * (a passkey made there is the login service's own), and is a door with a certificate and DNS records of its own.
+ */
+export function addPasskeyHostOf(env: Readonly<Record<string, string | undefined>> = {}, authHost: string): string {
+  const host = (env[APP_VARIABLES.addPasskeyHost] ?? '').trim().toLowerCase();
+  if (host === '') return '';
+  if (!HOST.test(host) || !host.endsWith(`.${authHost}`)) {
+    throw new Error(
+      `${APP_VARIABLES.addPasskeyHost} must be a host just below the sign-in host (addkey.${authHost}): nothing was deployed.`,
+    );
+  }
+  return host;
+}
+
 /** The two doors' hosts, typed by the operator, in lower case, and not the same. */
 async function askHosts(steps: Steps): Promise<{ readonly authHost: string; readonly appHost: string }> {
   const authHost = await askHost(steps, 'authHost', 'Host for sign-in (Zitadel): ');
@@ -2407,7 +2431,9 @@ async function checkDns(steps: Steps): Promise<number> {
   });
   const { authHost, appHost } = await askHosts(steps);
   steps.terminal.say(`Reading ${APPS_ENVIRONMENT}'s address and the hosts' DNS; nothing is changed.`);
-  const ready = sayRecords(steps, await doorRecords(dns, [appHost, authHost], environmentDns(steps, subscription)));
+  const addPasskeyHost = addPasskeyHostOf(steps.env, authHost);
+  const hosts = [appHost, authHost, ...(addPasskeyHost === '' ? [] : [addPasskeyHost])];
+  const ready = sayRecords(steps, await doorRecords(dns, hosts, environmentDns(steps, subscription)));
   steps.terminal.say(
     ready
       ? 'Every record is in place.'
@@ -2446,7 +2472,12 @@ async function deployCertificates(steps: Steps): Promise<number> {
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
   const { authHost, appHost } = await askHosts(steps);
-  const records = await doorRecords(dns, [appHost, authHost], environmentDns(steps, subscription));
+  const addPasskeyHost = addPasskeyHostOf(steps.env, authHost);
+  const records = await doorRecords(
+    dns,
+    [appHost, authHost, ...(addPasskeyHost === '' ? [] : [addPasskeyHost])],
+    environmentDns(steps, subscription),
+  );
   if (!sayRecords(steps, records)) {
     throw new Error(
       'Every record above must be in place first (node deploy/azure/deploy.ts dns says when): nothing was deployed.',
@@ -2458,7 +2489,11 @@ async function deployCertificates(steps: Steps): Promise<number> {
       `A certificate is issued only while its app runs, and ${idle.join(', ')} keep no replica running: run apps --keep-running first. Nothing was deployed.`,
     );
   }
-  const values = { [CERTIFICATE_VARIABLES.authHost]: authHost, [CERTIFICATE_VARIABLES.appHost]: appHost };
+  const values = {
+    [CERTIFICATE_VARIABLES.authHost]: authHost,
+    [CERTIFICATE_VARIABLES.appHost]: appHost,
+    [CERTIFICATE_VARIABLES.addPasskeyHost]: addPasskeyHost,
+  };
   checkPolicy(steps, values);
   if ((await sendWithWhatIf(steps, subscription, 'certificates', values)) === undefined) return 1;
   steps.terminal.say('Deployed. The certificates, and how Azure left each:');
@@ -3143,6 +3178,7 @@ async function deployApps(
     [APP_VARIABLES.adminEmail]: adminEmail,
     [APP_VARIABLES.apiClientId]: apiClientId,
     [APP_VARIABLES.minReplicas]: keepRunning ? '1' : '0',
+    [APP_VARIABLES.addPasskeyHost]: addPasskeyHostOf(steps.env, authHost),
     [LOAD_VARIABLES.run]: loadRun ? 'true' : 'false',
     [LOAD_VARIABLES.digest]: loadDigest,
     [LOAD_VARIABLES.database]: loadDatabaseHostOf(loadDatabase),
@@ -3275,6 +3311,7 @@ export function realSteps(terminal: Terminal, az: Az): Steps {
     images: realImages(),
     dns: realDns(),
     checkout: () => realCheckout(),
+    env: process.env,
   };
 }
 

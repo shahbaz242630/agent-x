@@ -38,6 +38,7 @@ export type SweptRows =
   | 'identity.flow'
   | 'identity.session'
   | 'identity.step_up_challenge'
+  | 'identity.passkey_addition'
   | 'notifications.notice'
   | 'security.event'
   | 'provider_events.message'

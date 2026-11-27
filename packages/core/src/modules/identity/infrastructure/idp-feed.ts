@@ -11,7 +11,10 @@
 //   shape, its sequence digits, its time a time. Anything else throws, as
 //   does an answer larger than MOST_ANSWER_BYTES: the feed is then tried
 //   again later, never read in part. An event's payload, which may hold an
-//   email address, is never read.
+//   email address, is never read, but for two fields' own (each read
+//   strictly, nothing else of the payload): a member event's member and
+//   roles (SA2), and a passkey confirmed's own ID (SA6: what tells a key the
+//   person added inside Agent X apart).
 // - A login service that can't be reached, refuses the token, or answers
 //   otherwise than 200 throws IdpFeedUnavailable, naming the step, never the
 //   answer.
@@ -57,7 +60,15 @@ export interface IdpEvent {
    * for any other event, or when the payload doesn't hold them as Zitadel writes them (then nothing counts as ours).
    */
   readonly member?: { readonly userId: string; readonly roles: readonly string[] };
+  /**
+   * For a passkey confirmed (PASSKEY_CONFIRMED_EVENT), the login service's ID for it, read from its payload; absent for
+   * any other event, or when the payload doesn't hold one as Zitadel writes it (then the key is never the person's own).
+   */
+  readonly passkeyId?: string;
 }
+
+/** A passkey confirmed, ready to use (Zitadel v4.20.5's own name): the one event whose payload's passkey ID is read. */
+export const PASSKEY_CONFIRMED_EVENT = 'user.human.passwordless.token.verified';
 
 export class IdpFeedUnavailable extends Error {
   override readonly name = 'IdpFeedUnavailable';
@@ -106,6 +117,7 @@ function eventOf(raw: unknown): IdpEvent | undefined {
     createdAt,
     editorUserId: typeof editor === 'string' && editor !== '' ? editor : null,
     ...memberOf(eventClass, field(raw, 'payload')),
+    ...passkeyOf(type, field(raw, 'payload')),
   };
 }
 
@@ -123,6 +135,16 @@ function memberOf(eventClass: IdpEventClass, payload: unknown): Pick<IdpEvent, '
   if (typeof userId !== 'string' || !ZITADEL_ID.test(userId)) return {};
   if (!Array.isArray(roles) || !roles.every((role) => typeof role === 'string' && ROLE.test(role))) return {};
   return { member: { userId, roles: roles as string[] } };
+}
+
+/**
+ * A passkey confirmed's own ID, its payload's `webAuthNTokenId` alone (SA6), nothing else of the payload; any other
+ * event, or a payload not as Zitadel writes it, gives none.
+ */
+function passkeyOf(type: string, payload: unknown): Pick<IdpEvent, 'passkeyId'> {
+  if (type !== PASSKEY_CONFIRMED_EVENT) return {};
+  const passkeyId = field(payload, 'webAuthNTokenId');
+  return typeof passkeyId === 'string' && ZITADEL_ID.test(passkeyId) ? { passkeyId } : {};
 }
 
 export function createIdpEventFeed(login: ZitadelCallOptions): IdpEventFeed {

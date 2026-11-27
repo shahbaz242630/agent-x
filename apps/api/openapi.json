@@ -537,8 +537,23 @@
                   },
                   {
                     "type": "string",
+                    "const": "PASSKEY_REFUSED",
+                    "description": "The login service didn't accept the new passkey, so it was not added and nothing else changed. Start adding the passkey again in Agent X."
+                  },
+                  {
+                    "type": "string",
                     "const": "PASSKEY_REQUIRED",
                     "description": "Your role here is admin or finance approver, which needs a passkey, and this session was signed in without one, so the request is refused. Sign out, then sign in again with your passkey (a security key, or Windows Hello)."
+                  },
+                  {
+                    "type": "string",
+                    "const": "PASSKEY_TICKET_ALREADY_ISSUED",
+                    "description": "The page's one-time link for adding the passkey was already given out for this request, and can't be shown again. Start adding the passkey again."
+                  },
+                  {
+                    "type": "string",
+                    "const": "PASSKEY_TICKET_INVALID",
+                    "description": "This link for adding a passkey has run out, or was used already, so nothing was changed. Go back to Agent X and start adding the passkey again."
                   },
                   {
                     "type": "string",
@@ -3756,6 +3771,485 @@
         ],
         "additionalProperties": false,
         "description": "A client, registered (RFC 7591 §3.2.1)."
+      },
+      "MyActivityRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "recordedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "localTime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimedOrganizationId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "method": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string"
+          },
+          "pathIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          "status": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "correlationId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "sealed": {
+            "type": "boolean"
+          },
+          "client": {
+            "type": "object",
+            "properties": {
+              "ip": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "place": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "country": {
+                        "type": "string"
+                      },
+                      "city": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "approximate": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "by": {
+                        "type": "string",
+                        "const": "IP Geolocation by DB-IP"
+                      },
+                      "link": {
+                        "type": "string",
+                        "const": "https://db-ip.com"
+                      }
+                    },
+                    "required": [
+                      "country",
+                      "city",
+                      "approximate",
+                      "by",
+                      "link"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "timeZone": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "from": {
+                        "type": "string",
+                        "enum": [
+                          "browser",
+                          "organisation"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "from"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "ip",
+              "place",
+              "timeZone"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "recordedAt",
+          "localTime",
+          "claimedOrganizationId",
+          "method",
+          "route",
+          "pathIds",
+          "status",
+          "reason",
+          "correlationId",
+          "durationMs",
+          "sealed",
+          "client"
+        ],
+        "additionalProperties": false,
+        "description": "One request in your own activity log."
+      },
+      "MyActivityExportByAgentX": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requests": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "caseRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "from",
+          "to",
+          "requests",
+          "caseRef"
+        ],
+        "additionalProperties": false,
+        "description": "An export of your activity log Agent X made for a case: you are always told."
+      },
+      "MyActivityExport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "fileName": {
+            "type": "string"
+          },
+          "contentType": {
+            "type": "string",
+            "enum": [
+              "text/csv",
+              "application/x-ndjson"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "id",
+          "fileName",
+          "contentType",
+          "content",
+          "requests"
+        ],
+        "additionalProperties": false,
+        "description": "A download of your own activity log."
+      },
+      "PasskeyAdditionAsked": {
+        "type": "object",
+        "properties": {
+          "stepUpChallengeId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "stepUpChallengeId"
+        ],
+        "additionalProperties": false,
+        "description": "The step-up to sign in again for, with a passkey."
+      },
+      "PasskeyTicket": {
+        "type": "object",
+        "properties": {
+          "ticket": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "page": {
+            "type": "string",
+            "format": "uri"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": [
+          "ticket",
+          "page",
+          "expiresAt"
+        ],
+        "additionalProperties": false,
+        "description": "The add-a-passkey page's one-time ticket."
+      },
+      "PasskeyAdditionStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "STEPPED_UP",
+              "WAITING_FOR_KEY",
+              "ADDED"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false,
+        "description": "Where adding a passkey got to."
+      },
+      "PasskeyOptions": {
+        "type": "object",
+        "properties": {
+          "options": {
+            "type": "object",
+            "properties": {
+              "publicKey": {
+                "type": "object",
+                "properties": {
+                  "challenge": {
+                    "type": "string",
+                    "maxLength": 1024
+                  },
+                  "rp": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "maxLength": 253
+                      },
+                      "name": {
+                        "type": "string",
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "user": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "maxLength": 1024
+                      },
+                      "name": {
+                        "type": "string",
+                        "maxLength": 256
+                      },
+                      "displayName": {
+                        "type": "string",
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "displayName"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "pubKeyCredParams": {
+                    "maxItems": 32,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "maxLength": 32
+                        },
+                        "alg": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "alg"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "timeout": {
+                    "type": "number"
+                  },
+                  "excludeCredentials": {
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "maxLength": 32
+                        },
+                        "id": {
+                          "type": "string",
+                          "maxLength": 1366
+                        },
+                        "transports": {
+                          "maxItems": 8,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "maxLength": 32
+                          }
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "authenticatorSelection": {
+                    "type": "object",
+                    "properties": {
+                      "authenticatorAttachment": {
+                        "type": "string",
+                        "maxLength": 32
+                      },
+                      "requireResidentKey": {
+                        "type": "boolean"
+                      },
+                      "residentKey": {
+                        "type": "string",
+                        "maxLength": 32
+                      },
+                      "userVerification": {
+                        "type": "string",
+                        "maxLength": 32
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "attestation": {
+                    "type": "string",
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "challenge",
+                  "rp",
+                  "user",
+                  "pubKeyCredParams"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "publicKey"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "options"
+        ],
+        "additionalProperties": false,
+        "description": "What the browser makes the new passkey with."
       },
       "IntegrityHold": {
         "type": "object",
@@ -7593,271 +8087,6 @@
         "additionalProperties": false,
         "description": "The member, as the change left them."
       },
-      "MyActivityRow": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "recordedAt": {
-            "type": "string",
-            "format": "date-time",
-            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
-          },
-          "localTime": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "claimedOrganizationId": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "method": {
-            "type": "string"
-          },
-          "route": {
-            "type": "string"
-          },
-          "pathIds": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "format": "uuid",
-              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-            }
-          },
-          "status": {
-            "type": "integer",
-            "minimum": -9007199254740991,
-            "maximum": 9007199254740991
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "correlationId": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "durationMs": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
-          },
-          "sealed": {
-            "type": "boolean"
-          },
-          "client": {
-            "type": "object",
-            "properties": {
-              "ip": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "place": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "country": {
-                        "type": "string"
-                      },
-                      "city": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "approximate": {
-                        "type": "boolean",
-                        "const": true
-                      },
-                      "by": {
-                        "type": "string",
-                        "const": "IP Geolocation by DB-IP"
-                      },
-                      "link": {
-                        "type": "string",
-                        "const": "https://db-ip.com"
-                      }
-                    },
-                    "required": [
-                      "country",
-                      "city",
-                      "approximate",
-                      "by",
-                      "link"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "timeZone": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "name": {
-                        "type": "string"
-                      },
-                      "from": {
-                        "type": "string",
-                        "enum": [
-                          "browser",
-                          "organisation"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "name",
-                      "from"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "ip",
-              "place",
-              "timeZone"
-            ],
-            "additionalProperties": false
-          }
-        },
-        "required": [
-          "id",
-          "recordedAt",
-          "localTime",
-          "claimedOrganizationId",
-          "method",
-          "route",
-          "pathIds",
-          "status",
-          "reason",
-          "correlationId",
-          "durationMs",
-          "sealed",
-          "client"
-        ],
-        "additionalProperties": false,
-        "description": "One request in your own activity log."
-      },
-      "MyActivityExportByAgentX": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "at": {
-            "type": "string",
-            "format": "date-time",
-            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
-          },
-          "from": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "to": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "requests": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "minimum": -9007199254740991,
-                "maximum": 9007199254740991
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "caseRef": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "at",
-          "from",
-          "to",
-          "requests",
-          "caseRef"
-        ],
-        "additionalProperties": false,
-        "description": "An export of your activity log Agent X made for a case: you are always told."
-      },
-      "MyActivityExport": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "fileName": {
-            "type": "string"
-          },
-          "contentType": {
-            "type": "string",
-            "enum": [
-              "text/csv",
-              "application/x-ndjson"
-            ]
-          },
-          "content": {
-            "type": "string"
-          },
-          "requests": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
-          }
-        },
-        "required": [
-          "id",
-          "fileName",
-          "contentType",
-          "content",
-          "requests"
-        ],
-        "additionalProperties": false,
-        "description": "A download of your own activity log."
-      },
       "MyOrganizations": {
         "type": "object",
         "properties": {
@@ -8356,6 +8585,499 @@
         },
         "tags": [
           "Service"
+        ],
+        "security": []
+      }
+    },
+    "/v1/auth/passkeys/additions": {
+      "post": {
+        "operationId": "passkey.add",
+        "summary": "Start adding a passkey",
+        "description": "Opens the step-up to sign in again for, with a passkey you already hold, before a new one is added without the 7 days a key added at the login service directly starts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
+          }
+        ],
+        "x-access": [
+          "person"
+        ],
+        "x-body-limit": 256,
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyAdditionAsked"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/v1/auth/passkeys/additions/{id}/confirm": {
+      "post": {
+        "operationId": "passkey.add.confirm",
+        "summary": "Confirm adding a passkey: the add-a-passkey page's one-time ticket",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
+          }
+        ],
+        "x-access": [
+          "person"
+        ],
+        "x-body-limit": 256,
+        "responses": {
+          "201": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyTicket"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/v1/auth/passkeys/additions/{id}": {
+      "get": {
+        "summary": "Where adding a passkey got to",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "x-access": [
+          "person"
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyAdditionStatus"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "head": {
+        "summary": "Where adding a passkey got to",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "x-access": [
+          "person"
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyAdditionStatus"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/v1/passkey-additions/options": {
+      "post": {
+        "summary": "What the add-a-passkey page makes the key with",
+        "description": "The add-a-passkey page's own host alone.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ticket": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  }
+                },
+                "required": [
+                  "ticket"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-access": [
+          "public"
+        ],
+        "x-body-limit": 256,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyOptions"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": []
+      }
+    },
+    "/v1/passkey-additions/confirm": {
+      "post": {
+        "summary": "Send the add-a-passkey page’s new key",
+        "description": "The add-a-passkey page's own host alone.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ticket": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  },
+                  "credential": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "maxLength": 1366,
+                        "pattern": "^[A-Za-z0-9_-]+$"
+                      },
+                      "rawId": {
+                        "type": "string",
+                        "maxLength": 1366,
+                        "pattern": "^[A-Za-z0-9_-]+$"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "public-key"
+                        ]
+                      },
+                      "response": {
+                        "type": "object",
+                        "properties": {
+                          "attestationObject": {
+                            "type": "string",
+                            "maxLength": 16384,
+                            "pattern": "^[A-Za-z0-9_-]+$"
+                          },
+                          "clientDataJSON": {
+                            "type": "string",
+                            "maxLength": 4096,
+                            "pattern": "^[A-Za-z0-9_-]+$"
+                          }
+                        },
+                        "required": [
+                          "attestationObject",
+                          "clientDataJSON"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "rawId",
+                      "type",
+                      "response"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "ticket",
+                  "credential"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-access": [
+          "public"
+        ],
+        "x-body-limit": 32768,
+        "responses": {
+          "200": {
+            "description": "The new passkey is added.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false,
+                  "description": "The new passkey is added."
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Sign-in"
         ],
         "security": []
       }
@@ -30235,7 +30957,7 @@
     },
     {
       "name": "Sign-in",
-      "description": "A person's sign-in to the console, their session and organisations, and the words each choice is confirmed with."
+      "description": "A person's sign-in to the console, their session and organisations, the passkeys they add, and the words each choice is confirmed with."
     },
     {
       "name": "Partner",

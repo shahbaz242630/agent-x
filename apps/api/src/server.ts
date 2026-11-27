@@ -76,6 +76,8 @@ import { registerOauth, registerOauthForms, registerOauthSwitch } from './oauth-
 import { capabilitiesOf, FORM_TYPE, formFields, oauthUnreadable } from './oauth-wire.ts';
 import { recordTwins } from './mcp-twins.ts';
 import { type MachineIds, registerMachineIds } from './machine-ids.ts';
+import { putAddPasskeyPageInFront } from './add-passkey-page.ts';
+import { type PasskeyAdditionRoutes, registerPasskeyAdditions } from './passkey-additions.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
 import {
   createAgentCounter,
@@ -283,6 +285,8 @@ export interface ServerOptions {
   readonly consoleFiles?: ConsoleFiles | undefined;
   /** The login service's public origin, the OIDC issuer: a request naming its host gets a 404 (login-host.ts); none when not given. */
   readonly loginOrigin?: string | undefined;
+  /** SA6: passkeys added inside Agent X, and the add-a-passkey page's own host; off (404 to all) when not given. */
+  readonly passkeyAdditions?: PasskeyAdditionRoutes | undefined;
   /**
    * Agent X's own OAuth server for MCP connections (6E3a, ADR-016): its use cases, which answer only while
    * AGENTX_MCP_OAUTH is on; without them, its routes answer 404.
@@ -399,9 +403,17 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   const onLoginHost = loginHostCheck(options.loginOrigin);
+  // SA6: the add-a-passkey page's host answers its page's routes alone, never the console or any other route.
+  const pageOrigin = options.passkeyAdditions?.origin;
+  const onPageHost = loginHostCheck(pageOrigin);
   if (options.consoleFiles !== undefined) {
-    putConsoleInFront(app.server, options.consoleFiles, (request) => onLoginHost(request.headers.host));
+    putConsoleInFront(
+      app.server,
+      options.consoleFiles,
+      (request) => onLoginHost(request.headers.host) || onPageHost(request.headers.host),
+    );
   }
+  if (pageOrigin !== undefined) putAddPasskeyPageInFront(app.server, onPageHost);
   // Every line of a request carries its ID, whichever logger writes it (logger.ts); before anything that could write
   // one. Once is enough, a body arriving late included: Fastify's parser goes back into the scope it was entered from
   // (an AsyncResource), which api-sockets.test.ts holds to account on a real socket, an upgrade being what could change it.
@@ -448,10 +460,18 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     }
     void sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
   });
+  // The add-a-passkey page's host (SA6): its page's routes alone; anything else the same plain 404, as above.
+  app.addHook('onRequest', (request, reply, done) => {
+    if (!onPageHost(request.headers.host) || request.routeOptions.config.addPasskeyPage === true) {
+      done();
+      return;
+    }
+    void sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+  });
   // done() only for a request let through, as in access.ts: a refusal the client
   // hangs up on must not go on to the route.
   app.addHook('onRequest', (request, reply, done) => {
-    const { access = [], partnerSigned, toolCalls, oauthClient } = request.routeOptions.config;
+    const { access = [], partnerSigned, toolCalls, oauthClient, addPasskeyPage } = request.routeOptions.config;
     // The MCP endpoint checks a browser's origin itself (mcp.ts): a CLI client sends none, and must reach the key's 401.
     // An OAuth client's own endpoints read no cookie, and are called from anywhere (oauth-routes.ts, 6E3a).
     if (
@@ -459,7 +479,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
       partnerSigned !== true &&
       toolCalls !== true &&
       oauthClient !== true &&
-      isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)
+      // SA6: the add-a-passkey page's writes come from its own origin alone, never the app's.
+      isForeignWrite(
+        request.method,
+        request.headers.origin,
+        addPasskeyPage === true && pageOrigin !== undefined ? pageOrigin : config.http.publicOrigin,
+      )
     ) {
       void sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
       return;
@@ -537,6 +562,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
 
   registerHealth(app, options.healthChecks, logger);
   registerMachineIds(app, options.machineIds, logger);
+  registerPasskeyAdditions(app, {
+    adding: options.passkeyAdditions,
+    logger,
+    trust,
+    copies: config.http.webCopies,
+  });
   registerSignIn(app, {
     signIn: options.signIn?.service,
     sessionSeconds: options.signIn?.sessionSeconds ?? 0,

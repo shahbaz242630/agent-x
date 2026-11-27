@@ -28,7 +28,7 @@ import path from 'node:path';
 import { type ActivityTables, addBackgroundExport } from '@agentx/core/modules/activity';
 import { SCOPES } from '@agentx/core/modules/agents';
 import { holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
-import { createStepUpChallenges, draftReset } from '@agentx/core/modules/identity';
+import { createPasskeyAdditions, createStepUpChallenges, draftReset } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { challengeOf, type OauthTables } from '@agentx/core/modules/oauth';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
@@ -135,6 +135,8 @@ interface Theirs {
   readonly exportId: string;
   readonly month: string;
   readonly identity: { readonly invitation: string; readonly contact: string; readonly reset: string };
+  /** A passkey A's admin is adding (SA6), stepped up for in their own session: a person's own, no organisation's. */
+  readonly passkeyAddition: string;
   /** A's own admin's headers: the own-ID control, which proves each ID real. */
   readonly admin: Readonly<Record<string, string>>;
   /** A's own admin as a person: an actor in A's audit and access logs. */
@@ -187,6 +189,11 @@ const NOT_FOUND_AS: Readonly<Record<string, { readonly status: number; readonly 
       code: 'BANK_LINK_NOT_WAITING',
       why: 'As the approve: another organisation’s session is found as none is, answered as no link of yours waiting.',
     },
+    '/v1/auth/passkeys/additions/{id}/confirm': {
+      status: 403,
+      code: 'STEP_UP_FAILED',
+      why: 'The confirm of a passkey step-up (SA6): another person’s addition is found as none is, answered as every step-up confirm answers a step-up not signed in again for in this session.',
+    },
   };
 
 /** The writes that answer even A's own admin not-found with A's IDs, each with its reason: none of theirs proven so. */
@@ -216,6 +223,8 @@ function theirIds(route: string): Readonly<Record<string, string>> | undefined {
     // A download of A's export can't be started by B, so a download's ID is never one of A's: its export's is.
     ['/v1/access-log/background-exports/', { id: t.exportId, month: t.month, downloadId: randomUUID(), index: '0' }],
     ['/v1/fake-bank/sessions/', { sessionRef: t.sessionRef }],
+    // A person's own, found only by its own session: B's admin is another person in another organisation.
+    ['/v1/auth/passkeys/additions/', { id: t.passkeyAddition }],
   ];
   return byPrefix.find(([prefix]) => route.startsWith(prefix))?.[1];
 }
@@ -536,7 +545,11 @@ async function send(
   });
   const correlationId = response.headers[CORRELATION_HEADER];
   const org = caller[ORGANIZATION_HEADER];
-  if (typeof correlationId === 'string' && org !== undefined) owedRows.set(correlationId, org);
+  // A person's own routes (SA6's passkey additions, under /v1/auth/) verify no organisation: their rows are the person
+  // log's (access.person_requests), never the organisation's, whatever header the caller sends.
+  if (typeof correlationId === 'string' && org !== undefined && !url.startsWith('/v1/auth/')) {
+    owedRows.set(correlationId, org);
+  }
   return response;
 }
 
@@ -632,10 +645,13 @@ beforeAll(async () => {
       AGENTX_DB_TLS: 'disable',
       AGENTX_KEYS_DIR: keyFolder,
       // Sign-in on, so a session's cookie is read; the login service is never called by this test.
-      AGENTX_OIDC_ISSUER: 'http://127.0.0.1:9',
+      // A login service nothing here reaches (a closed port), on a name a host below it can hold the passkey page under.
+      AGENTX_OIDC_ISSUER: 'http://localhost:9',
       AGENTX_OIDC_CLIENT_ID: 'sweep-client',
       AGENTX_OIDC_CLIENT_SECRET: 's'.repeat(32),
-      AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://127.0.0.1:9',
+      // SA6 on, so a person's own passkey additions are swept too.
+      AGENTX_ADD_PASSKEY_ORIGIN: 'http://addkey.localhost:9',
+      AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://localhost:9',
       AGENTX_MCP_OAUTH: 'on',
       AGENTX_RATE_LIMIT_PER_MINUTE: '50000',
       AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '50000',
@@ -766,6 +782,30 @@ beforeAll(async () => {
     });
     return { registration: row.id, exportId: id, month: from.toISOString().slice(0, 7) };
   });
+  // A's admin starts adding a passkey and comes back from the step-up with it, as the step-up's return keeps it.
+  const begun = await send(aHeaders, 'POST', '/v1/auth/passkeys/additions');
+  expect(begun.statusCode, begun.body).toBe(202);
+  const passkeyAddition = (JSON.parse(begun.body) as { stepUpChallengeId: string }).stepUpChallengeId;
+  await app.transaction().execute((tx) =>
+    createPasskeyAdditions({
+      database: app,
+      challenges: createStepUpChallenges({ ids, clock, keys, logger }),
+      passkeys: {
+        register: () => Promise.reject(new Error('unused')),
+        confirm: () => Promise.reject(new Error('unused')),
+      },
+      revoke: () => Promise.resolve(true),
+      keys,
+      ids,
+      clock,
+      logger,
+    }).steppedUp(tx, {
+      challengeId: passkeyAddition,
+      sessionId: aAdmin.sessionId,
+      userId: aAdmin.userId,
+      accessToken: ['sweep', 'person', 'stand', 'in'].join('-'),
+    }),
+  );
   theirs = {
     world: a,
     member: other.membershipId,
@@ -780,6 +820,7 @@ beforeAll(async () => {
     exportId,
     month,
     identity,
+    passkeyAddition,
     admin: aHeaders,
     adminUser: aAdmin.userId,
   };

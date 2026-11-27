@@ -116,6 +116,9 @@ param authHost string
 @minLength(4)
 param appHost string
 
+@description('SA6: the add-a-passkey page host, just below the auth host (addkey.<auth host>), served by the API; empty (the default) leaves adding a passkey inside Agent X off, with no door, certificate or setting for it. The domain never sits in this repository (Rule Book §7).')
+param addPasskeyHost string = ''
+
 @description('The API\'s client ID in Zitadel (B2-6), which Zitadel gave when the API was registered with it as a confidential web client; its secret is in the vault (api-oidc-client-secret). Visible ASCII, as the API\'s config takes it.')
 @minLength(1)
 @maxLength(255)
@@ -1487,6 +1490,16 @@ var signInAndPartnerSettings = [
   }
 ]
 
+// SA6: passkeys added inside Agent X, on the add-a-passkey page's own host: named only when that host is given.
+var addPasskeySettings = empty(addPasskeyHost)
+  ? []
+  : [
+      {
+        name: 'AGENTX_ADD_PASSKEY_ORIGIN'
+        value: 'https://${addPasskeyHost}'
+      }
+    ]
+
 // The API as `web` copies beside the `jobs` app (4D2e D13): each counts its share
 // of every rate limit for the copies there are (rate-limit.ts, D12).
 var webRoleSettings = [
@@ -1562,6 +1575,7 @@ var jobsApp = {
       trustedProxiesSetting
     ],
     signInAndPartnerSettings,
+    addPasskeySettings,
     jobsRoleSettings
   )
 }
@@ -1727,6 +1741,7 @@ var apps = concat([
         }
       ],
       signInAndPartnerSettings,
+      addPasskeySettings,
       loadRun ? loadApiSettings : [],
       split ? webRoleSettings : []
     )
@@ -2246,7 +2261,27 @@ resource releaseRunsMigrate 'Microsoft.Authorization/roleAssignments@2022-04-01'
 // The auth door's routes (auth-door.json, which auth-door.ts reads too): closed to the console here.
 var authDoor = loadJsonContent('auth-door.json')
 
-var doors = [
+// SA6: the add-a-passkey page's host, when given: every path to the API, which answers that host with the page's own
+// routes alone and a plain 404 for anything else (apps/api/src/server.ts). A host of its own, just below the auth host,
+// so a passkey made there is the login service's own, and none of Zitadel's cookies reach it (they are its host's).
+var addPasskeyDoors = empty(addPasskeyHost)
+  ? []
+  : [
+      {
+        door: 'addkey'
+        host: addPasskeyHost
+        routes: [
+          {
+            description: 'Every path on the add-a-passkey host goes to the API'
+            prefix: '/'
+            anyCase: false
+            reaches: 'api'
+          }
+        ]
+      }
+    ]
+
+var doors = concat([
   {
     // The app host: every path to the API, which answers anything it doesn't
     // serve with its own 404 (Product-Documentation/API.md).
@@ -2283,7 +2318,7 @@ var doors = [
     host: authHost
     routes: concat(authDoor.browser, authDoor.fallback)
   }
-]
+], addPasskeyDoors)
 
 resource publicDoors 'Microsoft.App/managedEnvironments/httpRouteConfigs@2026-01-01' = [
   for door in doors: {

@@ -172,6 +172,11 @@ export interface Config {
         readonly token: string;
       }
     | undefined;
+  /**
+   * SA6: passkeys added inside Agent X, on the add-a-passkey page's own origin, just below the login service's host.
+   * Undefined (off, the default) when unset: no passkey is added here.
+   */
+  readonly addPasskey: { readonly origin: string } | undefined;
   /** ADR-003 §7: how long a console session lives unused, and at most. */
   readonly sessions: { readonly idleSeconds: number; readonly absoluteSeconds: number };
   /** ADR-005 §6, ADR-011 §7: how long a security event is kept, in whole days. */
@@ -373,6 +378,31 @@ function factorResetProblems(token: string | undefined, signInSet: boolean): str
   ];
 }
 
+/**
+ * SA6: the add-a-passkey page makes a passkey for the login service's own host, which a browser allows only on that
+ * host or one below it; so its origin goes only with sign-in, on a host just below the issuer's (never the issuer's
+ * own, whose cookies and pages it must not share), https outside development and test.
+ */
+function addPasskeyProblems(
+  environment: Environment,
+  origin: string | undefined,
+  issuer: string | undefined,
+): string[] {
+  if (origin === undefined) return [];
+  if (issuer === undefined) {
+    return [
+      'AGENTX_ADD_PASSKEY_ORIGIN: set only with sign-in (AGENTX_OIDC_ISSUER), whose login service holds the passkeys',
+    ];
+  }
+  const below = new URL(origin).hostname.endsWith(`.${new URL(issuer).hostname}`);
+  return [
+    ...(below
+      ? []
+      : ["AGENTX_ADD_PASSKEY_ORIGIN: must be on a host just below the login service's own (addkey.<its host>)"]),
+    ...plainHttpProblems('AGENTX_ADD_PASSKEY_ORIGIN', environment, [origin]),
+  ];
+}
+
 /** The email settings, once emailProblems has found them all set or none. */
 function emailFrom(
   endpoint: string | undefined,
@@ -512,6 +542,7 @@ function readSettings(env: Env, location: LocationChecks) {
     emailAccessKey: optionalSecretSetting(env, 'AGENTX_EMAIL_ACCESS_KEY'),
     directoryToken: optionalSecretSetting(env, 'AGENTX_DIRECTORY_TOKEN'),
     factorResetToken: optionalSecretSetting(env, 'AGENTX_FACTOR_RESET_TOKEN'),
+    addPasskeyOrigin: setting(env, 'AGENTX_ADD_PASSKEY_ORIGIN'),
     idpOurActors: ourLoginIds(env, 'AGENTX_IDP_OUR_ACTORS'),
     idpOurServiceUsers: ourLoginIds(env, 'AGENTX_IDP_OUR_SERVICE_USERS'),
     sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
@@ -612,6 +643,12 @@ function blobStoreProblems(env: Env, checks: Settings): string[] {
       : []),
   ];
 }
+
+/** SA6: the add-a-passkey page's origin against the environment and sign-in, where all three are valid. */
+const addPasskeyRuleProblems = ({ environment, addPasskeyOrigin, oidcIssuer }: Settings): string[] =>
+  environment.ok && addPasskeyOrigin.ok && oidcIssuer.ok
+    ? addPasskeyProblems(environment.value, addPasskeyOrigin.value, oidcIssuer.value)
+    : [];
 
 /** Rules between the environment and the HTTP, logging and outbound settings, where those are valid. */
 function httpRuleProblems(checks: Settings): string[] {
@@ -779,6 +816,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       // so one start reports it alongside any other problem.
       ...httpRuleProblems(checks),
       ...rateLimitRuleProblems(checks),
+      ...addPasskeyRuleProblems(checks),
       ...decisionGateProblems(checks),
       ...copiesProblems(checks),
       ...serviceRuleProblems(checks),
@@ -849,6 +887,10 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
     ),
     factorResets:
       checks.factorResetToken.value === undefined ? undefined : Object.freeze({ token: checks.factorResetToken.value }),
+    addPasskey:
+      checks.addPasskeyOrigin.value === undefined
+        ? undefined
+        : Object.freeze({ origin: checks.addPasskeyOrigin.value }),
     idpOurChanges:
       checks.idpOurActors.value === undefined || checks.idpOurServiceUsers.value === undefined
         ? undefined

@@ -79,6 +79,7 @@ import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { nowChainsOf, waitWitnessed } from '../../audit/index.ts';
 import { createPlatformChain, type PlatformTransaction } from '../../platform-controls/index.ts';
 import { HOME_PATH, isReturnPath, type Subject } from '../domain/sign-in.ts';
+import { PASSKEY_ADD_ACTION } from '../domain/passkey-addition.ts';
 import { earliestAuthTime, type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
 import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
@@ -86,6 +87,7 @@ import { MOST_SESSIONS_A_DAY, MOST_STEP_UPS_A_DAY, sessionsSpent, stepUpsSpent }
 import { recordSessionEmail } from './session-emails.ts';
 import { type EndedSession, type LiveSession, type Sessions, sessionsEndedAt } from './sessions.ts';
 import { createSignedEnds, sessionEndedEvent, sessionRotatedEvent } from './signed-ends.ts';
+import type { PasskeyAdditions } from './passkey-additions.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { keepUserContact } from './user-contacts.ts';
@@ -224,6 +226,7 @@ export function createSignIn({
   logger,
   mostSessions = MOST_SESSIONS_A_DAY,
   mostStepUps = MOST_STEP_UPS_A_DAY,
+  additions,
 }: {
   readonly db: Kysely<IdentityTables>;
   readonly oidc: OidcClient;
@@ -240,6 +243,11 @@ export function createSignIn({
   readonly mostSessions?: number;
   /** A person's day's step-ups (MOST_STEP_UPS_A_DAY unless a test names fewer). */
   readonly mostStepUps?: number;
+  /**
+   * Passkeys added inside Agent X (SA6), when on: a step-up for PASSKEY_ADD_ACTION asks for the login service's API
+   * too, needs a passkey, and keeps the person's token sealed for the addition. Off, such a step-up is never begun.
+   */
+  readonly additions?: PasskeyAdditions | undefined;
 }): SignIn {
   const macs = { keys, logger };
   /** The people's sessions' ends this process has checked on the platform chain, shared by its sign-ins (R-15). */
@@ -334,9 +342,12 @@ export function createSignIn({
       });
       throw failed('challenge_missing', 'the flow was not started for this challenge', userId);
     }
+    // SA6: adding a passkey keeps the person's token for the login service's API, and needs a passkey (amr `user`).
+    const adding = pending.action === PASSKEY_ADD_ACTION;
+    if (adding && additions === undefined) throw failed('challenge_missing', 'adding a passkey is off', userId);
     let signedIn;
     try {
-      signedIn = await oidc.finish(taken.flow, returned);
+      signedIn = await oidc.finish(taken.flow, returned, { keepAccessToken: adding });
     } catch (error) {
       if (!(error instanceof SignInFailed) || error.failure === 'provider_unavailable') throw error;
       throw failed(error.failure, error.message, userId);
@@ -348,7 +359,7 @@ export function createSignIn({
     const refusal =
       personId === undefined
         ? 'other_person'
-        : stepUpRefusal(pending, { userId: personId, evidence }, { passkeyRequired: false });
+        : stepUpRefusal(pending, { userId: personId, evidence }, { passkeyRequired: adding });
     if (refusal !== undefined) {
       throw failed(refusal, 'the fresh sign-in does not stand for the challenge', userId);
     }
@@ -373,6 +384,13 @@ export function createSignIn({
           : failed('challenge_missing', 'the challenge could not be recorded', userId);
       }
       // The row as it was, signed as retired, last of the locks (S207 GM-4): put back, it finds nothing for the old cookie.
+      if (adding) {
+        const { accessToken } = signedIn;
+        if (additions === undefined || accessToken === undefined) {
+          throw failed('token_invalid', 'the sign-in came back with no token for the login service', userId);
+        }
+        await additions.steppedUp(tx, { challengeId, sessionId, userId, accessToken });
+      }
       await platform.record(tx as unknown as PlatformTransaction, sessionRotatedEvent(rotated.retired, clock.now()));
       return { userId, sessionId, cookie: rotated.cookie, returnTo: taken.returnTo, stepUpChallengeId: challengeId };
     });
@@ -406,9 +424,17 @@ export function createSignIn({
         if (await stepUpsSpent(tx, found.userId, mostStepUps)) {
           throw new StepUpFailed('step_ups_spent', "the person's step-ups for the day are spent", found.userId);
         }
+        // SA6: a passkey's addition, while adding one is off, is never begun.
+        if (found.action === PASSKEY_ADD_ACTION && additions === undefined) {
+          throw new StepUpFailed('challenge_missing', 'adding a passkey is off');
+        }
         return found;
       });
-      const { url, flow } = await oidc.start({ prompt: 'login', nonce: pending.nonce });
+      const { url, flow } = await oidc.start({
+        prompt: 'login',
+        nonce: pending.nonce,
+        ...(pending.action === PASSKEY_ADD_ACTION && { zitadelApi: true }),
+      });
       const flowId = await limited((tx) => flows.save(tx, flow, returnTo, pending.challengeId));
       return { url, flowId };
     },

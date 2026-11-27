@@ -209,8 +209,14 @@ export const REASON_CODES = {
     "The partner's message didn't carry a signature that holds, so it was refused and nothing was taken in.",
   PARTNER_UNAVAILABLE:
     "The payment partner didn't answer, or none is set up here, so nothing was done at the partner. Try again in a few minutes.",
+  PASSKEY_REFUSED:
+    "The login service didn't accept the new passkey, so it was not added and nothing else changed. Start adding the passkey again in Agent X.",
   PASSKEY_REQUIRED:
     'Your role here is admin or finance approver, which needs a passkey, and this session was signed in without one, so the request is refused. Sign out, then sign in again with your passkey (a security key, or Windows Hello).',
+  PASSKEY_TICKET_ALREADY_ISSUED:
+    "The page's one-time link for adding the passkey was already given out for this request, and can't be shown again. Start adding the passkey again.",
+  PASSKEY_TICKET_INVALID:
+    'This link for adding a passkey has run out, or was used already, so nothing was changed. Go back to Agent X and start adding the passkey again.',
   PAYEE_CHANGE_NOT_YOURS:
     'Only the admin who registered these bank details can confirm them, so nothing was changed. Ask them to confirm it, or withdraw the change and register the details again.',
   PAYEE_REGISTRATIONS_SPENT:

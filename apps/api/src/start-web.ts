@@ -4,6 +4,8 @@ import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import { createAgentKeyCheck, createConnectionTokenCheck } from '@agentx/core/modules/agents';
 import {
   createOidcClient,
+  createOwnPasskeys,
+  createPasskeyAdditions,
   createSignIn,
   createAcceptanceConfirmations,
   createInvitationAcceptance,
@@ -81,6 +83,7 @@ import { createMembersList } from './members.ts';
 import { createMyActivity } from './my-activity.ts';
 import { createMyOrganizations } from './my-organizations.ts';
 import { createLogSample } from './log-sample.ts';
+import type { PasskeyAdditionRoutes } from './passkey-additions.ts';
 import { buildServer } from './server.ts';
 import { createOrganizationChanges } from './organization-changes.ts';
 import { createSupplierChanges } from './supplier-changes.ts';
@@ -95,7 +98,9 @@ import type { HealthCheck } from './health.ts';
 
 /**
  * The console's sign-in (ADR-003 §5), when the config names a login service;
- * off otherwise (B2-6 switches it on for staging).
+ * off otherwise (B2-6 switches it on for staging). With it, passkeys added
+ * inside Agent X (SA6), where the config names the add-a-passkey page's origin;
+ * off otherwise, the default.
  */
 function signInFrom(
   config: Config,
@@ -105,22 +110,37 @@ function signInFrom(
   challenges: StepUpChallenges,
   keys: KeyProvider,
   logger: Logger,
-): SignIn | undefined {
-  if (config.signIn === undefined) return undefined;
+): { readonly signIn: SignIn | undefined; readonly adding: PasskeyAdditionRoutes | undefined } {
+  if (config.signIn === undefined) return { signIn: undefined, adding: undefined };
   const { issuer, clientId, clientSecret, internalOrigin } = config.signIn;
-  return createSignIn({
+  const fetch = createOutboundFetch(config.outbound.allowedOrigins);
+  const oidc = createOidcClient({
+    settings: {
+      issuer,
+      clientId,
+      clientSecret,
+      redirectUri: `${config.http.publicOrigin}/v1/auth/callback`,
+      internalOrigin,
+    },
+    fetch,
+    clock: systemClock,
+  });
+  const additions =
+    config.addPasskey === undefined
+      ? undefined
+      : createPasskeyAdditions({
+          database,
+          challenges,
+          passkeys: createOwnPasskeys({ issuer, internalOrigin, fetch }),
+          revoke: oidc.revoke.bind(oidc),
+          keys,
+          ids: uuidV7Ids,
+          clock: systemClock,
+          logger,
+        });
+  const signIn = createSignIn({
     db: database,
-    oidc: createOidcClient({
-      settings: {
-        issuer,
-        clientId,
-        clientSecret,
-        redirectUri: `${config.http.publicOrigin}/v1/auth/callback`,
-        internalOrigin,
-      },
-      fetch: createOutboundFetch(config.outbound.allowedOrigins),
-      clock: systemClock,
-    }),
+    oidc,
     flows,
     sessions,
     challenges,
@@ -128,7 +148,15 @@ function signInFrom(
     clock: systemClock,
     keys,
     logger,
+    additions,
   });
+  return {
+    signIn,
+    adding:
+      additions === undefined || config.addPasskey === undefined
+        ? undefined
+        : { additions, origin: config.addPasskey.origin },
+  };
 }
 
 /** Builds the server and listens. Returns nothing, the failure logged and everything closed, when it can't listen. */
@@ -150,7 +178,7 @@ export async function startWeb(
   /** What must end while the pool is open when it can't listen. */
   whenRefused: () => Promise<void>,
 ): Promise<FastifyInstance | undefined> {
-  const signIn = signInFrom(config, database, flows, sessions, challenges, keys, logger);
+  const { signIn, adding } = signInFrom(config, database, flows, sessions, challenges, keys, logger);
   // An agent's key, checked before its request goes on (C2-1); on the MCP endpoint, an MCP connection's access token
   // too, while the OAuth server is on (6E3a).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
@@ -209,6 +237,7 @@ export async function startWeb(
     consoleFiles: await loadConsoleFiles(config.environment, logger),
     // SA1: the login service's public host gets the API's 404 alone, never our console or routes.
     loginOrigin: config.signIn?.issuer,
+    passkeyAdditions: adding,
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(
         database,

@@ -81,6 +81,12 @@
 //   of any kind removed in the 7 days before (removing the person's first,
 //   then adding one's own). When the factors can't be read (no reset token
 //   set, or an answer that can't be judged), it counts: fails closed.
+//   SA6: but not a passkey the person added inside Agent X, signed in again
+//   with a passkey they already held (passkey-addition.ts): exactly that
+//   passkey, for that person and login, recorded on the platform chain before
+//   the key was confirmed and no more than 15 minutes before, its record used
+//   by no other copy (`ownPasskey` on the platform chain's record names it).
+//   A factor removed in the 7 days before still counts first, as above.
 // - A second factor of any kind removed, even by the person, counts too when
 //   a key was added in the 7 days before (the S68 review; F1's for an app
 //   code): adding one's own key and then removing the person's factor,
@@ -133,6 +139,7 @@ import {
   PASSKEY_ADDED_EVENTS,
   SECOND_FACTOR_REMOVED_EVENTS,
 } from '../domain/idp-event.ts';
+import { OWN_PASSKEY_REGISTERED, ownKeyExempts } from '../domain/passkey-addition.ts';
 import { restrictedUntil } from '../domain/removal-restriction.ts';
 import { toldOfReset, toldThePersonAlone } from './grant-notices.ts';
 import type { SecondFactorsHeld } from './idp-factors.ts';
@@ -180,6 +187,14 @@ const ACTOR = { type: 'system', id: 'api' } as const;
 
 /** No actor's change is ours: what a deployment that names none gets. */
 const NONE_OURS: OurLoginChanges = { actors: new Set(), serviceUsers: new Set() };
+
+/** Whether an event counts toward B6-3d's restriction, and the person's own passkey that so doesn't (SA6). */
+interface Judged {
+  readonly counts: boolean;
+  readonly ownPasskey?: string;
+}
+const COUNTS: Judged = { counts: true };
+const NOT_COUNTED: Judged = { counts: false };
 
 /** The lock each record's transaction takes first, named for the event: only copiers take it (SA2). */
 export const COPY_LOCK = 'idp-event-copy';
@@ -262,19 +277,42 @@ export function createIdpEventCopier({
   };
 
   /**
-   * Whether a key added counts toward the restriction: unless the person
-   * holds it alone, as above; and when that can't be read, it counts.
+   * The passkey the event confirmed, when it is the person's own addition inside Agent X (SA6, ownKeyExempts): that
+   * exact passkey recorded for this person and this login, at or below the platform chain's head and dated no later than
+   * now, within the window, and its record used by no other copy; otherwise undefined.
    */
-  const keyAddedCounts = async (event: IdpEvent, person: string): Promise<boolean> => {
-    if (await copiedWithinWeek(event, person, SECOND_FACTOR_REMOVED_EVENTS)) return true;
-    if (factors === undefined) return true;
+  const ownPasskeyOf = async (event: IdpEvent, person: string): Promise<string | undefined> => {
+    const { passkeyId } = event;
+    if (passkeyId === undefined || event.aggregateType !== 'user') return undefined;
+    const recordedAt = await latestPlatformTimeOf(database, 'at', [
+      {
+        action: OWN_PASSKEY_REGISTERED,
+        facts: { person, subject: event.aggregateId, passkey: passkeyId },
+        belowHead: true,
+        notAhead: 'at',
+      },
+    ]);
+    const usedBefore = await platformEventWith(database, IDP_EVENT_COPIED, { person, ownPasskey: passkeyId });
+    return ownKeyExempts({ recordedAt, usedBefore }, event.createdAt) ? passkeyId : undefined;
+  };
+
+  /**
+   * Whether a key added counts toward the restriction: unless the person
+   * added it inside Agent X, or holds it alone, as above; and when that can't
+   * be read, it counts.
+   */
+  const keyAddedCounts = async (event: IdpEvent, person: string): Promise<Judged> => {
+    if (await copiedWithinWeek(event, person, SECOND_FACTOR_REMOVED_EVENTS)) return COUNTS;
+    const ownPasskey = await ownPasskeyOf(event, person);
+    if (ownPasskey !== undefined) return { counts: false, ownPasskey };
+    if (factors === undefined) return COUNTS;
     try {
       const held = await factors.secondFactorsHeld(event.aggregateId);
       // No key listed: the lists trail the event that added one, so what else is held isn't known.
-      return held.others > 0 || held.keys !== 1;
+      return { counts: held.others > 0 || held.keys !== 1 };
     } catch (error) {
       logger.warn('idp_events.keys_unread', { err: error });
-      return true;
+      return COUNTS;
     }
   };
 
@@ -284,14 +322,15 @@ export function createIdpEventCopier({
    * factor for another's key). The addition is copied first, as the feed
    * gives events in time order.
    */
-  const removalCounts = (event: IdpEvent, person: string): Promise<boolean> =>
-    copiedWithinWeek(event, person, PASSKEY_ADDED_EVENTS);
+  const removalCounts = async (event: IdpEvent, person: string): Promise<Judged> => ({
+    counts: await copiedWithinWeek(event, person, PASSKEY_ADDED_EVENTS),
+  });
 
   /** Whether the event counts toward the restriction: a key added or a factor removed, as above; nothing else. */
-  const counted = (event: IdpEvent, person: string): Promise<boolean> | boolean => {
+  const counted = (event: IdpEvent, person: string): Promise<Judged> | Judged => {
     if (PASSKEY_ADDED_EVENTS.includes(event.type)) return keyAddedCounts(event, person);
     if (SECOND_FACTOR_REMOVED_EVENTS.includes(event.type)) return removalCounts(event, person);
-    return false;
+    return NOT_COUNTED;
   };
 
   /**
@@ -331,11 +370,14 @@ export function createIdpEventCopier({
     orgId: string | null,
     {
       counts,
+      ownPasskey,
       tells,
       alsoAsked,
       endedThisRun,
     }: {
       readonly counts: boolean;
+      /** The person's own passkey added inside Agent X the event confirmed, which so counts toward nothing (SA6). */
+      readonly ownPasskey: string | undefined;
       readonly tells: boolean;
       readonly alsoAsked: number;
       readonly endedThisRun: Set<string>;
@@ -354,6 +396,7 @@ export function createIdpEventCopier({
       person: person ?? null,
       ...(event.aggregateType === 'user' && { subject: event.aggregateId }),
       ...(counts && { counts: 'yes' }),
+      ...(ownPasskey !== undefined && { ownPasskey }),
       ...(tells && { told: 'yes' }),
       ...(alsoAsked > 0 && { alsoAsked }),
     };
@@ -429,14 +472,14 @@ export function createIdpEventCopier({
     const orgs = person === undefined ? [] : await organizationsOf(database, person);
     // Decided once, on the event's first copy: a run that stopped part-way decides nothing again.
     const copiedBefore = await platformEventWith(database, IDP_EVENT_COPIED, { event: keyOf(event) });
-    const counts = !copiedBefore && person !== undefined ? await counted(event, person) : false;
+    const { counts, ownPasskey } = !copiedBefore && person !== undefined ? await counted(event, person) : NOT_COUNTED;
     let tells =
       !copiedBefore && person !== undefined && orgs.length > 0 && isToldOnlyToThePerson(event.eventClass)
         ? await tellsAlone(event, person)
         : false;
     let written = 0;
     for (const orgId of orgs.length === 0 ? [null] : orgs) {
-      if (await copyOnce(event, person, orgId, { counts, tells, alsoAsked, endedThisRun })) written += 1;
+      if (await copyOnce(event, person, orgId, { counts, ownPasskey, tells, alsoAsked, endedThisRun })) written += 1;
       // Told once, by the first organisation's copy: the person is one person whatever organisations they are in.
       tells = false;
     }

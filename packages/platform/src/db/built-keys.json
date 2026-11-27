@@ -38,6 +38,8 @@
   {"table":"identity.login_flows","name":"login_flows_pkey","definition":"PRIMARY KEY (cookie_hash)"},
   {"table":"identity.membership_grants","name":"membership_grants_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"identity.memberships","name":"memberships_pkey","definition":"PRIMARY KEY (org_id, id)"},
+  {"table":"identity.passkey_additions","name":"passkey_additions_pkey","definition":"PRIMARY KEY (id)"},
+  {"table":"identity.passkey_additions","name":"passkey_additions_ticket_hash_key","definition":"UNIQUE (ticket_hash)"},
   {"table":"identity.registered_contacts","name":"registered_contacts_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"identity.session_emails","name":"session_emails_pkey","definition":"PRIMARY KEY (session_id)"},
   {"table":"identity.sessions","name":"one_session_per_cookie","definition":"UNIQUE (cookie_hash)"},

@@ -30,7 +30,9 @@ import {
   keptPersonReader,
   LONGEST_ABSOLUTE_SECONDS,
   membersFor,
+  createOidcClient,
   resetLinkFor,
+  sweepPasskeyAdditions,
 } from '@agentx/core/modules/identity';
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
@@ -40,6 +42,7 @@ import { type Clock, HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared
 import { CHAIN_START, createDigestLog, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
+import type { Config } from '@agentx/platform/config';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 
 import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
@@ -298,6 +301,27 @@ const nowMs = (): number => systemClock.now().getTime();
  * The `jobs` side, made but not started. The hand-off and the payment checks
  * come back too, for /health.
  */
+/**
+ * SA6: how the passkey additions' sweep takes back a person's token it finds, through the login service's revocation
+ * endpoint with the API's own client; none where sign-in is off (the sweep says so for any token it deletes).
+ */
+function revokeOf(config: Config): ((accessToken: string) => Promise<boolean>) | undefined {
+  if (config.signIn === undefined) return undefined;
+  const { issuer, clientId, clientSecret, internalOrigin } = config.signIn;
+  const oidc = createOidcClient({
+    settings: {
+      issuer,
+      clientId,
+      clientSecret,
+      redirectUri: `${config.http.publicOrigin}/v1/auth/callback`,
+      internalOrigin,
+    },
+    fetch: createOutboundFetch(config.outbound.allowedOrigins),
+    clock: systemClock,
+  });
+  return oidc.revoke.bind(oidc);
+}
+
 export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts, leadership: Leadership) {
   const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch, witness } =
     parts;
@@ -604,6 +628,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     sweepRows('identity.session', (most) => sessions.sweep(database, most)),
     // Step-up challenges past their ten minutes and five more, so a late return reads as run out (B3-1, E6-P2, E7).
     sweepRows('identity.step_up_challenge', (most) => challenges.sweep(database, most)),
+    // Passkeys added inside Agent X left unfinished, past their minutes (SA6), whether or not adding is on.
+    sweepRows('identity.passkey_addition', (most) =>
+      sweepPasskeyAdditions({ database, keys, revoke: revokeOf(config), clock: systemClock, logger }, most),
+    ),
     // The security events past the retention the config names (B2-5a).
     sweepRows('security.event', (most) => securityEvents.sweep(database, most)),
     // Each organisation's own security events past the same retention, inside its own transaction (6E1b, CO7b).

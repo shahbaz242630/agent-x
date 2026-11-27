@@ -53,6 +53,14 @@ const DRAFT = { draft: true } as const;
 
 /** Every step-up action, by its ask's operation. */
 const WALK: Readonly<Record<string, Walked>> = {
+  // SA6: a passkey added inside Agent X; its confirm, the page's one-time ticket, names the step-up in its path.
+  'passkey.add': {
+    confirmed: DRAFT,
+    proof: [
+      `${IDENTITY}passkey-additions.db.test.ts`,
+      'SEC-HA-02 refuses the ticket before the person signs in again, to another session, or once the step-up ran out',
+    ],
+  },
   'members.role': {
     confirmed: { body: { role: 'developer' } },
     proof: [
