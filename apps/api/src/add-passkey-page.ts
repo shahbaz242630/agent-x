@@ -57,8 +57,11 @@ export const ADD_PASSKEY_SCRIPT = `'use strict';
     say('This page only works from the link Agent X opens.' + startAgain);
     return;
   }
+  // A device holds one passkey per account: the new one goes on another (S221, the partner's Windows Hello refused).
+  const elsewhere =
+    ' Make it on a different device from your current passkey: choose your phone (scan the code) or a security key.';
   button.hidden = false;
-  say("Press the button, then follow your device's prompt to make your new passkey.");
+  say("Press the button, then follow your device's prompt to make your new passkey." + elsewhere);
   button.addEventListener('click', async () => {
     button.disabled = true;
     try {
@@ -79,8 +82,17 @@ export const ADD_PASSKEY_SCRIPT = `'use strict';
       let made;
       try {
         made = await navigator.credentials.create({ publicKey });
-      } catch {
-        say('No passkey was made.' + startAgain);
+      } catch (error) {
+        const name = error && error.name;
+        say(
+          name === 'InvalidStateError'
+            ? "This device already holds your passkey for Agent X, so it can't make a second one here." +
+                elsewhere +
+                startAgain
+            : name === 'NotAllowedError'
+              ? 'No passkey was made: the prompt was closed or took too long.' + startAgain
+              : 'No passkey was made.' + startAgain,
+        );
         return;
       }
       say('Saving your new passkey...');
